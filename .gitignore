@@ -1,0 +1,67 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tsukiko Local Data & Logs
+logs/*.log
+logs/*.jsonl
+data/conversations/*
+data/perception/*
+data/memory/*.db
+data/memory/*.sqlite
+!data/memory/.gitkeep
+!data/conversations/.gitkeep
+!data/perception/.gitkeep
+
+# Models (Local GGUF / ONNX / Binaries)
+models/*
+!models/.gitkeep
+!models/README.md
+
+# OS specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store

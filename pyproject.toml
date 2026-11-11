@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=65.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tsukiko"
+version = "0.1.0"
+description = "Tsukiko - Fully offline-first AI desktop companion for Windows 11"
+authors = [{ name = "Deepak & Tsukiko Architect" }]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7.0",
+    "pyyaml>=6.0.1",
+    "psutil>=5.9.8",
+    "colorama>=0.4.6",
+]
+
+[project.optional-dependencies]
+ui = [
+    "PySide6>=6.6.0",
+    "qasync>=0.27.1",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+tsukiko = "app.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --strict-markers"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

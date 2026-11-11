@@ -1,0 +1,5 @@
+-r base.txt
+# Inference engine candidates evaluated during Model Selection phase
+# CPU / CUDA acceleration options:
+# - llama-cpp-python (with cu12x prebuilt wheel or CPU wheel)
+# - onnxruntime / onnxruntime-genai

@@ -1,0 +1,6 @@
+-r base.txt
+sounddevice>=0.4.6
+numpy>=1.24.0
+# Local offline TTS / STT candidate engines:
+# - faster-whisper or whisper.cpp
+# - piper-tts or pyttsx3 (native Windows SAPI5 offline fallback)

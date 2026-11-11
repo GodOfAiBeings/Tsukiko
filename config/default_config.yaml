@@ -1,0 +1,75 @@
+# Tsukiko - Core Configuration
+# All coordinates and values are tuned for AMD Ryzen 5 5600H + NVIDIA RTX 3050 4GB Laptop
+
+app:
+  name: "Tsukiko"
+  version: "0.1.0"
+  log_level: "INFO"
+  debug: false
+
+privacy:
+  local_only: true
+  allow_external_telemetry: false
+  allow_cloud_fallback: false
+
+ui:
+  theme: "silver-blue-moonlight"
+  always_on_top: true
+  default_corner: "bottom-right"
+  margin_x: 24
+  margin_y: 48
+  companion_size: 96
+  fps: 30
+  idle_animation: true
+  accent_color: "#7FB3D5"
+  glow_color: "#D4E6F1"
+  background_opacity: 0.92
+
+ai:
+  engine: "llama_cpp"
+  model_path: null # User configures local GGUF
+  vision_model_path: null # Local vision GGUF/checkpoint
+  context_window: 4096
+  temperature: 0.7
+  top_p: 0.9
+  repeat_penalty: 1.1
+  gpu_layers: 0 # Automatically tuned by Resource Manager (max safe layers)
+  max_vram_mb: 2800 # Safe ceiling on 4GB VRAM
+  lazy_load: true
+  unload_timeout_seconds: 300
+
+memory:
+  db_path: "data/memory/tsukiko_memory.sqlite"
+  conversation_dir: "data/conversations"
+  auto_summarize_threshold: 20
+  duplicate_similarity_threshold: 0.85
+
+perception:
+  screen_sharing_enabled: false # STRICT PRIVACY: OFF by default
+  capture_method: "windows_native" # Windows Graphics Capture / MSS fallback
+  target_fps: 10
+  change_threshold: 0.05
+  enable_ocr: true
+  enable_ui_automation: true
+  excluded_windows:
+    - "*1Password*"
+    - "*Bitwarden*"
+    - "*KeePass*"
+    - "*Private Browsing*"
+    - "*Incognito*"
+  save_raw_recordings: false # Raw recordings disabled by default
+
+voice:
+  mic_enabled: false # STRICT PRIVACY: OFF by default
+  speech_synthesis_enabled: false
+  stt_engine: "whisper"
+  stt_model_size: "tiny.en"
+  tts_engine: "piper"
+  tts_voice: "en_US-lessac-medium"
+  speed: 1.0
+  volume: 0.85
+
+desktop_control:
+  enabled: false # Strictly disabled in early phases
+  require_explicit_confirmation: true
+  allowed_actions: []
