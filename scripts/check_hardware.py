@@ -18,9 +18,9 @@ logger = get_logger("SYSTEM")
 
 
 def main() -> int:
-    print("=" * 60)
+    print("=" * 65)
     print("           TSUKIKO HARDWARE & ENVIRONMENT AUDIT            ")
-    print("=" * 60)
+    print("=" * 65)
 
     profile = HardwareInspector.inspect()
 
@@ -51,13 +51,33 @@ def main() -> int:
     else:
         print("  No NVIDIA GPU detected or nvidia-smi unavailable.")
 
+    print("\n[Local ML Runtime Support]:")
+    print(f"  llama-cpp-python: installed={profile.frameworks.llama_cpp_installed}, cuda_offload={profile.frameworks.llama_cpp_cuda_supported}")
+    print(f"  torch:            installed={profile.frameworks.torch_installed}, cuda_available={profile.frameworks.torch_cuda_supported}")
+    print(f"  onnxruntime:      installed={profile.frameworks.onnxruntime_installed}, cuda_provider={profile.frameworks.onnxruntime_cuda_supported}")
+
+    print("\n[Realistic Model VRAM Budget Breakdown (Sample 3B Q4_K_M)]:")
+    sample_est = HardwareInspector.estimate_model_vram_footprint(
+        file_size_mb=2000,
+        context_window=4096,
+        model_name="Llama-3.2-3B-Instruct-Q4_K_M",
+        available_vram_mb=profile.recommended_max_vram_mb or 2800,
+    )
+    print(f"  Model GGUF File Size:     {sample_est.file_size_mb} MB")
+    print(f"  Context Window:           {sample_est.context_window} tokens")
+    print(f"  Estimated KV Cache:       +{sample_est.estimated_kv_cache_mb} MB")
+    print(f"  CUDA Runtime & Buffers:   +{sample_est.runtime_overhead_mb} MB")
+    print(f"  Total VRAM Required:      {sample_est.total_vram_required_mb} MB")
+    print(f"  Fits Safe VRAM Budget:    {sample_est.fits_in_vram} ({sample_est.recommended_offload_strategy})")
+    print(f"  Assessment:               {sample_est.details}")
+
     print("\n[Resource Allocator Recommendations]:")
     print(f"  Max Recommended VRAM for LLM:  {profile.recommended_max_vram_mb} MB")
     print(f"  Max Recommended RAM for LLM:   {profile.recommended_max_ram_mb} MB")
     for r in profile.recommendations:
         print(f"  - {r}")
 
-    print("=" * 60)
+    print("=" * 65)
     return 0
 
 

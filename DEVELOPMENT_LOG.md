@@ -1,53 +1,45 @@
 # Tsukiko Development Log
 
-## Phase 1: Foundation (Completed - 2026-11-11)
+## Phase 1: Foundation (Initial Build: 2026-11-11 | Audit & Repair: 2026-11-11)
 
-### Objectives Achieved:
-1. **Workstation Environment Audit:**
-   * Detected Windows 11 (Build 26200).
-   * Verified Python 3.11.9 (64-bit) at `C:\Users\deepa\AppData\Local\Programs\Python\Python311\python.exe`.
-   * Verified Git 2.56.0 at `C:\Program Files\Git\cmd\git.exe`.
-   * Identified hardware constraints: AMD Ryzen 5 5600H (6 cores, 12 threads), 16 GB DDR4 RAM (~6 GB free), NVIDIA RTX 3050 Laptop GPU (4 GB VRAM, Driver 616.56, ~3.6 GB free VRAM), 137.5 GB free SSD storage.
-   * Noted compiler availability: `nvcc` and `cl.exe` are not in system PATH; precompiled binary wheels or CPU/CUDA runtime packages must be used.
+### Status: Complete, Audited & Verified
 
-2. **Isolated Environment & Dependency Management:**
-   * Established `.venv` with Python 3.11.
-   * Created modular dependency layers in `requirements/`:
-     * `requirements/base.txt`: Core validation, logging, hardware inspection, and testing tools.
-     * `requirements/ui.txt`: PySide6 & desktop interface dependencies.
-     * `requirements/ai.txt`: Local model execution dependencies.
-     * `requirements/perception.txt`: Screen capture, OCR, and image analysis.
-     * `requirements/voice.txt`: Offline speech recognition and synthesis.
-     * `requirements/dev.txt`: Development and linting tools.
-   * Configured `pyproject.toml` and `.gitignore`.
+---
 
-3. **Core Systems & Subsystem Stubs:**
-   * **Structured Logging (`app/core/logging/`):**
-     * Colorized console output with custom component badges (`[SYSTEM]`, `[BRAIN]`, `[MEMORY]`, `[PERCEPTION]`, `[VOICE]`, `[UI]`, `[RESOURCE]`).
-     * Rotating text logs (`logs/tsukiko.log`) and structured JSONL streams (`logs/tsukiko.jsonl`).
-     * Added `shutdown_logging()` handler for safe Windows file handle release.
-   * **Configuration Management (`app/core/config/`):**
-     * Type-safe Pydantic models in `settings.py`.
-     * Default YAML specification in `config/default_config.yaml`.
-     * Personality specification in `config/personality.yaml`.
-     * Strict privacy defaults: `local_only=True`, `screen_sharing_enabled=False`, `mic_enabled=False`, `desktop_control.enabled=False`.
-     * Environment variable override support (`TSUKIKO_*`).
-   * **Hardware & Resource Manager (`app/core/resource_manager/`):**
-     * Built `HardwareInspector` and diagnostic script `scripts/check_hardware.py`.
-     * Dynamic VRAM ceiling computation for RTX 3050 (~2.8 GB max safe layer offload).
-     * System RAM warning thresholds and model offload recommendations.
-   * **Central Orchestrator (`app/core/orchestrator/`):**
-     * Composition root coordinating subsystem lifecycle and state.
-   * **Application Entry Point (`app/main.py`):**
-     * CLI argument parser supporting `--config`, `--headless`, `--check-hardware`, `--log-level`, and `--version`.
+### Audit & Defect Repair Ledger (2026-11-11)
 
-4. **Automated Verification:**
-   * Created test suite in `tests/`:
-     * `test_config.py` (3 tests): Verifies privacy defaults, YAML serialization, and env overrides.
-     * `test_entrypoint.py` (2 tests): Verifies CLI argument parsing and orchestrator lifecycle transitions.
-     * `test_hardware.py` (2 tests): Verifies CPU, RAM, storage, and safe VRAM budgeting.
-     * `test_logging.py` (1 test): Verifies text rotation, JSONL formatting, and component tags.
-   * Results: **8 passed in 0.58 seconds** with 0 errors.
+An in-depth engineering audit was conducted on the Phase 1 codebase, identifying 10 defects that were investigated, repaired, and confirmed via 16 regression tests.
 
-5. **Project Documentation:**
-   * Authored `README.md`, `INSTALLATION.md`, `ARCHITECTURE.md`, `MODEL_COMPATIBILITY.md`, `PRIVACY.md`, `TROUBLESHOOTING.md`, and `DEVELOPMENT_LOG.md`.
+| Defect # | Component | Root Cause | Resolution | Regression Test |
+|---|---|---|---|---|
+| **1** | `app/main.py` | `Any` referenced in `handle_exit` without import from `typing`. | Added `from typing import Any` and safe signal wrapping. | `tests/test_entrypoint.py::test_main_module_exports_and_imports` |
+| **2** | `app/core/orchestrator/engine.py` | Standard `threading.Lock()` caused reentrant deadlock when `start()` called `initialize()`. | Migrated to `threading.RLock()` and added idempotent state guards. | `tests/test_entrypoint.py::test_orchestrator_direct_start_reentrancy` |
+| **3** | `app/core/config/settings.py` | `PrivacyConfig.validate_local_only()` had `pass` with no assertion. | Added strict `ValidationError` if `local_only=False`, `allow_external_telemetry=True`, or `allow_cloud_fallback=True`. | `tests/test_config.py::test_privacy_enforcement_raises_on_invalid_settings` |
+| **4** | `app/core/resource_manager/hardware.py` | Hardware inspection only checked `torch.cuda` rather than target runtime `llama.cpp`. | Implemented `check_framework_compatibility()` inspecting `llama_cpp`, `torch`, and `onnxruntime` distinctly. | `tests/test_hardware.py::test_framework_compatibility_distinguishes_llama_cpp_and_torch` |
+| **5** | `tests/conftest.py` | Fixture `clean_env` failed to restore mutated environment variable values across tests. | Updated fixture to snapshot and fully restore `os.environ` and call `reset_config()`. | `tests/test_config.py::test_env_restoration_fixture_behavior` |
+| **6** | `app/core/logging/logger.py` | Logging initialization did not reconfigure if destination directory changed, causing log contamination. | Replaced static boolean with directory tracking, clean handler re-routing, and `get_current_log_dir()`. | `tests/test_logging.py::test_logging_reconfiguration_different_destinations` |
+| **7** | `app/core/config/settings.py` | Env overrides set raw strings into configuration dictionary without parsing booleans/numbers. | Implemented `_parse_env_value()` converting `true`/`false`/`1`/`0`/integers/floats. | `tests/test_config.py::test_config_env_variable_overrides_types` |
+| **8** | `app/core/resource_manager/hardware.py` | `nvidia-smi` CSV parser crashed on `[N/A]`, `[Not Supported]`, or malformed non-numeric rows. | Implemented `_safe_parse_int()` and `_safe_parse_float()` with fallback defaults. | `tests/test_hardware.py::test_nvidia_smi_parsing_handles_missing_and_unexpected_metrics` |
+| **9** | `app/core/resource_manager/hardware.py` | VRAM budget claimed model fits solely based on file size, ignoring KV cache and runtime overhead. | Implemented `estimate_model_vram_footprint()` adding KV cache (+450MB) and CUDA buffers (+500MB). | `tests/test_hardware.py::test_model_vram_estimation_accounts_for_kv_cache_and_overhead` |
+| **10** | `app/main.py` | Qt application shutdown did not cleanly terminate the orchestrator lifecycle. | Connected `qt_app.aboutToQuit` directly to `orchestrator.stop` and added graceful headless fallback. | `tests/test_entrypoint.py::test_orchestrator_lifecycle` |
+
+---
+
+### Implementation Status Matrix
+
+| Subsystem / Feature | Classification | Notes |
+|---|---|---|
+| Workstation Hardware Profiler | **Implemented & Tested** | Queries AMD Ryzen CPU, RAM, RTX 3050 VRAM, and storage with safe fallbacks. |
+| Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead. |
+| Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
+| Strict Privacy Contract | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and offline local-only operation. |
+| Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
+| Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`). |
+| CLI Interface | **Implemented & Tested** | Flags `--version`, `--help`, `--check-hardware`, `--headless`, `--log-level`. |
+| Automated Pytest Test Suite | **Implemented & Tested** | 16 unit and regression tests passing in 1.44s. |
+| PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
+| llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
+| SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
+| Desktop Perception Pipeline | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Capture OFF by default. |
+| Offline Voice Subsystem (STT/TTS) | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Voice OFF by default. |
+| Desktop Control Permission Guard | *Designed (Phase 7)* | Staged in `app/desktop/permissions/`. Control strictly disabled. |

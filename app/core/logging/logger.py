@@ -112,8 +112,10 @@ class TsukikoLogger(logging.LoggerAdapter):
         return msg, kwargs
 
 
-_INIT_LOCK = threading.Lock()
+_INIT_LOCK = threading.RLock()
 _INITIALIZED = False
+_CURRENT_LOG_DIR: Optional[Path] = None
+_CURRENT_LOG_LEVEL: Optional[str] = None
 
 
 def setup_logging(
@@ -122,21 +124,33 @@ def setup_logging(
     max_file_size_bytes: int = 5 * 1024 * 1024,
     backup_count: int = 5,
     enable_jsonl: bool = True,
+    force: bool = False,
 ) -> None:
-    """Configures global root logging with rotating text and jsonl files."""
-    global _INITIALIZED
+    """Configures global root logging with rotating text and jsonl files.
+
+    If logging is already initialized, it will be reconfigured if force=True or if the
+    target log_dir / log_level has changed.
+    """
+    global _INITIALIZED, _CURRENT_LOG_DIR, _CURRENT_LOG_LEVEL
     with _INIT_LOCK:
-        if _INITIALIZED:
-            return
+        resolved_log_dir = Path(log_dir).resolve()
+        requested_level = log_level.upper()
+
+        if _INITIALIZED and not force:
+            if _CURRENT_LOG_DIR == resolved_log_dir and _CURRENT_LOG_LEVEL == requested_level:
+                return
+
+        # Cleanly shut down existing handlers before reconfiguring to release file locks
+        shutdown_logging()
 
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
 
-        numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+        numeric_level = getattr(logging, requested_level, logging.INFO)
         root = logging.getLogger()
         root.setLevel(numeric_level)
 
-        # Clear any existing root handlers to avoid double output
+        # Clear any residual handlers
         for h in list(root.handlers):
             root.removeHandler(h)
 
@@ -177,11 +191,13 @@ def setup_logging(
             root.addHandler(jsonl_handler)
 
         _INITIALIZED = True
+        _CURRENT_LOG_DIR = resolved_log_dir
+        _CURRENT_LOG_LEVEL = requested_level
 
 
 def shutdown_logging() -> None:
     """Closes and removes all handlers to release file locks (critical for Windows)."""
-    global _INITIALIZED
+    global _INITIALIZED, _CURRENT_LOG_DIR, _CURRENT_LOG_LEVEL
     with _INIT_LOCK:
         root = logging.getLogger()
         for h in list(root.handlers):
@@ -192,6 +208,14 @@ def shutdown_logging() -> None:
                 pass
             root.removeHandler(h)
         _INITIALIZED = False
+        _CURRENT_LOG_DIR = None
+        _CURRENT_LOG_LEVEL = None
+
+
+def get_current_log_dir() -> Optional[Path]:
+    """Returns the currently active log directory if logging is initialized."""
+    with _INIT_LOCK:
+        return _CURRENT_LOG_DIR
 
 
 def get_logger(component: str = "SYSTEM") -> TsukikoLogger:

@@ -11,6 +11,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Any, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -86,8 +87,13 @@ def main(args: list[str] | None = None) -> int:
         orchestrator.stop()
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, handle_exit)
-    signal.signal(signal.SIGTERM, handle_exit)
+    try:
+        signal.signal(signal.SIGINT, handle_exit)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, handle_exit)
+    except (ValueError, AttributeError):
+        # Signals can only be registered in the main thread of the main interpreter
+        pass
 
     if parsed.headless:
         logger.info("Running Tsukiko in HEADLESS mode (GUI disabled). Press Ctrl+C to terminate.")
@@ -128,6 +134,7 @@ def main(args: list[str] | None = None) -> int:
     # PySide6 GUI launch
     # In Phase 2, the Tsukiko Companion Window will be attached here
     qt_app = QApplication.instance() or QApplication(sys.argv)
+    qt_app.aboutToQuit.connect(orchestrator.stop)
     orchestrator.start()
     logger.info("GUI subsystem initialized. Ready for Phase 2 UI attachment.")
 

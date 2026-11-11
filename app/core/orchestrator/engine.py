@@ -23,7 +23,7 @@ class TsukikoOrchestrator:
         self.config = config or get_config()
         self.hardware_profile: Optional[HardwareProfile] = None
         self._is_running = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._status: Dict[str, Any] = {
             "state": "uninitialized",
             "brain": "not_loaded",
@@ -33,9 +33,13 @@ class TsukikoOrchestrator:
             "screen_sharing": False,
         }
 
-    def initialize(self) -> None:
+    def initialize(self, force: bool = False) -> None:
         """Inspects hardware, validates configurations, and initializes subsystem state."""
         with self._lock:
+            if self._status["state"] == "initialized" and not force:
+                logger.debug("Core Orchestrator is already initialized.")
+                return
+
             logger.info("Initializing Tsukiko Core Orchestrator...")
             self.hardware_profile = HardwareInspector.inspect()
             logger.info(
@@ -59,7 +63,11 @@ class TsukikoOrchestrator:
     def start(self) -> None:
         """Starts background monitoring and event loops."""
         with self._lock:
-            if not self._status["state"] == "initialized":
+            if self._is_running:
+                logger.debug("Core Orchestrator is already running.")
+                return
+
+            if self._status["state"] != "initialized":
                 self.initialize()
             self._is_running = True
             self._status["state"] = "running"
@@ -68,7 +76,7 @@ class TsukikoOrchestrator:
     def stop(self) -> None:
         """Gracefully shuts down all active subsystems."""
         with self._lock:
-            if not self._is_running:
+            if not self._is_running and self._status["state"] == "stopped":
                 return
             logger.info("Stopping Tsukiko Core Orchestrator...")
             self._is_running = False
@@ -78,7 +86,8 @@ class TsukikoOrchestrator:
 
     @property
     def is_running(self) -> bool:
-        return self._is_running
+        with self._lock:
+            return self._is_running
 
     def get_status(self) -> Dict[str, Any]:
         """Returns snapshot of current orchestrator subsystem statuses."""

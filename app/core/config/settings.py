@@ -29,8 +29,21 @@ class PrivacyConfig(BaseModel):
     @classmethod
     def validate_local_only(cls, v: bool) -> bool:
         if not v:
-            # We enforce warning/strict privacy invariant
-            pass
+            raise ValueError("Tsukiko is strictly offline-first: privacy.local_only must be True.")
+        return v
+
+    @field_validator("allow_external_telemetry")
+    @classmethod
+    def validate_no_telemetry(cls, v: bool) -> bool:
+        if v:
+            raise ValueError("External telemetry is forbidden by Tsukiko offline privacy contract.")
+        return v
+
+    @field_validator("allow_cloud_fallback")
+    @classmethod
+    def validate_no_cloud(cls, v: bool) -> bool:
+        if v:
+            raise ValueError("Cloud fallback is forbidden by Tsukiko offline privacy contract.")
         return v
 
 
@@ -140,9 +153,35 @@ def find_default_config_path() -> Path:
     return Path("config/default_config.yaml")
 
 
-def load_config(config_path: Optional[str | Path] = None) -> TsukikoConfig:
+def _parse_env_value(val: str) -> Any:
+    """Parses typed values (bool, int, float, None, str) from environment variable strings."""
+    stripped = val.strip()
+    lower = stripped.lower()
+    if lower in ("true", "yes", "1", "on"):
+        return True
+    if lower in ("false", "no", "0", "off"):
+        return False
+    if lower in ("none", "null"):
+        return None
+    try:
+        return int(stripped)
+    except ValueError:
+        pass
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+    if (stripped.startswith('"') and stripped.endswith('"')) or (stripped.startswith("'") and stripped.endswith("'")):
+        return stripped[1:-1]
+    return stripped
+
+
+def load_config(config_path: Optional[str | Path] = None, force_reload: bool = False) -> TsukikoConfig:
     """Loads configuration from YAML file and applies environment overrides."""
     global _CONFIG_INSTANCE
+    if _CONFIG_INSTANCE is not None and not force_reload and config_path is None:
+        return _CONFIG_INSTANCE
+
     resolved_path = Path(config_path) if config_path else find_default_config_path()
 
     raw_data: Dict[str, Any] = {}
@@ -158,12 +197,19 @@ def load_config(config_path: Optional[str | Path] = None) -> TsukikoConfig:
             parts = env_key[len("TSUKIKO_"):].lower().split("__")
             if len(parts) == 2:
                 section, key = parts
-                if section in raw_data and isinstance(raw_data[section], dict):
-                    raw_data[section][key] = env_val
+                if section not in raw_data or not isinstance(raw_data[section], dict):
+                    raw_data[section] = {}
+                raw_data[section][key] = _parse_env_value(env_val)
 
     config = TsukikoConfig.model_validate(raw_data)
     _CONFIG_INSTANCE = config
     return config
+
+
+def reset_config() -> None:
+    """Clears the cached configuration singleton."""
+    global _CONFIG_INSTANCE
+    _CONFIG_INSTANCE = None
 
 
 def get_config() -> TsukikoConfig:

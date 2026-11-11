@@ -13,15 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.core.config.settings import TsukikoConfig, load_config
-from app.core.logging.logger import setup_logging
+from app.core.config.settings import TsukikoConfig, load_config, reset_config
+from app.core.logging.logger import setup_logging, shutdown_logging
 
 
 @pytest.fixture
 def temp_dir():
     with tempfile.TemporaryDirectory() as tmp:
         yield Path(tmp)
-        from app.core.logging.logger import shutdown_logging
         shutdown_logging()
 
 
@@ -35,10 +34,11 @@ def sample_config(temp_dir):
 
 @pytest.fixture(autouse=True)
 def clean_env():
-    # Store old env
-    old_env = {k: v for k, v in os.environ.items() if k.startswith("TSUKIKO_")}
+    """Deterministic environment fixture that cleanly resets all env vars and config singletons."""
+    old_env = dict(os.environ)
+    reset_config()
     yield
-    # Restore
-    for k in list(os.environ.keys()):
-        if k.startswith("TSUKIKO_") and k not in old_env:
-            del os.environ[k]
+    os.environ.clear()
+    os.environ.update(old_env)
+    reset_config()
+    shutdown_logging()

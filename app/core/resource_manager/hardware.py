@@ -1,7 +1,7 @@
 """
 Tsukiko Hardware Inspection and Resource Management
 Inspects CPU, RAM, GPU (VRAM), storage, and framework compatibility.
-Computes safe memory budgets and offloading recommendations for low-VRAM machines.
+Computes safe memory budgets and realistic offloading recommendations for low-VRAM machines.
 """
 
 from __future__ import annotations
@@ -18,6 +18,32 @@ from pydantic import BaseModel, Field
 from app.core.logging.logger import get_logger
 
 logger = get_logger("RESOURCE")
+
+
+def _safe_parse_int(val: Any, default: int = 0) -> int:
+    """Safely parses integer values from CLI outputs (handles [N/A], [Not Supported], non-numeric)."""
+    if val is None:
+        return default
+    try:
+        cleaned = str(val).strip()
+        if not cleaned or cleaned.startswith("[") or "not" in cleaned.lower() or "n/a" in cleaned.lower():
+            return default
+        return int(float(cleaned))
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_parse_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+    """Safely parses float values from CLI outputs (handles [N/A], [Not Supported], non-numeric)."""
+    if val is None:
+        return default
+    try:
+        cleaned = str(val).strip()
+        if not cleaned or cleaned.startswith("[") or "not" in cleaned.lower() or "n/a" in cleaned.lower():
+            return default
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return default
 
 
 class GPUInfo(BaseModel):
@@ -54,6 +80,29 @@ class StorageInfo(BaseModel):
     used_gb: float
 
 
+class FrameworkSupport(BaseModel):
+    llama_cpp_installed: bool = False
+    llama_cpp_cuda_supported: bool = False
+    torch_installed: bool = False
+    torch_cuda_supported: bool = False
+    onnxruntime_installed: bool = False
+    onnxruntime_cuda_supported: bool = False
+    notes: List[str] = Field(default_factory=list)
+
+
+class ModelMemoryEstimate(BaseModel):
+    model_name: str
+    file_size_mb: int
+    context_window: int
+    estimated_weights_vram_mb: int
+    estimated_kv_cache_mb: int
+    runtime_overhead_mb: int
+    total_vram_required_mb: int
+    fits_in_vram: bool
+    recommended_offload_strategy: str  # "full_gpu", "hybrid_cpu_gpu", "cpu_only"
+    details: str
+
+
 class HardwareProfile(BaseModel):
     os_name: str
     os_version: str
@@ -64,6 +113,7 @@ class HardwareProfile(BaseModel):
     has_nvidia_gpu: bool = False
     recommended_max_vram_mb: int = 0
     recommended_max_ram_mb: int = 0
+    frameworks: FrameworkSupport = Field(default_factory=FrameworkSupport)
     recommendations: List[str] = Field(default_factory=list)
 
 
@@ -73,7 +123,6 @@ class HardwareInspector:
     @classmethod
     def get_cpu_info(cls) -> CPUInfo:
         cpu_brand = platform.processor() or "AMD/Intel x86_64"
-        # Try win32 query for clean processor name if on Windows
         if platform.system() == "Windows":
             try:
                 import winreg
@@ -116,6 +165,37 @@ class HardwareInspector:
         )
 
     @classmethod
+    def parse_nvidia_smi_output(cls, stdout_text: str) -> List[GPUInfo]:
+        """Safely parses nvidia-smi CSV output, handling missing fields, [N/A], and non-numeric metrics."""
+        gpus: List[GPUInfo] = []
+        for line in stdout_text.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 5:
+                gpu_name = parts[0]
+                driver_ver = parts[1]
+                total_mb = _safe_parse_int(parts[2], 0)
+                used_mb = _safe_parse_int(parts[3], 0)
+                free_mb = _safe_parse_int(parts[4], 0)
+                temp_c = _safe_parse_int(parts[5], 0) if len(parts) > 5 and parts[5] not in ("[N/A]", "[Not Supported]") else None
+                power_w = _safe_parse_float(parts[6]) if len(parts) > 6 else None
+
+                gpus.append(
+                    GPUInfo(
+                        name=gpu_name,
+                        driver_version=driver_ver,
+                        total_vram_mb=total_mb,
+                        used_vram_mb=used_mb,
+                        free_vram_mb=free_mb,
+                        temperature_c=temp_c,
+                        power_draw_w=power_w,
+                    )
+                )
+        return gpus
+
+    @classmethod
     def query_nvidia_smi(cls) -> List[GPUInfo]:
         """Queries nvidia-smi for precise VRAM and GPU statistics."""
         nvidia_smi_path = shutil.which("nvidia-smi")
@@ -123,7 +203,6 @@ class HardwareInspector:
             return []
 
         try:
-            # Query standard csv fields from nvidia-smi
             cmd = [
                 nvidia_smi_path,
                 "--query-gpu=name,driver_version,memory.total,memory.used,memory.free,temperature.gpu,power.draw",
@@ -136,42 +215,125 @@ class HardwareInspector:
                 check=True,
                 timeout=5,
             )
-            gpus: List[GPUInfo] = []
-            for line in result.stdout.strip().splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 5:
-                    gpu_name = parts[0]
-                    driver_ver = parts[1]
-                    total_mb = int(float(parts[2]))
-                    used_mb = int(float(parts[3]))
-                    free_mb = int(float(parts[4]))
-                    temp_c = int(float(parts[5])) if len(parts) > 5 and parts[5] != "[N/A]" else None
-                    power_w = float(parts[6]) if len(parts) > 6 and parts[6] != "[N/A]" else None
-
-                    gpus.append(
-                        GPUInfo(
-                            name=gpu_name,
-                            driver_version=driver_ver,
-                            total_vram_mb=total_mb,
-                            used_vram_mb=used_mb,
-                            free_vram_mb=free_mb,
-                            temperature_c=temp_c,
-                            power_draw_w=power_w,
-                        )
-                    )
-            return gpus
+            return cls.parse_nvidia_smi_output(result.stdout)
         except Exception as e:
             logger.warning(f"Failed to query nvidia-smi: {e}")
             return []
 
     @classmethod
-    def check_cuda_runtime(cls) -> bool:
-        """Tests whether PyTorch or an installed ML library actually has active CUDA support."""
+    def check_framework_compatibility(cls) -> FrameworkSupport:
+        """Inspects actual installed machine learning runtimes for CUDA acceleration."""
+        support = FrameworkSupport()
+
+        # 1. llama-cpp-python check (primary target runtime for Tsukiko)
+        try:
+            import llama_cpp  # type: ignore
+            support.llama_cpp_installed = True
+            if hasattr(llama_cpp, "llama_supports_gpu_offload"):
+                support.llama_cpp_cuda_supported = bool(llama_cpp.llama_supports_gpu_offload())
+            support.notes.append(
+                f"llama-cpp-python: installed (GPU offload supported: {support.llama_cpp_cuda_supported})"
+            )
+        except ImportError:
+            support.llama_cpp_installed = False
+            support.llama_cpp_cuda_supported = False
+            support.notes.append("llama-cpp-python: not installed in active environment.")
+        except Exception as e:
+            support.llama_cpp_installed = True
+            support.llama_cpp_cuda_supported = False
+            support.notes.append(f"llama-cpp-python: import error ({e})")
+
+        # 2. PyTorch check
         try:
             import torch  # type: ignore
-            return bool(torch.cuda.is_available())
+            support.torch_installed = True
+            support.torch_cuda_supported = bool(torch.cuda.is_available())
+            support.notes.append(f"torch: installed (CUDA available: {support.torch_cuda_supported})")
         except ImportError:
-            return False
+            support.torch_installed = False
+            support.torch_cuda_supported = False
+            support.notes.append("torch: not installed.")
+        except Exception as e:
+            support.torch_installed = True
+            support.torch_cuda_supported = False
+            support.notes.append(f"torch: import error ({e})")
+
+        # 3. ONNX Runtime check
+        try:
+            import onnxruntime as ort  # type: ignore
+            support.onnxruntime_installed = True
+            providers = ort.get_available_providers()
+            support.onnxruntime_cuda_supported = "CUDAExecutionProvider" in providers
+            support.notes.append(
+                f"onnxruntime: installed (CUDA provider available: {support.onnxruntime_cuda_supported})"
+            )
+        except ImportError:
+            support.onnxruntime_installed = False
+            support.onnxruntime_cuda_supported = False
+            support.notes.append("onnxruntime: not installed.")
+        except Exception as e:
+            support.onnxruntime_installed = True
+            support.onnxruntime_cuda_supported = False
+            support.notes.append(f"onnxruntime: import error ({e})")
+
+        return support
+
+    @classmethod
+    def estimate_model_vram_footprint(
+        cls,
+        file_size_mb: int,
+        context_window: int = 4096,
+        model_name: str = "Quantized LLM",
+        available_vram_mb: int = 2800,
+    ) -> ModelMemoryEstimate:
+        """Calculates realistic VRAM requirements including weights, KV cache, activations, and CUDA runtime.
+
+        A model does NOT fit in VRAM solely because its GGUF file size is less than free VRAM.
+        Total VRAM = Model Weights + Context KV Cache + Compute/Scratch Buffers + CUDA Context Overhead.
+        """
+        weights_mb = file_size_mb
+
+        # Estimate KV cache footprint (~0.11 MB per token for standard 3B-4B architectures with 4096 context)
+        # Baseline: 4096 tokens in FP16 KV cache ~= 450 MB; 2048 tokens ~= 225 MB
+        kv_cache_mb = int((context_window / 4096.0) * 450)
+
+        # Compute activation scratch buffers (~200 MB) + CUDA runtime context (~300 MB)
+        runtime_overhead_mb = 500
+
+        total_vram_mb = weights_mb + kv_cache_mb + runtime_overhead_mb
+        fits = total_vram_mb <= available_vram_mb
+
+        if fits:
+            strategy = "full_gpu"
+            details = (
+                f"Full GPU offload possible. Estimated footprint: {total_vram_mb} MB "
+                f"({weights_mb}MB weights + {kv_cache_mb}MB KV-cache + {runtime_overhead_mb}MB overhead) "
+                f"fits within {available_vram_mb} MB safe VRAM budget."
+            )
+        elif weights_mb < available_vram_mb:
+            strategy = "hybrid_cpu_gpu"
+            details = (
+                f"Hybrid offload required. Total footprint ({total_vram_mb} MB) exceeds safe VRAM ({available_vram_mb} MB). "
+                f"Weights ({weights_mb} MB) fit partially or context KV cache must be placed in RAM or partially offloaded."
+            )
+        else:
+            strategy = "cpu_only"
+            details = (
+                f"CPU-only inference required. Model weights ({weights_mb} MB) alone exceed safe VRAM budget ({available_vram_mb} MB)."
+            )
+
+        return ModelMemoryEstimate(
+            model_name=model_name,
+            file_size_mb=file_size_mb,
+            context_window=context_window,
+            estimated_weights_vram_mb=weights_mb,
+            estimated_kv_cache_mb=kv_cache_mb,
+            runtime_overhead_mb=runtime_overhead_mb,
+            total_vram_required_mb=total_vram_mb,
+            fits_in_vram=fits,
+            recommended_offload_strategy=strategy,
+            details=details,
+        )
 
     @classmethod
     def inspect(cls) -> HardwareProfile:
@@ -180,15 +342,16 @@ class HardwareInspector:
         memory = cls.get_memory_info()
         storage = cls.get_storage_info()
         gpus = cls.query_nvidia_smi()
+        frameworks = cls.check_framework_compatibility()
 
-        cuda_avail = cls.check_cuda_runtime()
+        # Update GPUInfo with framework status
         for gpu in gpus:
-            gpu.cuda_runtime_available = cuda_avail
+            gpu.cuda_runtime_available = frameworks.llama_cpp_cuda_supported or frameworks.torch_cuda_supported
 
         has_nvidia = len(gpus) > 0
 
-        # Calculate safe VRAM budget for RTX 3050 4GB
-        # Keep at least 1000MB for Windows Desktop Window Manager + UI + Screen capture buffer
+        # Calculate safe VRAM budget for RTX 3050 4GB:
+        # Keep at least 1200MB reserved for Windows Desktop Window Manager + UI + Screen capture buffer
         if has_nvidia and gpus[0].total_vram_mb > 0:
             total_vram = gpus[0].total_vram_mb
             recommended_max_vram = max(0, total_vram - 1200)
@@ -196,7 +359,7 @@ class HardwareInspector:
             recommended_max_vram = 0
 
         # Calculate safe RAM budget for 16GB system
-        # Keep at least 4GB for Windows OS + background tasks
+        # Keep at least 4GB reserved for Windows OS + background tasks
         recommended_max_ram = max(2048, memory.available_ram_mb - 2048)
 
         recommendations: List[str] = []
@@ -206,7 +369,8 @@ class HardwareInspector:
             )
             if gpus[0].total_vram_mb <= 4096:
                 recommendations.append(
-                    "Strict 4GB VRAM constraint: Prioritize 3B–4B quantized models (Q4_K_M). Avoid loading conversational LLM and Vision LLM simultaneously."
+                    "Strict 4GB VRAM constraint: Model weights + KV cache + CUDA overhead must not exceed 2,800 MB. "
+                    "Prioritize 3B–4B quantized models (Q4_K_M). Avoid loading conversational LLM and Vision LLM simultaneously."
                 )
                 recommendations.append(
                     "Use Lazy Loading and auto-unloading for large weights to prevent Out-Of-Memory (OOM) errors."
@@ -221,6 +385,9 @@ class HardwareInspector:
                 f"System RAM: {memory.total_ram_mb} MB. Limit conversation context window to <= 4096 tokens to prevent memory ballooning."
             )
 
+        for note in frameworks.notes:
+            recommendations.append(f"Framework Status: {note}")
+
         return HardwareProfile(
             os_name=platform.system(),
             os_version=platform.version(),
@@ -231,6 +398,7 @@ class HardwareInspector:
             has_nvidia_gpu=has_nvidia,
             recommended_max_vram_mb=recommended_max_vram,
             recommended_max_ram_mb=recommended_max_ram,
+            frameworks=frameworks,
             recommendations=recommendations,
         )
 

@@ -11,7 +11,7 @@ Tsukiko is an original AI woman companion designed to live on your Windows deskt
 Tsukiko is engineered from first principles for:
 * **OS:** Windows 11 64-bit
 * **CPU:** AMD Ryzen 5 5600H (6 Cores / 12 Threads)
-* **RAM:** 16 GB DDR4 (Safe LLM budget: ~4 GB)
+* **RAM:** 16 GB DDR4 (Safe LLM budget: ~3.5 GB)
 * **GPU:** NVIDIA GeForce RTX 3050 Laptop GPU (4 GB VRAM)
 * **Storage:** ~137 GB Available NVMe SSD
 
@@ -23,38 +23,23 @@ Tsukiko is engineered from first principles for:
 
 ---
 
-## Architecture Overview
+## Implementation Status (Designed vs. Implemented vs. Tested)
 
-```
-Tsukiko/
-│
-├── app/
-│   ├── main.py                     # Application entry point & CLI flags
-│   ├── core/
-│   │   ├── config/                 # Pydantic type-safe configuration system
-│   │   ├── logging/                # Structured console + rotating text & JSONL logger
-│   │   ├── resource_manager/       # Real-time CPU, RAM, GPU/VRAM hardware inspection
-│   │   ├── orchestrator/           # Central subsystem lifecycle coordinator
-│   │   ├── brain/                  # Offline conversational LLM engine (Phase 3)
-│   │   ├── personality/            # Tsukiko persona, prompts, and tone guidelines
-│   │   └── model_manager/          # Dynamic weight loading/offloading & VRAM guardian
-│   │
-│   ├── memory/                     # SQLite persistent storage, retrieval & inspector (Phase 4)
-│   ├── perception/                 # Live Windows capture, OCR, ROI & vision pipeline (Phase 5)
-│   ├── voice/                      # Offline STT (Whisper) & TTS (Piper/SAPI5) (Phase 6)
-│   ├── desktop/                    # Companion presentation & permission gatekeeper (Phases 2 & 7)
-│   └── interface/                  # PySide6 desktop views, chat, and settings dialogs
-│
-├── config/
-│   ├── default_config.yaml         # Master system configuration
-│   └── personality.yaml            # Persona definition & prompt templates
-├── data/                           # Local SQLite databases, conversations, and observations
-├── logs/                           # Rotating log files (tsukiko.log, tsukiko.jsonl)
-├── models/                         # Local GGUF, ONNX, and speech weights (gitignored)
-├── requirements/                   # Modular requirement layers (base, ui, ai, perception, voice)
-├── scripts/                        # Diagnostics and hardware auditing tools
-└── tests/                          # Automated Pytest suite
-```
+| Subsystem / Capability | Status | Details |
+|---|---|---|
+| **Core Architecture & Orchestrator** | **Implemented & Tested** | Composition root with thread-safe `threading.RLock()` lifecycle. Verified in `tests/test_entrypoint.py`. |
+| **Pydantic Configuration System** | **Implemented & Tested** | Type-safe settings with typed env var parsing (`bool`, `int`, `float`, `str`). Verified in `tests/test_config.py`. |
+| **Strict Privacy Assertions** | **Implemented & Tested** | Enforces `local_only=True`, zero telemetry, zero cloud fallback. Verified in `tests/test_config.py`. |
+| **Hardware & Resource Auditor** | **Implemented & Tested** | Safe `nvidia-smi` parser, distinct ML framework check (`llama.cpp`, `torch`, `onnxruntime`), and realistic VRAM budget model (weights + KV cache + CUDA overhead). Verified in `tests/test_hardware.py`. |
+| **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
+| **CLI Entry Point** | **Implemented & Tested** | `app/main.py` supporting `--version`, `--help`, `--check-hardware`, `--headless`, `--log-level`. |
+| **Automated Test Suite** | **Implemented & Tested** | 16 unit and regression tests passing with 0 warnings/errors. |
+| **Desktop Companion UI** | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting Phase 2 approval. |
+| **Local AI Brain (llama.cpp)** | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No model weights downloaded. |
+| **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
+| **Desktop Perception Pipeline** | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Screen capture OFF by default. |
+| **Offline Voice Subsystem** | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Microphone OFF by default. |
+| **Permitted Desktop Control** | *Designed (Phase 7)* | Staged in `app/desktop/permissions/`. Control strictly disabled. |
 
 ---
 
@@ -75,7 +60,7 @@ pip install -r requirements/base.txt
 ```
 
 ### 3. Run Hardware Audit
-Inspect CPU, RAM, and GPU memory budgets:
+Inspect CPU, RAM, GPU memory budgets, and runtime compatibility:
 ```powershell
 python scripts/check_hardware.py
 ```
@@ -89,20 +74,6 @@ Run automated unit and integration tests:
 ```powershell
 pytest -v
 ```
-
----
-
-## Development Roadmap & Status
-
-| Phase | Description | Status |
-|---|---|---|
-| **Phase 1: Foundation** | Environment audit, modular packaging, logging, configuration, hardware profiling, unit tests | **Complete** |
-| **Phase 2: Desktop Application** | PySide6 floating companion, moonlight visual identity, animations, drag-to-snap, settings | Pending Approval |
-| **Phase 3: Local AI Brain** | Quantized model runner (llama.cpp), memory-efficient loader, persona engine | Queued |
-| **Phase 4: Long-Term Memory** | SQLite persistence, structured facts, retrieval, summarization, inspection UI | Queued |
-| **Phase 5: Desktop Perception** | On-demand screen capture pipeline, change detection, OCR, visual reasoning | Queued |
-| **Phase 6: Voice System** | Offline speech recognition (STT) and low-latency speech synthesis (TTS) | Queued |
-| **Phase 7: Desktop Control** | Permission architecture, approved automation workflows, execution audit logs | Queued |
 
 ---
 
