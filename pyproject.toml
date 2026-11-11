@@ -38,3 +38,6 @@ addopts = "-v --strict-markers"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml"]

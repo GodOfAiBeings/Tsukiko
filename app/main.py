@@ -66,8 +66,8 @@ def main(args: list[str] | None = None) -> int:
     parsed = parse_args(args)
 
     if parsed.check_hardware:
-        from scripts.check_hardware import main as check_main
-        return check_main()
+        from app.core.resource_manager.diagnostic import run_hardware_diagnostic
+        return run_hardware_diagnostic()
 
     # Load configuration
     config = load_config(parsed.config)

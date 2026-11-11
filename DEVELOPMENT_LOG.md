@@ -25,6 +25,34 @@ An in-depth engineering audit was conducted on the Phase 1 codebase, identifying
 
 ---
 
+### Follow-up Audit & Hardening Ledger (2026-11-11)
+
+A secondary audit addressed remaining findings, elevating test coverage from 16 to 20 passing tests:
+
+1. **Dynamic VRAM Budgeting & Approximation Disclaimers:**
+   * Updated `HardwareInspector.inspect()` to compute `recommended_max_vram_mb` using `min(static_ceiling, dynamic_safe)`, directly accounting for currently available free VRAM (`free_vram - 400MB`).
+   * Explicitly labeled `ModelMemoryEstimate` as approximate (`is_approximate = True`) and added prominent disclaimers.
+   * Regression verified in `tests/test_hardware.py::test_safe_budget_calculation` and `test_model_vram_estimation_accounts_for_kv_cache_and_overhead`.
+2. **Technically Enforced Offline Privacy Guard:**
+   * Implemented `app.core.privacy.enforcement` (`enable_offline_guard()`, `disable_offline_guard()`, `PrivacyViolationError`).
+   * Intercepts `socket.socket.connect` and `socket.create_connection` at runtime, aborting any outbound connection to non-loopback addresses.
+   * Automatically activated during `orchestrator.initialize()`.
+   * Regression verified in `tests/test_config.py::test_offline_privacy_guard_enforcement`.
+3. **Packaging Decoupling for Standalone Execution:**
+   * Extracted diagnostic report generation into `app.core.resource_manager.diagnostic:run_hardware_diagnostic()`.
+   * Updated `app/main.py` so `tsukiko --check-hardware` operates fully inside and outside source checkout without importing `scripts/`.
+   * Bundled package data YAML in `pyproject.toml` and updated `find_default_config_path()` to locate package-bundled configs.
+   * Regression verified in `tests/test_entrypoint.py::test_check_hardware_packaged_entrypoint` and `tests/test_hardware.py::test_run_hardware_diagnostic_packaged`.
+4. **Environment Fixture Isolation:**
+   * Refactored `clean_env` to use `restore_environment_context()`, verifying restoration of modified, added, and deleted environment variables.
+   * Regression verified in `tests/test_config.py::test_clean_env_fixture_complete_restoration`.
+5. **Bounded-Time Deadlock Prevention Test:**
+   * Added `test_orchestrator_start_deadlock_bounded_time` in `tests/test_entrypoint.py` using `concurrent.futures.ThreadPoolExecutor` with a strict 5.0s timeout to prevent hanging test runs.
+6. **Test Suite Expansion:**
+   * All 20 tests pass in ~4.7s. Verified standalone CLI `tsukiko --check-hardware` outside source directory.
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |

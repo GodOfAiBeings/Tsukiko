@@ -100,6 +100,11 @@ class ModelMemoryEstimate(BaseModel):
     total_vram_required_mb: int
     fits_in_vram: bool
     recommended_offload_strategy: str  # "full_gpu", "hybrid_cpu_gpu", "cpu_only"
+    is_approximate: bool = True
+    disclaimer: str = (
+        "Approximate estimate. Actual VRAM depends on model architecture, GGUF tensor layout, "
+        "context length, and concurrent desktop GPU workloads."
+    )
     details: str
 
 
@@ -112,6 +117,9 @@ class HardwareProfile(BaseModel):
     gpus: List[GPUInfo] = Field(default_factory=list)
     has_nvidia_gpu: bool = False
     recommended_max_vram_mb: int = 0
+    currently_available_vram_mb: int = 0
+    static_vram_ceiling_mb: int = 0
+    dynamic_safe_vram_mb: int = 0
     recommended_max_ram_mb: int = 0
     frameworks: FrameworkSupport = Field(default_factory=FrameworkSupport)
     recommendations: List[str] = Field(default_factory=list)
@@ -288,7 +296,7 @@ class HardwareInspector:
     ) -> ModelMemoryEstimate:
         """Calculates realistic VRAM requirements including weights, KV cache, activations, and CUDA runtime.
 
-        A model does NOT fit in VRAM solely because its GGUF file size is less than free VRAM.
+        All estimates are labeled as approximate.
         Total VRAM = Model Weights + Context KV Cache + Compute/Scratch Buffers + CUDA Context Overhead.
         """
         weights_mb = file_size_mb
@@ -306,20 +314,21 @@ class HardwareInspector:
         if fits:
             strategy = "full_gpu"
             details = (
-                f"Full GPU offload possible. Estimated footprint: {total_vram_mb} MB "
-                f"({weights_mb}MB weights + {kv_cache_mb}MB KV-cache + {runtime_overhead_mb}MB overhead) "
-                f"fits within {available_vram_mb} MB safe VRAM budget."
+                f"[Approximate Estimate] Full GPU offload likely. Total footprint ~{total_vram_mb} MB "
+                f"({weights_mb}MB weights + ~{kv_cache_mb}MB KV-cache + ~{runtime_overhead_mb}MB runtime buffers) "
+                f"fits within {available_vram_mb} MB available safe VRAM budget."
             )
         elif weights_mb < available_vram_mb:
             strategy = "hybrid_cpu_gpu"
             details = (
-                f"Hybrid offload required. Total footprint ({total_vram_mb} MB) exceeds safe VRAM ({available_vram_mb} MB). "
-                f"Weights ({weights_mb} MB) fit partially or context KV cache must be placed in RAM or partially offloaded."
+                f"[Approximate Estimate] Hybrid CPU/GPU offload required. Estimated footprint (~{total_vram_mb} MB) "
+                f"exceeds safe VRAM budget ({available_vram_mb} MB). Offload weights partially or place KV-cache in RAM."
             )
         else:
             strategy = "cpu_only"
             details = (
-                f"CPU-only inference required. Model weights ({weights_mb} MB) alone exceed safe VRAM budget ({available_vram_mb} MB)."
+                f"[Approximate Estimate] CPU-only inference required. Model weights alone ({weights_mb} MB) "
+                f"exceed safe VRAM budget ({available_vram_mb} MB)."
             )
 
         return ModelMemoryEstimate(
@@ -332,12 +341,13 @@ class HardwareInspector:
             total_vram_required_mb=total_vram_mb,
             fits_in_vram=fits,
             recommended_offload_strategy=strategy,
+            is_approximate=True,
             details=details,
         )
 
     @classmethod
     def inspect(cls) -> HardwareProfile:
-        """Performs a comprehensive hardware audit and computes allocation limits."""
+        """Performs a comprehensive hardware audit and computes allocation limits taking into account currently free VRAM."""
         cpu = cls.get_cpu_info()
         memory = cls.get_memory_info()
         storage = cls.get_storage_info()
@@ -351,11 +361,25 @@ class HardwareInspector:
         has_nvidia = len(gpus) > 0
 
         # Calculate safe VRAM budget for RTX 3050 4GB:
-        # Keep at least 1200MB reserved for Windows Desktop Window Manager + UI + Screen capture buffer
+        # 1. Static ceiling: total VRAM minus 1200MB reserved for Windows Desktop Window Manager + UI + Screen capture buffer
+        # 2. Dynamic safe cap: currently available (free) VRAM minus 400MB runtime buffer
         if has_nvidia and gpus[0].total_vram_mb > 0:
             total_vram = gpus[0].total_vram_mb
-            recommended_max_vram = max(0, total_vram - 1200)
+            currently_available_vram = gpus[0].free_vram_mb
+            static_ceiling = max(0, total_vram - 1200)
+
+            if currently_available_vram > 0:
+                dynamic_safe = max(0, currently_available_vram - 400)
+                # Cap the dynamic allocation by the static ceiling
+                recommended_max_vram = min(static_ceiling, dynamic_safe)
+            else:
+                dynamic_safe = static_ceiling
+                recommended_max_vram = static_ceiling
         else:
+            total_vram = 0
+            currently_available_vram = 0
+            static_ceiling = 0
+            dynamic_safe = 0
             recommended_max_vram = 0
 
         # Calculate safe RAM budget for 16GB system
@@ -365,11 +389,15 @@ class HardwareInspector:
         recommendations: List[str] = []
         if has_nvidia:
             recommendations.append(
-                f"GPU detected: {gpus[0].name} with {gpus[0].total_vram_mb} MB VRAM. Recommended LLM VRAM cap: {recommended_max_vram} MB."
+                f"GPU detected: {gpus[0].name} (Total: {total_vram} MB, Currently Free: {currently_available_vram} MB). "
+                f"Dynamic safe VRAM cap: {recommended_max_vram} MB (Static ceiling: {static_ceiling} MB)."
+            )
+            recommendations.append(
+                "Approximate estimates: VRAM footprint depends on model architecture, GGUF tensor layout, context length, and active desktop processes."
             )
             if gpus[0].total_vram_mb <= 4096:
                 recommendations.append(
-                    "Strict 4GB VRAM constraint: Model weights + KV cache + CUDA overhead must not exceed 2,800 MB. "
+                    "Strict 4GB VRAM constraint: Model weights + KV cache + CUDA overhead must not exceed safe VRAM budget. "
                     "Prioritize 3B–4B quantized models (Q4_K_M). Avoid loading conversational LLM and Vision LLM simultaneously."
                 )
                 recommendations.append(
@@ -397,6 +425,9 @@ class HardwareInspector:
             gpus=gpus,
             has_nvidia_gpu=has_nvidia,
             recommended_max_vram_mb=recommended_max_vram,
+            currently_available_vram_mb=currently_available_vram,
+            static_vram_ceiling_mb=static_ceiling,
+            dynamic_safe_vram_mb=dynamic_safe,
             recommended_max_ram_mb=recommended_max_ram,
             frameworks=frameworks,
             recommendations=recommendations,

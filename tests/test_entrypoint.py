@@ -57,3 +57,34 @@ def test_main_module_exports_and_imports():
     """Regression test for Issue 1: Verify app.main imports Any and has no undefined type annotations."""
     assert hasattr(app.main, "Any")
     assert getattr(app.main, "Any") is not None
+
+
+def test_orchestrator_start_deadlock_bounded_time():
+    """Regression test for Finding 5: Ensure direct start() call completes within bounded time without hanging."""
+    import concurrent.futures
+    import pytest
+
+    config = TsukikoConfig()
+    orchestrator = TsukikoOrchestrator(config=config)
+
+    def run_lifecycle():
+        orchestrator.start()
+        is_run = orchestrator.is_running
+        orchestrator.stop()
+        return is_run
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run_lifecycle)
+        try:
+            result = future.result(timeout=5.0)
+            assert result is True
+            assert orchestrator.is_running is False
+        except concurrent.futures.TimeoutError:
+            pytest.fail("TsukikoOrchestrator deadlocked during lifecycle execution (exceeded 5.0s timeout)!")
+
+
+def test_check_hardware_packaged_entrypoint():
+    """Regression test for Finding 3: Packaging verification - main(['--check-hardware']) runs without scripts/ dependency."""
+    # Ensure app.main can invoke --check-hardware via packaged app.core.resource_manager.diagnostic
+    exit_code = app.main.main(["--check-hardware"])
+    assert exit_code == 0

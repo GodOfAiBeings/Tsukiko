@@ -32,13 +32,22 @@ def sample_config(temp_dir):
     return config_file
 
 
+def restore_environment_context():
+    """Context generator that cleanly snapshots and restores all environment variables and singletons."""
+    old_env = dict(os.environ)
+    reset_config()
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+        reset_config()
+        shutdown_logging()
+        from app.core.privacy.enforcement import disable_offline_guard
+        disable_offline_guard()
+
+
 @pytest.fixture(autouse=True)
 def clean_env():
     """Deterministic environment fixture that cleanly resets all env vars and config singletons."""
-    old_env = dict(os.environ)
-    reset_config()
-    yield
-    os.environ.clear()
-    os.environ.update(old_env)
-    reset_config()
-    shutdown_logging()
+    yield from restore_environment_context()

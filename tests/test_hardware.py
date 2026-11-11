@@ -31,8 +31,10 @@ def test_safe_budget_calculation():
 
     if profile.has_nvidia_gpu and profile.gpus:
         total_vram = profile.gpus[0].total_vram_mb
-        assert profile.recommended_max_vram_mb < total_vram
-        assert profile.recommended_max_vram_mb > 0
+        assert profile.recommended_max_vram_mb <= profile.static_vram_ceiling_mb
+        assert profile.recommended_max_vram_mb <= total_vram
+        assert profile.currently_available_vram_mb >= 0
+        assert profile.static_vram_ceiling_mb > 0
 
 
 def test_nvidia_smi_parsing_handles_missing_and_unexpected_metrics():
@@ -107,3 +109,15 @@ def test_model_vram_estimation_accounts_for_kv_cache_and_overhead():
     assert est_small.total_vram_required_mb == 2225
     assert est_small.fits_in_vram is True
     assert est_small.recommended_offload_strategy == "full_gpu"
+
+    # Regression test for Finding 1: Estimates must be clearly marked as approximate
+    assert est.is_approximate is True
+    assert "Approximate estimate" in est.disclaimer
+    assert "[Approximate Estimate]" in est.details
+
+
+def test_run_hardware_diagnostic_packaged():
+    """Regression test for Finding 3: Packaged diagnostic runs cleanly and returns exit code 0."""
+    from app.core.resource_manager.diagnostic import run_hardware_diagnostic
+    exit_code = run_hardware_diagnostic()
+    assert exit_code == 0

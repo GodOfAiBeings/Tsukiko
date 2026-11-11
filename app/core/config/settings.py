@@ -140,16 +140,20 @@ _CONFIG_INSTANCE: Optional[TsukikoConfig] = None
 
 
 def find_default_config_path() -> Path:
-    """Finds the default config file relative to project root."""
-    # Check current directory / config
+    """Finds the default config file relative to project root or packaged location."""
+    # 1. Check current directory / config
     candidate = Path("config/default_config.yaml")
     if candidate.exists():
         return candidate.resolve()
-    # Check relative to module path
+    # 2. Check relative to module path (in source checkout)
     module_root = Path(__file__).resolve().parent.parent.parent.parent
     candidate = module_root / "config" / "default_config.yaml"
     if candidate.exists():
         return candidate.resolve()
+    # 3. Check bundled inside package (when installed outside source checkout)
+    package_candidate = Path(__file__).resolve().parent / "default_config.yaml"
+    if package_candidate.exists():
+        return package_candidate.resolve()
     return Path("config/default_config.yaml")
 
 

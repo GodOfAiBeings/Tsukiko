@@ -85,9 +85,84 @@ def test_config_env_variable_overrides_types(temp_dir):
     assert loaded.ai.model_path == "models/test_model.gguf"
 
 
-def test_env_restoration_fixture_behavior():
-    """Regression test for Issue 5: Environment variable modifications must be cleanly handled."""
-    test_key = "TSUKIKO_TEST_TEMP_VAR"
-    os.environ[test_key] = "temporary_val"
-    assert os.environ.get(test_key) == "temporary_val"
+def test_clean_env_fixture_complete_restoration():
+    """Regression test for Finding 4: Verify that environment restoration restores pre-existing, modified, and deleted environment variables."""
+    from tests.conftest import restore_environment_context
+
+    # 1. Setup pre-existing baseline
+    os.environ["TSUKIKO_TEST_PREEXISTING"] = "original_value"
+    os.environ["TSUKIKO_TEST_TO_DELETE"] = "will_delete_me"
+
+    # 2. Invoke context generator setup step
+    gen = restore_environment_context()
+    next(gen)
+
+    # 3. Simulate mutations inside a test
+    os.environ["TSUKIKO_TEST_PREEXISTING"] = "mutated_value"
+    os.environ["TSUKIKO_TEST_NEW_ADDITION"] = "brand_new_value"
+    del os.environ["TSUKIKO_TEST_TO_DELETE"]
+
+    # Assert that inside test scope, mutations exist
+    assert os.environ["TSUKIKO_TEST_PREEXISTING"] == "mutated_value"
+    assert os.environ["TSUKIKO_TEST_NEW_ADDITION"] == "brand_new_value"
+    assert "TSUKIKO_TEST_TO_DELETE" not in os.environ
+
+    # 4. Trigger context generator teardown
+    try:
+        next(gen)
+    except StopIteration:
+        pass
+
+    # 5. Assert complete restoration
+    assert os.environ["TSUKIKO_TEST_PREEXISTING"] == "original_value"
+    assert os.environ["TSUKIKO_TEST_TO_DELETE"] == "will_delete_me"
+    assert "TSUKIKO_TEST_NEW_ADDITION" not in os.environ
+
+    # Clean up baseline keys
+    del os.environ["TSUKIKO_TEST_PREEXISTING"]
+    del os.environ["TSUKIKO_TEST_TO_DELETE"]
+
+
+def test_offline_privacy_guard_enforcement():
+    """Regression test for Finding 2: Verify in-process socket guard strictly blocks outbound non-loopback connections."""
+    import socket
+    from app.core.privacy.enforcement import (
+        enable_offline_guard,
+        disable_offline_guard,
+        is_offline_guard_active,
+        PrivacyViolationError,
+    )
+
+    try:
+        enable_offline_guard()
+        assert is_offline_guard_active() is True
+
+        # Attempting outbound connection to non-loopback IP must raise PrivacyViolationError
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            s1.connect(("8.8.8.8", 53))
+        assert "blocked by in-process network guard" in str(exc_info.value)
+        s1.close()
+
+        # Attempting create_connection to external host must raise PrivacyViolationError
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            socket.create_connection(("1.1.1.1", 53), timeout=0.1)
+        assert "blocked by in-process network guard" in str(exc_info.value)
+
+        # Loopback connection should NOT raise PrivacyViolationError (may raise ConnectionRefusedError)
+        s_local = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # Port 65432 likely closed, but should not raise PrivacyViolationError
+            s_local.connect(("127.0.0.1", 65432))
+        except PrivacyViolationError:
+            pytest.fail("Loopback connection was incorrectly blocked by privacy guard!")
+        except (ConnectionRefusedError, OSError):
+            # Normal socket behavior when nothing is listening on that port
+            pass
+        finally:
+            s_local.close()
+
+    finally:
+        disable_offline_guard()
+        assert is_offline_guard_active() is False
 

@@ -9,7 +9,8 @@ Tsukiko is built with a zero-trust, privacy-first architecture. This document de
 | Privacy Invariant | Status | Enforcement Mechanism | Verification Test |
 |---|---|---|---|
 | **Local-Only Inference** | **Implemented & Tested** | `PrivacyConfig.validate_local_only()` throws `ValidationError` if `local_only=False`. | `tests/test_config.py::test_privacy_enforcement_raises_on_invalid_settings` |
-| **Zero Outbound Telemetry** | **Implemented & Tested** | `PrivacyConfig.validate_no_telemetry()` throws `ValidationError` if `allow_external_telemetry=True`. | `tests/test_config.py::test_privacy_enforcement_raises_on_invalid_settings` |
+| **Technical Network Sandbox** | **Implemented & Tested** | In-process socket guard (`app.core.privacy.enforcement`) intercepts `socket.connect` & `create_connection`, throwing `PrivacyViolationError` for any non-loopback outbound socket. | `tests/test_config.py::test_offline_privacy_guard_enforcement` |
+| **Zero Outbound Telemetry** | **Implemented & Tested** | `PrivacyConfig.validate_no_telemetry()` throws `ValidationError` if `allow_external_telemetry=True`. Socket guard blocks outbound traffic. | `tests/test_config.py::test_privacy_enforcement_raises_on_invalid_settings` |
 | **No Cloud LLM Fallback** | **Implemented & Tested** | `PrivacyConfig.validate_no_cloud()` throws `ValidationError` if `allow_cloud_fallback=True`. | `tests/test_config.py::test_privacy_enforcement_raises_on_invalid_settings` |
 | **Screen Capture OFF by Default** | **Implemented & Tested** | Hardcoded default `screen_sharing_enabled=False` in `PerceptionConfig` & enforced in `Orchestrator.initialize()`. | `tests/test_config.py::test_default_config_privacy_guarantees` |
 | **Microphone OFF by Default** | **Implemented & Tested** | Hardcoded default `mic_enabled=False` in `VoiceConfig`. | `tests/test_config.py::test_default_config_privacy_guarantees` |
@@ -21,9 +22,11 @@ Tsukiko is built with a zero-trust, privacy-first architecture. This document de
 
 ---
 
-## 2. Zero Cloud Transmission Guarantee
+## 2. Zero Cloud Transmission & Technical Enforcement
 
 * **100% Offline Inference:** Tsukiko never connects to external cloud LLMs, transcription services, or telemetry endpoints during normal execution.
+* **Technical In-Process Network Guard (`app.core.privacy.enforcement`):** Rather than relying exclusively on configuration checks, Tsukiko installs low-level socket interception hooks at runtime. Any code or library attempting an outbound TCP/IP connection to a non-loopback host (e.g., external IP or external domain name) is immediately aborted with a `PrivacyViolationError`.
+* **Allowed Local Loopback:** Only strictly local addresses (`127.0.0.1`, `localhost`, `::1`) are permitted for local IPC or local model server processes.
 * **No Remote Telemetry:** All logs and metrics stay on the local disk (`logs/` directory).
 * **Network Isolation Verification:** Code strictly asserts that `privacy.local_only = True` at the configuration schema level and runtime initialization.
 

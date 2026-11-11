@@ -54,6 +54,10 @@ class TsukikoOrchestrator:
                 logger.warning("Privacy local_only is not True! Forcing local_only=True for safety.")
                 self.config.privacy.local_only = True
 
+            # Technically enforce offline privacy by activating socket guard
+            from app.core.privacy.enforcement import enable_offline_guard
+            enable_offline_guard()
+
             # Ensure screen sharing starts OFF
             self.config.perception.screen_sharing_enabled = False
             self._status["screen_sharing"] = False
@@ -82,6 +86,8 @@ class TsukikoOrchestrator:
             self._is_running = False
             self._status["screen_sharing"] = False
             self._status["state"] = "stopped"
+            from app.core.privacy.enforcement import disable_offline_guard
+            disable_offline_guard()
             logger.info("Tsukiko Core Orchestrator stopped cleanly.")
 
     @property
