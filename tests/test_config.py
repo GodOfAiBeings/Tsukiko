@@ -149,6 +149,16 @@ def test_offline_privacy_guard_enforcement():
             socket.create_connection(("1.1.1.1", 53), timeout=0.1)
         assert "blocked by in-process network guard" in str(exc_info.value)
 
+        # Attempting DNS resolution for external host must raise PrivacyViolationError
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            socket.getaddrinfo("api.openai.com", 443)
+        assert "DNS resolution for external host" in str(exc_info.value)
+
+        # Attempting gethostbyname for external host must raise PrivacyViolationError
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            socket.gethostbyname("api.anthropic.com")
+        assert "DNS resolution for external hostname" in str(exc_info.value)
+
         # Loopback connection should NOT raise PrivacyViolationError (may raise ConnectionRefusedError)
         s_local = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
