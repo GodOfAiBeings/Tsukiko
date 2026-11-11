@@ -86,8 +86,7 @@ class TsukikoOrchestrator:
             self._is_running = False
             self._status["screen_sharing"] = False
             self._status["state"] = "stopped"
-            from app.core.privacy.enforcement import disable_offline_guard
-            disable_offline_guard()
+            # Note: The in-process offline privacy guard remains active for the process lifetime.
             logger.info("Tsukiko Core Orchestrator stopped cleanly.")
 
     @property

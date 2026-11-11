@@ -13,13 +13,14 @@ Tsukiko is engineered from first principles for:
 * **CPU:** AMD Ryzen 5 5600H (6 Cores / 12 Threads)
 * **RAM:** 16 GB DDR4 (Safe LLM budget: ~3.5 GB)
 * **GPU:** NVIDIA GeForce RTX 3050 Laptop GPU (4 GB VRAM)
-* **Storage:** ~137 GB Available NVMe SSD
+* **Storage:** ~136 GB Available NVMe SSD
 
 ### Architecture Priorities
 1. **Zero Outbound Telemetry / Zero Cloud APIs**: Runs completely local.
 2. **Strict Privacy by Default**: Screen sharing and microphone are explicitly disabled at startup.
-3. **Adaptive VRAM Budgeting**: Respects 4GB VRAM ceiling (~2.8 GB max safe layer offload) using quantized 3B–4B models and sequential model unloading.
-4. **Decoupled Modular Subsystems**: Independent brain, memory, perception, voice, desktop control, and UI modules.
+3. **Fail-Safe Dynamic VRAM Budgeting**: Rejects hardcoded VRAM fallbacks. Distinguishes `measured`, `zero_available`, and `unavailable` GPU states. Automatically selects CPU inference if safe VRAM is depleted.
+4. **Dual-Layer Privacy Enforcement**: Combines technical in-process socket/DNS interception with an honest OS-level Windows Firewall strategy for dedicated packaged binaries.
+5. **Decoupled Modular Subsystems**: Independent brain, memory, perception, voice, desktop control, and UI modules.
 
 ---
 
@@ -27,13 +28,15 @@ Tsukiko is engineered from first principles for:
 
 | Subsystem / Capability | Status | Details |
 |---|---|---|
-| **Core Architecture & Orchestrator** | **Implemented & Tested** | Composition root with thread-safe `threading.RLock()` lifecycle. Verified in `tests/test_entrypoint.py`. |
+| **Core Architecture & Orchestrator** | **Implemented & Tested** | Composition root with thread-safe `threading.RLock()` lifecycle. Verified via bounded subprocess deadlock tests in `tests/test_entrypoint.py`. |
 | **Pydantic Configuration System** | **Implemented & Tested** | Type-safe settings with typed env var parsing (`bool`, `int`, `float`, `str`). Verified in `tests/test_config.py`. |
 | **Strict Privacy Assertions** | **Implemented & Tested** | Enforces `local_only=True`, zero telemetry, zero cloud fallback. Verified in `tests/test_config.py`. |
-| **Hardware & Resource Auditor** | **Implemented & Tested** | Safe `nvidia-smi` parser, distinct ML framework check (`llama.cpp`, `torch`, `onnxruntime`), and realistic VRAM budget model (weights + KV cache + CUDA overhead). Verified in `tests/test_hardware.py`. |
+| **In-Process Network & DNS Guard** | **Implemented & Tested** | Hooks `connect`, `connect_ex`, `sendto` (UDP), `create_connection`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, `getnameinfo`. Verified in `tests/test_config.py`. |
+| **Windows Firewall Policy Strategy** | **Implemented & Tested** | `app.core.privacy.windows_firewall` protects shared interpreters, generates dedicated binary policies, and reports honest security status. Verified in `tests/test_windows_firewall.py`. |
+| **Hardware & Resource Auditor** | **Implemented & Tested** | Safe `nvidia-smi` parser, distinct ML framework check (`llama.cpp`, `torch`, `onnxruntime`), fail-safe VRAM budgeting without hardcoded fallbacks. Verified in `tests/test_hardware.py`. |
 | **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
-| **CLI Entry Point** | **Implemented & Tested** | `app/main.py` supporting `--version`, `--help`, `--check-hardware`, `--headless`, `--log-level`. |
-| **Automated Test Suite** | **Implemented & Tested** | 16 unit and regression tests passing with 0 warnings/errors. |
+| **Packaging & Distribution** | **Implemented & Tested** | Wheel packaging verified out-of-tree and in isolated virtual environment via `tsukiko --check-hardware`. Verified in `tests/test_packaging.py`. |
+| **Automated Test Suite** | **Implemented & Tested** | 37 unit and regression tests passing with 0 warnings/errors. |
 | **Desktop Companion UI** | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting Phase 2 approval. |
 | **Local AI Brain (llama.cpp)** | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No model weights downloaded. |
 | **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
@@ -62,11 +65,11 @@ pip install -r requirements/base.txt
 ### 3. Run Hardware Audit
 Inspect CPU, RAM, GPU memory budgets, and runtime compatibility:
 ```powershell
-python scripts/check_hardware.py
+tsukiko --check-hardware
 ```
-*(Or via entry point)*
+*(Or via python module invocation)*
 ```powershell
-python app/main.py --check-hardware
+python -m app.main --check-hardware
 ```
 
 ### 4. Execute Test Suite
@@ -79,9 +82,9 @@ pytest -v
 
 ## Documentation Links
 
-* [Installation Guide](INSTALLATION.md)
 * [System Architecture](ARCHITECTURE.md)
 * [Hardware & Model Compatibility](MODEL_COMPATIBILITY.md)
-* [Privacy Guarantees](PRIVACY.md)
+* [Privacy & Security Specification](PRIVACY.md)
 * [Troubleshooting Guide](TROUBLESHOOTING.md)
 * [Development Log](DEVELOPMENT_LOG.md)
+* [Changelog](CHANGELOG.md)

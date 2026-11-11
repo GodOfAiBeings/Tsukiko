@@ -124,53 +124,107 @@ def test_clean_env_fixture_complete_restoration():
 
 
 def test_offline_privacy_guard_enforcement():
-    """Regression test for Finding 2: Verify in-process socket guard strictly blocks outbound non-loopback connections."""
+    """Regression test for Finding 2 & Audit: Verify in-process socket guard strictly blocks all outbound network & DNS surfaces."""
     import socket
     from app.core.privacy.enforcement import (
         enable_offline_guard,
         disable_offline_guard,
         is_offline_guard_active,
+        is_loopback_address,
         PrivacyViolationError,
     )
+
+    # Unit check is_loopback_address
+    assert is_loopback_address("127.0.0.1") is True
+    assert is_loopback_address("127.0.0.5") is True
+    assert is_loopback_address("::1") is True
+    assert is_loopback_address("localhost") is True
+    assert is_loopback_address("0.0.0.0") is False  # Must reject unspecified address
+    assert is_loopback_address("::") is False       # Must reject unspecified IPv6
+    assert is_loopback_address("") is False         # Must reject empty host
+    assert is_loopback_address(None) is False       # Must reject None
+    assert is_loopback_address("8.8.8.8") is False
+    assert is_loopback_address("google.com") is False
 
     try:
         enable_offline_guard()
         assert is_offline_guard_active() is True
 
-        # Attempting outbound connection to non-loopback IP must raise PrivacyViolationError
+        # 1. socket.connect to external IP
         s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         with pytest.raises(PrivacyViolationError) as exc_info:
             s1.connect(("8.8.8.8", 53))
         assert "blocked by in-process network guard" in str(exc_info.value)
         s1.close()
 
-        # Attempting create_connection to external host must raise PrivacyViolationError
+        # 2. socket.connect to unspecified 0.0.0.0 must be blocked!
+        s_unspec = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            s_unspec.connect(("0.0.0.0", 80))
+        assert "blocked by in-process network guard" in str(exc_info.value)
+        s_unspec.close()
+
+        # 3. socket.connect_ex to external IP
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            s2.connect_ex(("1.1.1.1", 443))
+        assert "connect_ex attempt" in str(exc_info.value)
+        s2.close()
+
+        # 4. socket.sendto (UDP datagram) to external IP
+        s_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            s_udp.sendto(b"test-payload", ("8.8.4.4", 53))
+        assert "UDP datagram transmission" in str(exc_info.value)
+        s_udp.close()
+
+        # 5. socket.create_connection to external host
         with pytest.raises(PrivacyViolationError) as exc_info:
             socket.create_connection(("1.1.1.1", 53), timeout=0.1)
         assert "blocked by in-process network guard" in str(exc_info.value)
 
-        # Attempting DNS resolution for external host must raise PrivacyViolationError
+        # 6. socket.getaddrinfo for external host
         with pytest.raises(PrivacyViolationError) as exc_info:
             socket.getaddrinfo("api.openai.com", 443)
         assert "DNS resolution for external host" in str(exc_info.value)
 
-        # Attempting gethostbyname for external host must raise PrivacyViolationError
+        # 7. socket.gethostbyname for external host
         with pytest.raises(PrivacyViolationError) as exc_info:
             socket.gethostbyname("api.anthropic.com")
         assert "DNS resolution for external hostname" in str(exc_info.value)
 
-        # Loopback connection should NOT raise PrivacyViolationError (may raise ConnectionRefusedError)
+        # 8. socket.gethostbyname_ex for external host
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            socket.gethostbyname_ex("huggingface.co")
+        assert "DNS extended resolution" in str(exc_info.value)
+
+        # 9. socket.gethostbyaddr for external IP
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            socket.gethostbyaddr("8.8.8.8")
+        assert "Reverse DNS lookup" in str(exc_info.value)
+
+        # 10. socket.getnameinfo for external address
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            socket.getnameinfo(("8.8.8.8", 53), 0)
+        assert "Reverse name lookup" in str(exc_info.value)
+
+        # 11. Loopback connections should NOT raise PrivacyViolationError
         s_local = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            # Port 65432 likely closed, but should not raise PrivacyViolationError
             s_local.connect(("127.0.0.1", 65432))
         except PrivacyViolationError:
             pytest.fail("Loopback connection was incorrectly blocked by privacy guard!")
         except (ConnectionRefusedError, OSError):
-            # Normal socket behavior when nothing is listening on that port
             pass
         finally:
             s_local.close()
+
+        # 12. Localhost DNS resolution should NOT raise PrivacyViolationError
+        try:
+            resolved = socket.getaddrinfo("localhost", 80)
+            assert len(resolved) > 0
+        except PrivacyViolationError:
+            pytest.fail("Localhost resolution was incorrectly blocked by privacy guard!")
 
     finally:
         disable_offline_guard()

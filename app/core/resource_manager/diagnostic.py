@@ -60,7 +60,7 @@ def run_hardware_diagnostic() -> int:
         file_size_mb=2000,
         context_window=4096,
         model_name="Llama-3.2-3B-Instruct-Q4_K_M",
-        available_vram_mb=profile.recommended_max_vram_mb or 2800,
+        available_vram_mb=profile.recommended_max_vram_mb,
     )
     print(f"  Model GGUF File Size:     {sample_est.file_size_mb} MB")
     print(f"  Context Window:           {sample_est.context_window} tokens")
@@ -72,6 +72,7 @@ def run_hardware_diagnostic() -> int:
     print(f"  Disclaimer:               {sample_est.disclaimer}")
 
     print("\n[Resource Allocator Recommendations]:")
+    print(f"  Budget Status:                 {profile.budget_status.upper()}")
     print(f"  Dynamic Safe VRAM Cap:         {profile.recommended_max_vram_mb} MB (accounts for free VRAM)")
     print(f"  Currently Available VRAM:      {profile.currently_available_vram_mb} MB")
     print(f"  Static VRAM Ceiling:           {profile.static_vram_ceiling_mb} MB")

@@ -116,6 +116,7 @@ class HardwareProfile(BaseModel):
     storage: StorageInfo
     gpus: List[GPUInfo] = Field(default_factory=list)
     has_nvidia_gpu: bool = False
+    budget_status: str = "unavailable"  # "measured", "zero_available", "unavailable"
     recommended_max_vram_mb: int = 0
     currently_available_vram_mb: int = 0
     static_vram_ceiling_mb: int = 0
@@ -292,12 +293,13 @@ class HardwareInspector:
         file_size_mb: int,
         context_window: int = 4096,
         model_name: str = "Quantized LLM",
-        available_vram_mb: int = 2800,
+        available_vram_mb: int = 0,
     ) -> ModelMemoryEstimate:
         """Calculates realistic VRAM requirements including weights, KV cache, activations, and CUDA runtime.
 
         All estimates are labeled as approximate.
         Total VRAM = Model Weights + Context KV Cache + Compute/Scratch Buffers + CUDA Context Overhead.
+        If available_vram_mb <= 0, automatically concludes cpu_only without unsafe fallback assumptions.
         """
         weights_mb = file_size_mb
 
@@ -309,27 +311,35 @@ class HardwareInspector:
         runtime_overhead_mb = 500
 
         total_vram_mb = weights_mb + kv_cache_mb + runtime_overhead_mb
-        fits = total_vram_mb <= available_vram_mb
 
-        if fits:
-            strategy = "full_gpu"
-            details = (
-                f"[Approximate Estimate] Full GPU offload likely. Total footprint ~{total_vram_mb} MB "
-                f"({weights_mb}MB weights + ~{kv_cache_mb}MB KV-cache + ~{runtime_overhead_mb}MB runtime buffers) "
-                f"fits within {available_vram_mb} MB available safe VRAM budget."
-            )
-        elif weights_mb < available_vram_mb:
-            strategy = "hybrid_cpu_gpu"
-            details = (
-                f"[Approximate Estimate] Hybrid CPU/GPU offload required. Estimated footprint (~{total_vram_mb} MB) "
-                f"exceeds safe VRAM budget ({available_vram_mb} MB). Offload weights partially or place KV-cache in RAM."
-            )
-        else:
+        if available_vram_mb <= 0:
+            fits = False
             strategy = "cpu_only"
             details = (
-                f"[Approximate Estimate] CPU-only inference required. Model weights alone ({weights_mb} MB) "
-                f"exceed safe VRAM budget ({available_vram_mb} MB)."
+                f"[Approximate Estimate] CPU-only inference required: Available safe VRAM budget is 0 MB "
+                f"(GPU memory unavailable or depleted)."
             )
+        else:
+            fits = total_vram_mb <= available_vram_mb
+            if fits:
+                strategy = "full_gpu"
+                details = (
+                    f"[Approximate Estimate] Full GPU offload likely. Total footprint ~{total_vram_mb} MB "
+                    f"({weights_mb}MB weights + ~{kv_cache_mb}MB KV-cache + ~{runtime_overhead_mb}MB runtime buffers) "
+                    f"fits within {available_vram_mb} MB available safe VRAM budget."
+                )
+            elif weights_mb < available_vram_mb:
+                strategy = "hybrid_cpu_gpu"
+                details = (
+                    f"[Approximate Estimate] Hybrid CPU/GPU offload required. Estimated footprint (~{total_vram_mb} MB) "
+                    f"exceeds safe VRAM budget ({available_vram_mb} MB). Offload weights partially or place KV-cache in RAM."
+                )
+            else:
+                strategy = "cpu_only"
+                details = (
+                    f"[Approximate Estimate] CPU-only inference required. Model weights alone ({weights_mb} MB) "
+                    f"exceed safe VRAM budget ({available_vram_mb} MB)."
+                )
 
         return ModelMemoryEstimate(
             model_name=model_name,
@@ -360,22 +370,27 @@ class HardwareInspector:
 
         has_nvidia = len(gpus) > 0
 
-        # Calculate safe VRAM budget for RTX 3050 4GB:
-        # 1. Static ceiling: total VRAM minus 1200MB reserved for Windows Desktop Window Manager + UI + Screen capture buffer
-        # 2. Dynamic safe cap: currently available (free) VRAM minus 400MB runtime buffer
+        # Calculate safe VRAM budget for RTX 3050 4GB or other GPUs:
+        # Distinguish:
+        # 1. "measured": Known positive total and free VRAM
+        # 2. "zero_available": Known discrete GPU, but 0 MB free VRAM available
+        # 3. "unavailable": No discrete GPU detected, or query failed/timed out, or total VRAM is 0/unknown
         if has_nvidia and gpus[0].total_vram_mb > 0:
             total_vram = gpus[0].total_vram_mb
             currently_available_vram = gpus[0].free_vram_mb
             static_ceiling = max(0, total_vram - 1200)
 
             if currently_available_vram > 0:
+                budget_status = "measured"
                 dynamic_safe = max(0, currently_available_vram - 400)
-                # Cap the dynamic allocation by the static ceiling
                 recommended_max_vram = min(static_ceiling, dynamic_safe)
             else:
-                dynamic_safe = static_ceiling
-                recommended_max_vram = static_ceiling
+                # Known zero VRAM available!
+                budget_status = "zero_available"
+                dynamic_safe = 0
+                recommended_max_vram = 0
         else:
+            budget_status = "unavailable"
             total_vram = 0
             currently_available_vram = 0
             static_ceiling = 0
@@ -387,10 +402,10 @@ class HardwareInspector:
         recommended_max_ram = max(2048, memory.available_ram_mb - 2048)
 
         recommendations: List[str] = []
-        if has_nvidia:
+        if budget_status == "measured":
             recommendations.append(
                 f"GPU detected: {gpus[0].name} (Total: {total_vram} MB, Currently Free: {currently_available_vram} MB). "
-                f"Dynamic safe VRAM cap: {recommended_max_vram} MB (Static ceiling: {static_ceiling} MB)."
+                f"Budget Status: MEASURED. Dynamic safe VRAM cap: {recommended_max_vram} MB (Static ceiling: {static_ceiling} MB)."
             )
             recommendations.append(
                 "Approximate estimates: VRAM footprint depends on model architecture, GGUF tensor layout, context length, and active desktop processes."
@@ -403,9 +418,15 @@ class HardwareInspector:
                 recommendations.append(
                     "Use Lazy Loading and auto-unloading for large weights to prevent Out-Of-Memory (OOM) errors."
                 )
+        elif budget_status == "zero_available":
+            recommendations.append(
+                f"GPU detected: {gpus[0].name} (Total: {total_vram} MB), but 0 MB free VRAM currently available. "
+                "Budget Status: ZERO_AVAILABLE. Safe GPU allocation budget is 0 MB. Falling back to CPU inference."
+            )
         else:
             recommendations.append(
-                "No discrete NVIDIA GPU detected via nvidia-smi. Relying on optimized CPU inference (llama.cpp with AVX2)."
+                "No discrete NVIDIA GPU detected via nvidia-smi (or query unavailable). "
+                "Budget Status: UNAVAILABLE. Safe GPU allocation budget is 0 MB. Relying on optimized CPU inference (llama.cpp AVX2)."
             )
 
         if memory.total_ram_mb <= 16384:
@@ -424,6 +445,7 @@ class HardwareInspector:
             storage=storage,
             gpus=gpus,
             has_nvidia_gpu=has_nvidia,
+            budget_status=budget_status,
             recommended_max_vram_mb=recommended_max_vram,
             currently_available_vram_mb=currently_available_vram,
             static_vram_ceiling_mb=static_ceiling,

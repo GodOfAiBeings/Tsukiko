@@ -77,6 +77,10 @@ def main(args: list[str] | None = None) -> int:
     setup_logging(log_level=log_level)
     logger.info(f"Starting {__app_name__} v{__version__}...")
 
+    # Enforce technical offline network barrier before any subsystem initialization
+    from app.core.privacy.enforcement import enable_offline_guard
+    enable_offline_guard()
+
     # Initialize orchestrator
     orchestrator = TsukikoOrchestrator(config=config)
     orchestrator.initialize()

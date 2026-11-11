@@ -1,6 +1,6 @@
 # Tsukiko Development Log
 
-## Phase 1: Foundation (Initial Build: 2026-11-11 | Audit & Repair: 2026-11-11)
+## Phase 1: Foundation (Initial Build: 2026-11-11 | Audit & Repair: 2026-11-11 | Final Hardening: 2026-11-11)
 
 ### Status: Complete, Audited & Verified
 
@@ -25,31 +25,32 @@ An in-depth engineering audit was conducted on the Phase 1 codebase, identifying
 
 ---
 
-### Follow-up Audit & Hardening Ledger (2026-11-11)
+### Final Security and Reliability Hardening Ledger (2026-11-11)
 
-A secondary audit addressed remaining findings, elevating test coverage from 16 to 20 passing tests:
+A third hardening cycle completed all remaining engineering corrections, expanding coverage to 37 passing unit, regression, packaging, and integration tests:
 
-1. **Dynamic VRAM Budgeting & Approximation Disclaimers:**
-   * Updated `HardwareInspector.inspect()` to compute `recommended_max_vram_mb` using `min(static_ceiling, dynamic_safe)`, directly accounting for currently available free VRAM (`free_vram - 400MB`).
-   * Explicitly labeled `ModelMemoryEstimate` as approximate (`is_approximate = True`) and added prominent disclaimers.
-   * Regression verified in `tests/test_hardware.py::test_safe_budget_calculation` and `test_model_vram_estimation_accounts_for_kv_cache_and_overhead`.
-2. **Technically Enforced Offline Privacy Guard:**
-   * Implemented `app.core.privacy.enforcement` (`enable_offline_guard()`, `disable_offline_guard()`, `PrivacyViolationError`).
-   * Intercepts `socket.socket.connect` and `socket.create_connection` at runtime, aborting any outbound connection to non-loopback addresses.
-   * Automatically activated during `orchestrator.initialize()`.
-   * Regression verified in `tests/test_config.py::test_offline_privacy_guard_enforcement`.
-3. **Packaging Decoupling for Standalone Execution:**
-   * Extracted diagnostic report generation into `app.core.resource_manager.diagnostic:run_hardware_diagnostic()`.
-   * Updated `app/main.py` so `tsukiko --check-hardware` operates fully inside and outside source checkout without importing `scripts/`.
-   * Bundled package data YAML in `pyproject.toml` and updated `find_default_config_path()` to locate package-bundled configs.
-   * Regression verified in `tests/test_entrypoint.py::test_check_hardware_packaged_entrypoint` and `tests/test_hardware.py::test_run_hardware_diagnostic_packaged`.
-4. **Environment Fixture Isolation:**
-   * Refactored `clean_env` to use `restore_environment_context()`, verifying restoration of modified, added, and deleted environment variables.
-   * Regression verified in `tests/test_config.py::test_clean_env_fixture_complete_restoration`.
-5. **Bounded-Time Deadlock Prevention Test:**
-   * Added `test_orchestrator_start_deadlock_bounded_time` in `tests/test_entrypoint.py` using `concurrent.futures.ThreadPoolExecutor` with a strict 5.0s timeout to prevent hanging test runs.
+1. **Strict Offline Network Enforcement (`app/core/privacy/enforcement.py`):**
+   * **Strict Allowlist**: Permits only IPv4 loopback (`127.0.0.0/8`), IPv6 loopback (`::1`), and loopback-resolved `localhost`.
+   * **Unspecified Address Rejection**: Strictly rejects `0.0.0.0` and `::` (preventing interface-routing bypasses).
+   * **Extended API Surface**: Hooked `socket.connect_ex`, `socket.sendto` (UDP datagrams), `socket.gethostbyname_ex`, `socket.gethostbyaddr`, and `socket.getnameinfo`. All unauthorized external calls raise `PrivacyViolationError`.
+   * **Atomic Rollback & Persistent Lifecycle**: Added atomic rollback if hooking fails. Removed guard deactivation from orchestrator `stop()` so the process remains guarded for its entire lifetime.
+2. **Windows Firewall Policy Strategy (`app/core/privacy/windows_firewall.py`):**
+   * **Interpreter Safety Protection**: Prohibits creating Windows Firewall rules targeting shared Python interpreters (`python.exe`, `pythonw.exe`), preventing accidental disruption to workstation tooling.
+   * **Dedicated Binary Integration**: Supports generating and managing rules targeting dedicated packaged binaries (`tsukiko.exe`).
+   * **Honest Status Reporting**: Reports `in_process_only` when running in standard Python, `os_policy_not_configured` when binary lacks firewall rule, and `os_policy_active` when kernel-level rule is confirmed active.
+3. **Fail-Safe VRAM Budgeting (`app/core/resource_manager/hardware.py` & `diagnostic.py`):**
+   * Removed unsafe fallback `profile.recommended_max_vram_mb or 2800`.
+   * Categorized GPU state into `budget_status`: `"measured"` (known positive free VRAM), `"zero_available"` (discrete GPU detected with 0MB free VRAM), and `"unavailable"` (no GPU or query failed).
+   * Safe allocation budget is strictly 0 MB when VRAM is 0 or unavailable, automatically selecting CPU-only inference without crashing.
+4. **Isolated Subprocess Deadlock Prevention Tests (`tests/test_entrypoint.py`):**
+   * Replaced in-thread deadlock tests with subprocess execution under a bounded 5.0s timeout with automatic process reaping.
+   * Covers direct `start()`, repeated `start()`, repeated `stop()`, initialization failure handling, and guard persistence.
+5. **Real Package Installation Verification (`tests/test_packaging.py`):**
+   * Successfully built wheel `tsukiko-0.1.0-py3-none-any.whl`.
+   * Verified in an isolated temporary virtual environment outside repository checkout without `PYTHONPATH` using `tsukiko --check-hardware`.
+   * Verified bundled `default_config.yaml` loads cleanly from package resources.
 6. **Test Suite Expansion:**
-   * All 20 tests pass in ~4.7s. Verified standalone CLI `tsukiko --check-hardware` outside source directory.
+   * 37 tests passing in ~9.9s with 0 errors and 0 warnings.
 
 ---
 
@@ -57,14 +58,15 @@ A secondary audit addressed remaining findings, elevating test coverage from 16 
 
 | Subsystem / Feature | Classification | Notes |
 |---|---|---|
-| Workstation Hardware Profiler | **Implemented & Tested** | Queries AMD Ryzen CPU, RAM, RTX 3050 VRAM, and storage with safe fallbacks. |
-| Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead. |
+| Workstation Hardware Profiler | **Implemented & Tested** | Queries AMD Ryzen CPU, RAM, RTX 3050 VRAM, and storage with safe fallbacks and status categorization (`measured`/`zero_available`/`unavailable`). |
+| Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
-| Strict Privacy Contract | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and offline local-only operation. |
+| Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules and honest status inspection. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
-| Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`). |
-| CLI Interface | **Implemented & Tested** | Flags `--version`, `--help`, `--check-hardware`, `--headless`, `--log-level`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 16 unit and regression tests passing in 1.44s. |
+| Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
+| CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
+| Automated Pytest Test Suite | **Implemented & Tested** | 37 unit, regression, and packaging tests passing. |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
