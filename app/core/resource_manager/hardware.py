@@ -20,39 +20,39 @@ from app.core.logging.logger import get_logger
 logger = get_logger("RESOURCE")
 
 
-def _safe_parse_int(val: Any, default: int = 0) -> int:
-    """Safely parses integer values from CLI outputs (handles [N/A], [Not Supported], non-numeric)."""
+def _safe_parse_optional_int(val: Any) -> Optional[int]:
+    """Safely parses integer values from CLI outputs; returns None if missing, [N/A], [Not Supported], or non-numeric."""
     if val is None:
-        return default
+        return None
+    cleaned = str(val).strip()
+    if not cleaned or cleaned.startswith("[") or "not" in cleaned.lower() or "n/a" in cleaned.lower():
+        return None
     try:
-        cleaned = str(val).strip()
-        if not cleaned or cleaned.startswith("[") or "not" in cleaned.lower() or "n/a" in cleaned.lower():
-            return default
         return int(float(cleaned))
     except (ValueError, TypeError):
-        return default
+        return None
 
 
-def _safe_parse_float(val: Any, default: Optional[float] = None) -> Optional[float]:
-    """Safely parses float values from CLI outputs (handles [N/A], [Not Supported], non-numeric)."""
+def _safe_parse_optional_float(val: Any) -> Optional[float]:
+    """Safely parses float values from CLI outputs; returns None if missing, [N/A], [Not Supported], or non-numeric."""
     if val is None:
-        return default
+        return None
+    cleaned = str(val).strip()
+    if not cleaned or cleaned.startswith("[") or "not" in cleaned.lower() or "n/a" in cleaned.lower():
+        return None
     try:
-        cleaned = str(val).strip()
-        if not cleaned or cleaned.startswith("[") or "not" in cleaned.lower() or "n/a" in cleaned.lower():
-            return default
         return float(cleaned)
     except (ValueError, TypeError):
-        return default
+        return None
 
 
 class GPUInfo(BaseModel):
     name: str = "Unknown GPU"
     driver_version: str = "N/A"
     cuda_driver_version: str = "N/A"
-    total_vram_mb: int = 0
-    used_vram_mb: int = 0
-    free_vram_mb: int = 0
+    total_vram_mb: Optional[int] = None
+    used_vram_mb: Optional[int] = None
+    free_vram_mb: Optional[int] = None
     temperature_c: Optional[int] = None
     power_draw_w: Optional[float] = None
     cuda_runtime_available: bool = False
@@ -118,7 +118,7 @@ class HardwareProfile(BaseModel):
     has_nvidia_gpu: bool = False
     budget_status: str = "unavailable"  # "measured", "zero_available", "unavailable"
     recommended_max_vram_mb: int = 0
-    currently_available_vram_mb: int = 0
+    currently_available_vram_mb: Optional[int] = None
     static_vram_ceiling_mb: int = 0
     dynamic_safe_vram_mb: int = 0
     recommended_max_ram_mb: int = 0
@@ -127,7 +127,7 @@ class HardwareProfile(BaseModel):
 
 
 class HardwareInspector:
-    """Inspects the local Windows environment, hardware limits, and framework state."""
+    """Inspects local Windows environment, hardware limits, and framework state."""
 
     @classmethod
     def get_cpu_info(cls) -> CPUInfo:
@@ -175,7 +175,7 @@ class HardwareInspector:
 
     @classmethod
     def parse_nvidia_smi_output(cls, stdout_text: str) -> List[GPUInfo]:
-        """Safely parses nvidia-smi CSV output, handling missing fields, [N/A], and non-numeric metrics."""
+        """Safely parses nvidia-smi CSV output, preserving None for missing/unavailable metrics."""
         gpus: List[GPUInfo] = []
         for line in stdout_text.strip().splitlines():
             line = line.strip()
@@ -185,11 +185,11 @@ class HardwareInspector:
             if len(parts) >= 5:
                 gpu_name = parts[0]
                 driver_ver = parts[1]
-                total_mb = _safe_parse_int(parts[2], 0)
-                used_mb = _safe_parse_int(parts[3], 0)
-                free_mb = _safe_parse_int(parts[4], 0)
-                temp_c = _safe_parse_int(parts[5], 0) if len(parts) > 5 and parts[5] not in ("[N/A]", "[Not Supported]") else None
-                power_w = _safe_parse_float(parts[6]) if len(parts) > 6 else None
+                total_mb = _safe_parse_optional_int(parts[2])
+                used_mb = _safe_parse_optional_int(parts[3])
+                free_mb = _safe_parse_optional_int(parts[4])
+                temp_c = _safe_parse_optional_int(parts[5]) if len(parts) > 5 else None
+                power_w = _safe_parse_optional_float(parts[6]) if len(parts) > 6 else None
 
                 gpus.append(
                     GPUInfo(
@@ -302,14 +302,8 @@ class HardwareInspector:
         If available_vram_mb <= 0, automatically concludes cpu_only without unsafe fallback assumptions.
         """
         weights_mb = file_size_mb
-
-        # Estimate KV cache footprint (~0.11 MB per token for standard 3B-4B architectures with 4096 context)
-        # Baseline: 4096 tokens in FP16 KV cache ~= 450 MB; 2048 tokens ~= 225 MB
         kv_cache_mb = int((context_window / 4096.0) * 450)
-
-        # Compute activation scratch buffers (~200 MB) + CUDA runtime context (~300 MB)
         runtime_overhead_mb = 500
-
         total_vram_mb = weights_mb + kv_cache_mb + runtime_overhead_mb
 
         if available_vram_mb <= 0:
@@ -357,60 +351,72 @@ class HardwareInspector:
 
     @classmethod
     def inspect(cls) -> HardwareProfile:
-        """Performs a comprehensive hardware audit and computes allocation limits taking into account currently free VRAM."""
+        """Performs a comprehensive hardware audit and computes allocation limits taking into account currently free VRAM.
+
+        Distinguishes:
+        - 'measured': GPU exists, total VRAM is known positive, and free VRAM is known positive.
+        - 'zero_available': GPU exists, total VRAM is known, and free VRAM is confirmed to be exactly 0.
+        - 'unavailable': No GPU, query failed/timed out, free VRAM is N/A/malformed, or total VRAM cannot be established.
+        """
         cpu = cls.get_cpu_info()
         memory = cls.get_memory_info()
         storage = cls.get_storage_info()
         gpus = cls.query_nvidia_smi()
         frameworks = cls.check_framework_compatibility()
 
-        # Update GPUInfo with framework status
         for gpu in gpus:
             gpu.cuda_runtime_available = frameworks.llama_cpp_cuda_supported or frameworks.torch_cuda_supported
 
         has_nvidia = len(gpus) > 0
 
-        # Calculate safe VRAM budget for RTX 3050 4GB or other GPUs:
-        # Distinguish:
-        # 1. "measured": Known positive total and free VRAM
-        # 2. "zero_available": Known discrete GPU, but 0 MB free VRAM available
-        # 3. "unavailable": No discrete GPU detected, or query failed/timed out, or total VRAM is 0/unknown
-        if has_nvidia and gpus[0].total_vram_mb > 0:
-            total_vram = gpus[0].total_vram_mb
-            currently_available_vram = gpus[0].free_vram_mb
-            static_ceiling = max(0, total_vram - 1200)
+        if has_nvidia:
+            gpu = gpus[0]
+            total_vram = gpu.total_vram_mb
+            free_vram = gpu.free_vram_mb
 
-            if currently_available_vram > 0:
-                budget_status = "measured"
-                dynamic_safe = max(0, currently_available_vram - 400)
-                recommended_max_vram = min(static_ceiling, dynamic_safe)
+            if total_vram is not None and total_vram > 0 and free_vram is not None:
+                if free_vram > 0:
+                    budget_status = "measured"
+                    static_ceiling = max(0, total_vram - 1200)
+                    dynamic_safe = max(0, free_vram - 400)
+                    recommended_max_vram = min(static_ceiling, dynamic_safe)
+                elif free_vram == 0:
+                    budget_status = "zero_available"
+                    static_ceiling = max(0, total_vram - 1200)
+                    dynamic_safe = 0
+                    recommended_max_vram = 0
+                else:
+                    budget_status = "unavailable"
+                    static_ceiling = 0
+                    dynamic_safe = 0
+                    recommended_max_vram = 0
             else:
-                # Known zero VRAM available!
-                budget_status = "zero_available"
+                # Either total_vram is None/0, or free_vram is None (N/A or malformed)
+                budget_status = "unavailable"
+                static_ceiling = 0
                 dynamic_safe = 0
                 recommended_max_vram = 0
         else:
             budget_status = "unavailable"
-            total_vram = 0
-            currently_available_vram = 0
+            total_vram = None
+            free_vram = None
             static_ceiling = 0
             dynamic_safe = 0
             recommended_max_vram = 0
 
         # Calculate safe RAM budget for 16GB system
-        # Keep at least 4GB reserved for Windows OS + background tasks
         recommended_max_ram = max(2048, memory.available_ram_mb - 2048)
 
         recommendations: List[str] = []
         if budget_status == "measured":
             recommendations.append(
-                f"GPU detected: {gpus[0].name} (Total: {total_vram} MB, Currently Free: {currently_available_vram} MB). "
+                f"GPU detected: {gpus[0].name} (Total: {total_vram} MB, Currently Free: {free_vram} MB). "
                 f"Budget Status: MEASURED. Dynamic safe VRAM cap: {recommended_max_vram} MB (Static ceiling: {static_ceiling} MB)."
             )
             recommendations.append(
                 "Approximate estimates: VRAM footprint depends on model architecture, GGUF tensor layout, context length, and active desktop processes."
             )
-            if gpus[0].total_vram_mb <= 4096:
+            if total_vram is not None and total_vram <= 4096:
                 recommendations.append(
                     "Strict 4GB VRAM constraint: Model weights + KV cache + CUDA overhead must not exceed safe VRAM budget. "
                     "Prioritize 3B–4B quantized models (Q4_K_M). Avoid loading conversational LLM and Vision LLM simultaneously."
@@ -425,7 +431,7 @@ class HardwareInspector:
             )
         else:
             recommendations.append(
-                "No discrete NVIDIA GPU detected via nvidia-smi (or query unavailable). "
+                "No discrete NVIDIA GPU detected via nvidia-smi (or query unavailable/unmeasured). "
                 "Budget Status: UNAVAILABLE. Safe GPU allocation budget is 0 MB. Relying on optimized CPU inference (llama.cpp AVX2)."
             )
 
@@ -447,7 +453,7 @@ class HardwareInspector:
             has_nvidia_gpu=has_nvidia,
             budget_status=budget_status,
             recommended_max_vram_mb=recommended_max_vram,
-            currently_available_vram_mb=currently_available_vram,
+            currently_available_vram_mb=free_vram,
             static_vram_ceiling_mb=static_ceiling,
             dynamic_safe_vram_mb=dynamic_safe,
             recommended_max_ram_mb=recommended_max_ram,

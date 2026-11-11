@@ -19,7 +19,7 @@ Tsukiko is engineered from first principles for:
 1. **Zero Outbound Telemetry / Zero Cloud APIs**: Runs completely local.
 2. **Strict Privacy by Default**: Screen sharing and microphone are explicitly disabled at startup.
 3. **Fail-Safe Dynamic VRAM Budgeting**: Rejects hardcoded VRAM fallbacks. Distinguishes `measured`, `zero_available`, and `unavailable` GPU states. Automatically selects CPU inference if safe VRAM is depleted.
-4. **Dual-Layer Privacy Enforcement**: Combines technical in-process socket/DNS interception with an honest OS-level Windows Firewall strategy for dedicated packaged binaries.
+4. **Dual-Layer Privacy Enforcement**: Combines technical in-process family-aware socket/DNS interception with an honest OS-level Windows Firewall strategy for dedicated packaged binaries.
 5. **Decoupled Modular Subsystems**: Independent brain, memory, perception, voice, desktop control, and UI modules.
 
 ---
@@ -31,12 +31,12 @@ Tsukiko is engineered from first principles for:
 | **Core Architecture & Orchestrator** | **Implemented & Tested** | Composition root with thread-safe `threading.RLock()` lifecycle. Verified via bounded subprocess deadlock tests in `tests/test_entrypoint.py`. |
 | **Pydantic Configuration System** | **Implemented & Tested** | Type-safe settings with typed env var parsing (`bool`, `int`, `float`, `str`). Verified in `tests/test_config.py`. |
 | **Strict Privacy Assertions** | **Implemented & Tested** | Enforces `local_only=True`, zero telemetry, zero cloud fallback. Verified in `tests/test_config.py`. |
-| **In-Process Network & DNS Guard** | **Implemented & Tested** | Hooks `connect`, `connect_ex`, `sendto` (UDP), `create_connection`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, `getnameinfo`. Verified in `tests/test_config.py`. |
-| **Windows Firewall Policy Strategy** | **Implemented & Tested** | `app.core.privacy.windows_firewall` protects shared interpreters, generates dedicated binary policies, and reports honest security status. Verified in `tests/test_windows_firewall.py`. |
-| **Hardware & Resource Auditor** | **Implemented & Tested** | Safe `nvidia-smi` parser, distinct ML framework check (`llama.cpp`, `torch`, `onnxruntime`), fail-safe VRAM budgeting without hardcoded fallbacks. Verified in `tests/test_hardware.py`. |
+| **Family-Aware Socket & DNS Guard** | **Implemented & Tested** | Hooks `connect`, `connect_ex`, `send`, `sendall`, `sendmsg`, `sendto` (both signatures), `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, `getnameinfo`. Preserves `AF_UNIX` local IPC. Verified in `tests/test_privacy_enforcement.py` (14 tests). |
+| **Windows Firewall Policy Strategy** | **Implemented & Tested** | `app.core.privacy.windows_firewall` protects shared interpreters, generates dedicated binary policies, verifies exact rule properties, and reports 4 honest security states. Verified in `tests/test_windows_firewall.py` (13 tests). |
+| **Hardware & Resource Auditor** | **Implemented & Tested** | Safe `nvidia-smi` parser, distinct ML framework check (`llama.cpp`, `torch`, `onnxruntime`), fail-safe VRAM classification matrix (`measured`, `zero_available`, `unavailable`). Verified in `tests/test_hardware.py` (14 tests). |
 | **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
-| **Packaging & Distribution** | **Implemented & Tested** | Wheel packaging verified out-of-tree and in isolated virtual environment via `tsukiko --check-hardware`. Verified in `tests/test_packaging.py`. |
-| **Automated Test Suite** | **Implemented & Tested** | 37 unit and regression tests passing with 0 warnings/errors. |
+| **Packaging & Distribution** | **Implemented & Tested** | Genuine wheel build, isolated venv installation, out-of-tree CLI execution, and resource isolation verified. Verified in `tests/test_packaging.py` (3 tests). |
+| **Automated Test Suite** | **Implemented & Tested** | 63 unit, regression, packaging, and integration tests passing with 0 warnings and 0 errors. |
 | **Desktop Companion UI** | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting Phase 2 approval. |
 | **Local AI Brain (llama.cpp)** | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No model weights downloaded. |
 | **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
@@ -60,6 +60,7 @@ git --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements/base.txt
+pip install -e ".[dev]"
 ```
 
 ### 3. Run Hardware Audit
@@ -73,7 +74,7 @@ python -m app.main --check-hardware
 ```
 
 ### 4. Execute Test Suite
-Run automated unit and integration tests:
+Run automated unit and integration tests (63 tests):
 ```powershell
 pytest -v
 ```
@@ -82,6 +83,7 @@ pytest -v
 
 ## Documentation Links
 
+* [Developer Guide](DEVELOPMENT.md)
 * [System Architecture](ARCHITECTURE.md)
 * [Hardware & Model Compatibility](MODEL_COMPATIBILITY.md)
 * [Privacy & Security Specification](PRIVACY.md)

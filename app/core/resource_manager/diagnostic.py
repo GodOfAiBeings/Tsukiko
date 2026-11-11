@@ -38,11 +38,15 @@ def run_hardware_diagnostic() -> int:
     print("\n[Graphics & VRAM]:")
     if profile.gpus:
         for idx, gpu in enumerate(profile.gpus):
+            total_str = f"{gpu.total_vram_mb} MB" if gpu.total_vram_mb is not None else "Unknown / N/A"
+            used_str = f"{gpu.used_vram_mb} MB" if gpu.used_vram_mb is not None else "Unknown / N/A"
+            free_str = f"{gpu.free_vram_mb} MB" if gpu.free_vram_mb is not None else "Unknown / N/A"
+
             print(f"  GPU #{idx}:         {gpu.name}")
             print(f"  Driver Version:   {gpu.driver_version}")
-            print(f"  Total VRAM:       {gpu.total_vram_mb} MB")
-            print(f"  Used VRAM:        {gpu.used_vram_mb} MB")
-            print(f"  Free VRAM:        {gpu.free_vram_mb} MB (Currently Available)")
+            print(f"  Total VRAM:       {total_str}")
+            print(f"  Used VRAM:        {used_str}")
+            print(f"  Free VRAM:        {free_str}")
             if gpu.temperature_c is not None:
                 print(f"  Temperature:      {gpu.temperature_c}°C")
             if gpu.power_draw_w is not None:
@@ -74,9 +78,12 @@ def run_hardware_diagnostic() -> int:
     print("\n[Resource Allocator Recommendations]:")
     print(f"  Budget Status:                 {profile.budget_status.upper()}")
     print(f"  Dynamic Safe VRAM Cap:         {profile.recommended_max_vram_mb} MB (accounts for free VRAM)")
-    print(f"  Currently Available VRAM:      {profile.currently_available_vram_mb} MB")
+    avail_vram_str = f"{profile.currently_available_vram_mb} MB" if profile.currently_available_vram_mb is not None else "Unavailable / Unknown"
+    print(f"  Currently Available VRAM:      {avail_vram_str}")
     print(f"  Static VRAM Ceiling:           {profile.static_vram_ceiling_mb} MB")
     print(f"  Max Recommended RAM for LLM:   {profile.recommended_max_ram_mb} MB")
+    if profile.recommended_max_vram_mb == 0:
+        print(f"  Notice: Safe GPU VRAM budget is 0 MB (status: {profile.budget_status}). Model execution will use CPU inference.")
     for r in profile.recommendations:
         print(f"  - {r}")
 

@@ -1,8 +1,8 @@
 # Tsukiko Development Log
 
-## Phase 1: Foundation (Initial Build: 2026-11-11 | Audit & Repair: 2026-11-11 | Final Hardening: 2026-11-11)
+## Phase 1: Foundation (Initial Build: 2026-11-11 | Audit & Repair: 2026-11-11 | Acceptance Hardening: 2026-11-11)
 
-### Status: Complete, Audited & Verified
+### Status: Complete, Audited, Hardened & Ready for Acceptance
 
 ---
 
@@ -25,32 +25,40 @@ An in-depth engineering audit was conducted on the Phase 1 codebase, identifying
 
 ---
 
-### Final Security and Reliability Hardening Ledger (2026-11-11)
+### Final Audit Corrections and Acceptance Hardening (2026-11-11)
 
-A third hardening cycle completed all remaining engineering corrections, expanding coverage to 37 passing unit, regression, packaging, and integration tests:
+A comprehensive hardening cycle resolved the four remaining audit areas, elevating automated coverage to 63 passing tests:
 
-1. **Strict Offline Network Enforcement (`app/core/privacy/enforcement.py`):**
-   * **Strict Allowlist**: Permits only IPv4 loopback (`127.0.0.0/8`), IPv6 loopback (`::1`), and loopback-resolved `localhost`.
-   * **Unspecified Address Rejection**: Strictly rejects `0.0.0.0` and `::` (preventing interface-routing bypasses).
-   * **Extended API Surface**: Hooked `socket.connect_ex`, `socket.sendto` (UDP datagrams), `socket.gethostbyname_ex`, `socket.gethostbyaddr`, and `socket.getnameinfo`. All unauthorized external calls raise `PrivacyViolationError`.
-   * **Atomic Rollback & Persistent Lifecycle**: Added atomic rollback if hooking fails. Removed guard deactivation from orchestrator `stop()` so the process remains guarded for its entire lifetime.
-2. **Windows Firewall Policy Strategy (`app/core/privacy/windows_firewall.py`):**
-   * **Interpreter Safety Protection**: Prohibits creating Windows Firewall rules targeting shared Python interpreters (`python.exe`, `pythonw.exe`), preventing accidental disruption to workstation tooling.
-   * **Dedicated Binary Integration**: Supports generating and managing rules targeting dedicated packaged binaries (`tsukiko.exe`).
-   * **Honest Status Reporting**: Reports `in_process_only` when running in standard Python, `os_policy_not_configured` when binary lacks firewall rule, and `os_policy_active` when kernel-level rule is confirmed active.
-3. **Fail-Safe VRAM Budgeting (`app/core/resource_manager/hardware.py` & `diagnostic.py`):**
-   * Removed unsafe fallback `profile.recommended_max_vram_mb or 2800`.
-   * Categorized GPU state into `budget_status`: `"measured"` (known positive free VRAM), `"zero_available"` (discrete GPU detected with 0MB free VRAM), and `"unavailable"` (no GPU or query failed).
-   * Safe allocation budget is strictly 0 MB when VRAM is 0 or unavailable, automatically selecting CPU-only inference without crashing.
-4. **Isolated Subprocess Deadlock Prevention Tests (`tests/test_entrypoint.py`):**
-   * Replaced in-thread deadlock tests with subprocess execution under a bounded 5.0s timeout with automatic process reaping.
-   * Covers direct `start()`, repeated `start()`, repeated `stop()`, initialization failure handling, and guard persistence.
-5. **Real Package Installation Verification (`tests/test_packaging.py`):**
-   * Successfully built wheel `tsukiko-0.1.0-py3-none-any.whl`.
-   * Verified in an isolated temporary virtual environment outside repository checkout without `PYTHONPATH` using `tsukiko --check-hardware`.
-   * Verified bundled `default_config.yaml` loads cleanly from package resources.
-6. **Test Suite Expansion:**
-   * 37 tests passing in ~9.9s with 0 errors and 0 warnings.
+1. **Family-Aware Local IPC & Socket Interception (`app/core/privacy/enforcement.py`):**
+   * **Family Awareness**: Evaluates socket family (`self.family`) before parsing destination addresses.
+   * **Local IPC Preservation**: Permitted `AF_UNIX` filesystem paths and abstract socket names where supported, preventing local model server communication from being rejected as Internet hostnames.
+   * **Expanded Interception Surface**: Intercepts `connect`, `connect_ex`, `create_connection`, `send`, `sendall`, `sendmsg`, and `sendto` (both signatures). Connected sockets inspect peer destination via `getpeername()`.
+   * **Strict Allowlist**: Permits IPv4 loopback (`127.0.0.0/8`), IPv6 loopback (`::1`), and locally resolved `localhost` (using `AI_NUMERICHOST` to prevent network DNS leaks).
+   * **Fail-Closed Policy**: Rejects unspecified addresses (`0.0.0.0`, `::`), empty strings, malformed tuples, and external destinations.
+   * **Atomic Rollback**: Verified atomic restoration if activation fails.
+   * **Verification**: 14 tests in `tests/test_privacy_enforcement.py`.
+2. **Strict Windows Firewall Policy Management (`app/core/privacy/windows_firewall.py`):**
+   * **Dedicated Binary Validation**: Requires target to exist, be a regular `.exe` file, match dedicated deployment binary (`tsukiko.exe`), and contain no control characters or shell injection vectors.
+   * **Shared Interpreter Refusal**: Strictly rejects `python.exe`, `pythonw.exe`, `py.exe`, `pytest.exe`, shells, and arbitrary executables.
+   * **Property-Level Verification**: Verifies rule properties: `Direction=Out`, `Action=Block`, `Enabled=Yes`, and exact program path match.
+   * **4-State Security Model**: `in_process_only`, `os_policy_not_configured`, `os_policy_unverified`, and `os_policy_active`.
+   * **User Authorization & Elevation**: Explicit user authorization (`user_authorized=True`) and administrator elevation required for creation and safe removal. Never runs automatically at application startup.
+   * **Verification**: 13 tests in `tests/test_windows_firewall.py`.
+3. **Fail-Safe VRAM Classification Matrix (`app/core/resource_manager/hardware.py`):**
+   * **Optional Metric Preservation**: VRAM metrics are stored as `Optional[int]`, preserving `None` for missing, `[N/A]`, `[Not Supported]`, or malformed values.
+   * **Three Honest States**:
+     * `measured`: Total VRAM known positive, Free VRAM positive -> dynamic safe budget = `min(total - 1200, free - 400)`.
+     * `zero_available`: Total VRAM known, Free VRAM confirmed 0 MB -> 0 MB safe budget, CPU-only fallback.
+     * `unavailable`: No GPU, query failed/timed out, or metrics `[N/A]`/malformed -> 0 MB safe budget, CPU-only fallback.
+   * **Diagnostic Reporting**: Never substitutes a positive default when budget is zero or unavailable. Displays explicit CPU inference notice.
+   * **Verification**: 14 tests in `tests/test_hardware.py`.
+4. **Genuine Wheel Packaging Verification (`tests/test_packaging.py`):**
+   * **Demonstrated 4 Milestones**:
+     1. Built real wheel `tsukiko-0.1.0-py3-none-any.whl` into temporary directory.
+     2. Installed wheel into clean isolated virtual environment via `pip install`.
+     3. Executed `tsukiko --check-hardware` outside source tree without `PYTHONPATH` (exit code 0).
+     4. Verified packaged resources (`default_config.yaml`) load correctly without access to repository source tree, and verified no imports from `scripts/`.
+   * **Verification**: 3 tests in `tests/test_packaging.py`.
 
 ---
 
@@ -66,7 +74,7 @@ A third hardening cycle completed all remaining engineering corrections, expandi
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 37 unit, regression, and packaging tests passing. |
+| Automated Pytest Test Suite | **Implemented & Tested** | 63 unit, regression, packaging, and integration tests passing. |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |

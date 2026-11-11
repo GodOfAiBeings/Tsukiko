@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=65.0.0", "wheel"]
+requires = ["setuptools>=65.0.0", "wheel>=0.40.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -24,6 +24,8 @@ ui = [
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
+    "wheel>=0.40.0",
+    "setuptools>=65.0.0",
 ]
 
 [project.scripts]
