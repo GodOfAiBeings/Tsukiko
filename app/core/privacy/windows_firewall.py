@@ -1,8 +1,13 @@
 """
 Tsukiko Windows Firewall Policy Manager
 Provides safe, application-specific OS-level outbound firewall rule management and status inspection.
-Enforces strict target validation, verifies actual rule properties (direction, action, program, enabled),
-and never targets shared Python interpreters or arbitrary binaries.
+Enforces strict target validation, verifies actual rule properties (direction, action, program, enabled,
+profiles, ownership identity), and never targets shared Python interpreters or arbitrary binaries.
+
+Note on Executable Identity:
+Checking file naming and the Windows PE 'MZ' binary header ensures the target is formatted as a valid
+Windows PE executable. This deployment check is not a cryptographic signature verification (such as
+Authenticode digital signing). Cryptographic verification requires an established code-signing certificate.
 """
 
 from __future__ import annotations
@@ -21,8 +26,12 @@ from app.core.logging.logger import get_logger
 
 logger = get_logger("SYSTEM")
 
-DEFAULT_RULE_NAME = "Tsukiko Outbound Block"
+DEFAULT_RULE_NAME = "Tsukiko Outbound Privacy Boundary"
+LEGACY_RULE_NAME = "Tsukiko Outbound Block"
 EXPECTED_EXECUTABLE_NAME = "tsukiko.exe"
+RULE_GROUPING = "Tsukiko Desktop Companion"
+RULE_OWNERSHIP_MARKER = "[Tsukiko-Privacy-Core:Outbound-Block]"
+DEFAULT_DESCRIPTION = f"{RULE_OWNERSHIP_MARKER} Offline boundary: blocks outbound network traffic for dedicated executable"
 
 # Interpreters, shells, and system binaries that must NEVER be targeted by firewall rules
 DISALLOWED_EXECUTABLE_NAMES = frozenset({
@@ -79,8 +88,11 @@ def is_safe_target_executable(path: Path | str) -> Tuple[bool, str]:
     - Path must exist and be a regular file on disk.
     - File extension must be '.exe'.
     - Filename must match dedicated deployment binary ('tsukiko.exe').
+    - Target must contain valid Windows PE executable magic ('MZ' header).
     - Path must not target shared Python interpreters or shell binaries.
     - Path must not contain control characters or command-injection sequences.
+
+    Limitation: Validating PE header confirms binary format, not cryptographic code signature.
     """
     if path is None:
         return False, "Executable path cannot be None."
@@ -125,6 +137,19 @@ def is_safe_target_executable(path: Path | str) -> Tuple[bool, str]:
             "Arbitrary executables are strictly rejected."
         )
 
+    # PE Header validation: binary must start with 'MZ' (0x4D, 0x5A)
+    try:
+        with open(resolved, "rb") as f:
+            magic = f.read(2)
+            if magic != b"MZ":
+                return (
+                    False,
+                    f"Target file '{resolved}' is not a valid Windows PE binary (missing 'MZ' executable header). "
+                    "Plain text stubs and arbitrary non-PE files are rejected."
+                )
+    except Exception as e:
+        return False, f"Could not inspect target file binary header: {e}"
+
     return True, f"Verified dedicated deployment binary: {resolved}"
 
 
@@ -143,8 +168,9 @@ def generate_firewall_rule_command(
 
     return (
         f'netsh advfirewall firewall add rule name="{rule_name}" '
-        f'dir=out action=block program="{target}" enable=yes '
-        f'description="Tsukiko Offline Privacy Boundary: blocks outbound network traffic for dedicated executable"'
+        f'dir=out action=block program="{target}" enable=yes profile=any '
+        f'group="{RULE_GROUPING}" '
+        f'description="{DEFAULT_DESCRIPTION}"'
     )
 
 
@@ -163,10 +189,12 @@ def verify_firewall_rule(
 
     Validates:
     1. Rule exists and query succeeds.
-    2. Rule is Enabled (Yes).
-    3. Direction is Outbound (Out).
-    4. Action is Block.
-    5. Program exactly matches normalized executable path.
+    2. Rule ownership: Grouping matches 'Tsukiko Desktop Companion' or Description contains '[Tsukiko-Privacy-Core:Outbound-Block]'.
+    3. Rule is Enabled (Yes).
+    4. Direction is Outbound (Out).
+    5. Action is Block.
+    6. Program exactly matches normalized executable path.
+    7. Profiles includes all network profiles (Domain,Private,Public or Any).
     """
     if platform.system() != "Windows":
         return False, "Windows Firewall verification is only available on Windows."
@@ -192,18 +220,41 @@ def verify_firewall_rule(
 
         output = res.stdout
 
-        # Parse key properties case-insensitively
-        enabled_match = re.search(r"^\s*Enabled:\s*(Yes|True)\b", output, re.IGNORECASE | re.MULTILINE)
-        direction_match = re.search(r"^\s*Direction:\s*(Out)\b", output, re.IGNORECASE | re.MULTILINE)
-        action_match = re.search(r"^\s*Action:\s*(Block)\b", output, re.IGNORECASE | re.MULTILINE)
-        program_match = re.search(r"^\s*Program:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
+        # 1. Rule ownership verification (Grouping or Description ownership marker)
+        grouping_match = re.search(r"^\s*Grouping:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
+        description_match = re.search(r"^\s*Description:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
 
+        has_ownership = False
+        if grouping_match and RULE_GROUPING.lower() in grouping_match.group(1).lower():
+            has_ownership = True
+        if description_match and RULE_OWNERSHIP_MARKER.lower() in description_match.group(1).lower():
+            has_ownership = True
+
+        if not has_ownership:
+            return (
+                False,
+                f"Rule '{rule_name}' exists but lacks verified Tsukiko ownership markers "
+                f"(Grouping '{RULE_GROUPING}' or marker '{RULE_OWNERSHIP_MARKER}'). "
+                "Foreign or unrelated rules with the Tsukiko name prefix are rejected."
+            )
+
+        # 2. Enabled
+        enabled_match = re.search(r"^\s*Enabled:\s*(Yes|True)\b", output, re.IGNORECASE | re.MULTILINE)
         if not enabled_match:
             return False, "Rule exists but is not Enabled."
+
+        # 3. Direction Out
+        direction_match = re.search(r"^\s*Direction:\s*(Out)\b", output, re.IGNORECASE | re.MULTILINE)
         if not direction_match:
             return False, "Rule exists but Direction is not Outbound."
+
+        # 4. Action Block
+        action_match = re.search(r"^\s*Action:\s*(Block)\b", output, re.IGNORECASE | re.MULTILINE)
         if not action_match:
             return False, "Rule exists but Action is not Block."
+
+        # 5. Program matches exact normalized executable path
+        program_match = re.search(r"^\s*Program:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
         if not program_match:
             return False, "Rule exists but specifies no Program filter."
 
@@ -219,7 +270,18 @@ def verify_firewall_rule(
                 f"Rule program mismatch: rule targets '{resolved_rule_program}', expected '{resolved_exe}'."
             )
 
-        return True, "Firewall rule verified: Active, Outbound, Block, matching target executable."
+        # 6. Profiles verification
+        profiles_match = re.search(r"^\s*Profiles:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
+        if profiles_match:
+            prof = profiles_match.group(1).strip().lower()
+            if "any" not in prof and not ("domain" in prof and "private" in prof and "public" in prof):
+                return (
+                    False,
+                    f"Rule profiles incomplete: applies only to '{profiles_match.group(1).strip()}', "
+                    "must apply to all network profiles (Domain,Private,Public or Any)."
+                )
+
+        return True, "Firewall rule verified: Active, Outbound, Block, matching target executable, Tsukiko owned."
     except subprocess.TimeoutExpired:
         return False, "Query timed out while inspecting Windows Firewall rules."
     except Exception as e:
@@ -235,7 +297,7 @@ def get_security_status(
     Reports:
     - 'in_process_only': Running under shared Python or unverified non-dedicated binary.
     - 'os_policy_not_configured': Dedicated binary present, but no firewall rule configured.
-    - 'os_policy_unverified': Rule present, but properties (direction/action/path) could not be verified.
+    - 'os_policy_unverified': Rule present, but properties (direction/action/path/ownership) could not be verified.
     - 'os_policy_active': Dedicated binary with confirmed matching Outbound Block firewall rule.
     """
     target = Path(executable_path or sys.executable)
@@ -348,9 +410,14 @@ def create_firewall_rule(
     try:
         cmd_args = [
             netsh_path, "advfirewall", "firewall", "add", "rule",
-            f"name={rule_name}", "dir=out", "action=block",
-            f"program={resolved_target}", "enable=yes",
-            "description=Tsukiko Offline Privacy Boundary: blocks outbound network traffic"
+            f"name={rule_name}",
+            "dir=out",
+            "action=block",
+            f"program={resolved_target}",
+            "enable=yes",
+            "profile=any",
+            f"group={RULE_GROUPING}",
+            f"description={DEFAULT_DESCRIPTION}",
         ]
         res = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
         if res.returncode == 0:
@@ -372,7 +439,8 @@ def remove_firewall_rule(
 ) -> Tuple[bool, str]:
     """Removes a previously configured Tsukiko Windows Firewall rule.
 
-    Requires explicit user authorization. Only removes rules with the 'Tsukiko' prefix.
+    Requires explicit user authorization and verifies that the rule is genuinely Tsukiko-owned before deleting.
+    Refuses to delete arbitrary or foreign rules.
     """
     if not user_authorized:
         return False, "Explicit user authorization is required before modifying Windows Firewall rules."
@@ -389,6 +457,30 @@ def remove_firewall_rule(
     netsh_path = shutil.which("netsh")
     if not netsh_path:
         return False, "netsh utility not found on PATH."
+
+    # Inspect existing rule to verify ownership before deletion
+    try:
+        chk = subprocess.run(
+            [netsh_path, "advfirewall", "firewall", "show", "rule", f"name={rule_name}", "verbose"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if chk.returncode != 0 or "No rules match" in chk.stdout:
+            return False, f"Rule '{rule_name}' does not exist in Windows Firewall."
+
+        output = chk.stdout
+        has_ownership = (
+            RULE_GROUPING.lower() in output.lower()
+            or RULE_OWNERSHIP_MARKER.lower() in output.lower()
+        )
+        if not has_ownership:
+            return (
+                False,
+                f"Refusing to delete rule '{rule_name}': rule exists but is not verified as a Tsukiko-owned rule."
+            )
+    except Exception as e:
+        return False, f"Pre-deletion rule inspection failed: {e}"
 
     try:
         res = subprocess.run(

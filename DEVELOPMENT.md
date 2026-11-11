@@ -53,17 +53,19 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (63 unit, regression, packaging, and integration tests):
+Execute the complete automated test suite (71 unit, regression, packaging, and integration tests):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, DNS, unspecified address rejection, and AF_UNIX local IPC tests.
-* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Property-level firewall rule verification, shared interpreter protection, and 4-state security reporting.
-* [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation.
-* [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping.
-* [`tests/test_packaging.py`](tests/test_packaging.py): Genuine wheel build, isolated venv installation, and out-of-tree CLI execution.
+* [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (19 tests).
+* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Property-level firewall rule verification, Tsukiko rule ownership identity, PE binary format validation, shared interpreter protection, and 4-state security reporting (19 tests).
+* [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
+* [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping (8 tests).
+* [`tests/test_packaging.py`](tests/test_packaging.py): Genuine wheel build, isolated venv installation, and out-of-tree CLI execution (3 tests).
+* [`tests/test_config.py`](tests/test_config.py): Pydantic configuration validation, environment variable parsing, and clean state restoration (6 tests).
+* [`tests/test_logging.py`](tests/test_logging.py): Structured logging format and destination reconfiguration (2 tests).
 
 ---
 
@@ -97,16 +99,35 @@ Remove-Item -Recurse -Force $tmpDir
 
 ### In-Process Socket Interception
 Enforced in [`app/core/privacy/enforcement.py`](app/core/privacy/enforcement.py). Activated automatically at application startup before any subsystem is loaded. Remains active throughout the process lifetime.
+* **Numeric Loopback Enforcement**: Connection authorization strictly requires numeric loopback IPs (`127.0.0.0/8`, `::1`).
+* **Deterministic Fail-Closed DNS**: Intercepts `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, and `getnameinfo`. Resolves `localhost` locally with `AI_NUMERICHOST`. External hostnames strictly fail closed with `PrivacyViolationError`.
+* **Socket Family Restrictions**: Distinguishes `AF_INET`, `AF_INET6`, and `AF_UNIX`. Unsupported families (e.g. `AF_BLUETOOTH`, `AF_NETLINK`) fail closed immediately.
+* **In-Process Scope Limitation**: In-process interception operates within user-space Python. It is defense-in-depth and does not replace an OS-level kernel boundary against external processes or native C extensions.
 
 ### Windows Firewall Strategy
 Enforced in [`app/core/privacy/windows_firewall.py`](app/core/privacy/windows_firewall.py).
-* Rules targeting `python.exe` / `pythonw.exe` are strictly refused.
-* Only dedicated deployment binaries (`tsukiko.exe`) can be protected via Windows Firewall.
-* Never runs automatic rule modifications at application startup. User authorization (`user_authorized=True`) and administrator elevation are strictly required.
+* **Rule Ownership**: Unique rule identity (`Tsukiko Outbound Privacy Boundary`), Grouping (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`). Rejects foreign or unowned rules sharing the Tsukiko prefix.
+* **Shared Interpreter Protection**: Rules targeting `python.exe` / `pythonw.exe` are strictly refused.
+* **Dedicated Binary Validation**: Targets must be regular files named `tsukiko.exe` containing the Windows DOS/PE `MZ` binary header.
+* **PE Header Limitation**: Validating the PE header confirms binary format, not cryptographic Authenticode signature verification.
+* **Explicit User Authorization**: Never runs automatic rule modifications at application startup. User authorization (`user_authorized=True`) and administrator elevation are strictly required.
 
 ---
 
-## 7. Change History & Audit Logs
+## 7. Continuous Integration (CI)
+
+A dedicated Windows CI workflow is established at [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+* **Runner**: Windows Server (`windows-latest`).
+* **Environment**: Python 3.11 x64.
+* **Pipeline**:
+  1. Installs base and developer dependencies.
+  2. Runs full 71-test pytest suite.
+  3. Builds distribution wheel (`tsukiko-*.whl`).
+  4. Installs wheel and executes `tsukiko --check-hardware` outside source tree.
+
+---
+
+## 8. Change History & Audit Logs
 
 * See [`CHANGELOG.md`](CHANGELOG.md) for versioned release history.
 * See [`DEVELOPMENT_LOG.md`](DEVELOPMENT_LOG.md) for detailed audit findings, defects resolved, and verification ledgers.

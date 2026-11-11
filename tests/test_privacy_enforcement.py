@@ -1,6 +1,6 @@
 """
 Comprehensive regression tests for Tsukiko Offline Privacy Guard.
-Covers all 14 audit criteria:
+Covers all audit criteria:
 1. IPv4 loopback TCP.
 2. IPv6 loopback TCP.
 3. IPv4 connected UDP.
@@ -15,12 +15,19 @@ Covers all 14 audit criteria:
 12. Guard activation failure and atomic rollback.
 13. Repeated guard activation.
 14. Explicit test teardown and restoration.
+15. Numeric loopback enforcement (no blind localhost trust).
+16. Rejection of unsupported socket families.
+17. sendmsg argument forwarding and platform compatibility.
+18. Real AF_UNIX communication where supported.
+19. Deterministic loopback DNS resolution.
 All tests use controlled local loopback sockets or mocks. Zero external Internet requests.
 """
 
 from __future__ import annotations
 
+import os
 import socket
+import tempfile
 import threading
 from unittest.mock import MagicMock, patch
 import pytest
@@ -28,12 +35,17 @@ import pytest
 from app.core.privacy.enforcement import (
     AF_UNIX,
     PrivacyViolationError,
+    _guarded_socket_send,
+    _guarded_socket_sendall,
+    _guarded_socket_sendmsg,
     _is_allowed_destination,
     disable_offline_guard,
     enable_offline_guard,
     is_loopback_address,
+    is_numeric_loopback_ip,
     is_offline_guard_active,
     is_valid_loopback_ip,
+    resolve_localhost_numeric,
 )
 
 
@@ -172,16 +184,9 @@ def test_external_connect_methods_strictly_blocked():
 # 7. External send, sendall, and sendmsg
 def test_external_send_methods_strictly_blocked():
     """Blocks send, sendall, and sendmsg when peer destination is non-loopback."""
-    # Simulate a connected socket pointing to an external address
     mock_sock = MagicMock(spec=socket.socket)
     mock_sock.family = socket.AF_INET
     mock_sock.getpeername.return_value = ("8.8.8.8", 443)
-
-    from app.core.privacy.enforcement import (
-        _guarded_socket_send,
-        _guarded_socket_sendall,
-        _guarded_socket_sendmsg,
-    )
 
     with pytest.raises(PrivacyViolationError):
         _guarded_socket_send(mock_sock, b"data")
@@ -189,12 +194,13 @@ def test_external_send_methods_strictly_blocked():
     with pytest.raises(PrivacyViolationError):
         _guarded_socket_sendall(mock_sock, b"data")
 
-    with pytest.raises(PrivacyViolationError):
-        _guarded_socket_sendmsg(mock_sock, [b"data"])
+    with patch("app.core.privacy.enforcement._ORIGINAL_SOCKET_SENDMSG", MagicMock()):
+        with pytest.raises(PrivacyViolationError):
+            _guarded_socket_sendmsg(mock_sock, [b"data"])
 
-    # sendmsg with explicit external address argument
-    with pytest.raises(PrivacyViolationError):
-        _guarded_socket_sendmsg(mock_sock, [b"data"], address=("1.1.1.1", 80))
+        # sendmsg with explicit external address argument
+        with pytest.raises(PrivacyViolationError):
+            _guarded_socket_sendmsg(mock_sock, [b"data"], address=("1.1.1.1", 80))
 
 
 # 8. External DNS and reverse DNS requests
@@ -244,7 +250,7 @@ def test_empty_and_malformed_addresses_rejected():
     assert _is_allowed_destination(None, 12345) is False  # invalid type
 
 
-# 11. AF_UNIX communication where supported or simulated
+# 11. AF_UNIX local IPC where simulated
 def test_af_unix_local_ipc_validation():
     """Permits local filesystem paths for AF_UNIX sockets and rejects them on Internet sockets."""
     mock_unix_sock = MagicMock()
@@ -262,7 +268,144 @@ def test_af_unix_local_ipc_validation():
     assert _is_allowed_destination(mock_inet_sock, "/tmp/tsukiko_local.sock") is False
 
 
-# 12. Guard activation failure and atomic rollback
+# 12. Real AF_UNIX Communication where supported
+def test_real_af_unix_ipc_exchange():
+    """Tests genuine AF_UNIX socket creation, connection, and message exchange where platform supports it."""
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX local sockets are not supported by Python on this Windows platform.")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sock_path = os.path.join(tmp_dir, "tsukiko_real_ipc.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(sock_path)
+        server.listen(1)
+
+        def server_worker():
+            conn, _ = server.accept()
+            msg = conn.recv(1024)
+            conn.sendall(msg + b"-ack")
+            conn.close()
+
+        t = threading.Thread(target=server_worker)
+        t.start()
+
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(sock_path)
+        client.sendall(b"hello-ipc")
+        response = client.recv(1024)
+        assert response == b"hello-ipc-ack"
+
+        client.close()
+        t.join(timeout=2.0)
+        server.close()
+
+
+# 13. Numeric Loopback Enforcement (No Hostname Trust)
+def test_numeric_loopback_enforcement():
+    """Ensures is_numeric_loopback_ip and is_valid_loopback_ip strictly require numeric loopback addresses."""
+    # Literal 'localhost' must NOT be accepted as a numeric loopback IP
+    assert is_numeric_loopback_ip("localhost") is False
+    assert is_valid_loopback_ip("localhost") is False
+    assert is_loopback_address("localhost") is False
+
+    # Genuine numeric loopback IPs are accepted
+    assert is_numeric_loopback_ip("127.0.0.1") is True
+    assert is_numeric_loopback_ip("127.0.0.2") is True
+    assert is_numeric_loopback_ip("127.255.255.254") is True
+    assert is_numeric_loopback_ip("::1") is True
+    assert is_valid_loopback_ip("127.0.0.1") is True
+    assert is_valid_loopback_ip("::1") is True
+
+    # Family-specific matching
+    assert is_numeric_loopback_ip("127.0.0.1", family=socket.AF_INET) is True
+    assert is_numeric_loopback_ip("127.0.0.1", family=socket.AF_INET6) is False
+    assert is_numeric_loopback_ip("::1", family=socket.AF_INET6) is True
+    assert is_numeric_loopback_ip("::1", family=socket.AF_INET) is False
+
+    # External, private LAN, and unspecified addresses are rejected
+    assert is_numeric_loopback_ip("0.0.0.0") is False
+    assert is_numeric_loopback_ip("::") is False
+    assert is_numeric_loopback_ip("192.168.1.1") is False
+    assert is_numeric_loopback_ip("10.0.0.1") is False
+    assert is_numeric_loopback_ip("8.8.8.8") is False
+
+    # Deterministic local resolution of localhost
+    assert resolve_localhost_numeric(socket.AF_INET) == ["127.0.0.1"]
+    assert resolve_localhost_numeric(socket.AF_INET6) == ["::1"]
+    assert resolve_localhost_numeric() == ["127.0.0.1", "::1"]
+
+
+# 14. Rejection of Unsupported Socket Families
+def test_unsupported_socket_families_fail_closed():
+    """Unknown or unsupported socket families must fail closed in _is_allowed_destination."""
+    mock_unknown_sock = MagicMock()
+    mock_unknown_sock.family = 999  # Unsupported or foreign family
+
+    # Even with a valid loopback tuple, unsupported socket families must return False
+    assert _is_allowed_destination(mock_unknown_sock, ("127.0.0.1", 80)) is False
+    assert _is_allowed_destination(mock_unknown_sock, ("::1", 80)) is False
+    assert _is_allowed_destination(mock_unknown_sock, "/tmp/sock") is False
+
+
+# 15. sendmsg Argument Forwarding
+def test_sendmsg_argument_forwarding_and_behavior():
+    """Verifies sendmsg forwards arguments correctly without passing address=None on connected sockets."""
+    mock_orig_sendmsg = MagicMock(return_value=10)
+
+    with patch("app.core.privacy.enforcement._ORIGINAL_SOCKET_SENDMSG", mock_orig_sendmsg):
+        # Connected socket: peer is 127.0.0.1, address argument is omitted
+        connected_sock = MagicMock(spec=socket.socket)
+        connected_sock.family = socket.AF_INET
+        connected_sock.getpeername.return_value = ("127.0.0.1", 5000)
+
+        # 1. Connected call without address argument -> calls original without address=None
+        res = _guarded_socket_sendmsg(connected_sock, [b"test_buffer"])
+        assert res == 10
+        mock_orig_sendmsg.assert_called_once_with(connected_sock, [b"test_buffer"], (), 0)
+
+        # 2. Call with explicit loopback address
+        mock_orig_sendmsg.reset_mock()
+        res2 = _guarded_socket_sendmsg(connected_sock, [b"test_buffer"], address=("127.0.0.1", 5000))
+        assert res2 == 10
+        mock_orig_sendmsg.assert_called_once_with(connected_sock, [b"test_buffer"], (), 0, ("127.0.0.1", 5000))
+
+        # 3. Call with explicit external address -> raises PrivacyViolationError
+        mock_orig_sendmsg.reset_mock()
+        with pytest.raises(PrivacyViolationError):
+            _guarded_socket_sendmsg(connected_sock, [b"test_buffer"], address=("8.8.8.8", 53))
+        assert not mock_orig_sendmsg.called
+
+
+# 16. Deterministic Loopback DNS Resolution
+def test_localhost_deterministic_dns_resolution():
+    """Verifies deterministic, fail-closed DNS resolution for localhost and rejection of external hostnames."""
+    # gethostbyname
+    assert socket.gethostbyname("localhost") == "127.0.0.1"
+    assert socket.gethostbyname("127.0.0.1") == "127.0.0.1"
+    with pytest.raises(PrivacyViolationError):
+        socket.gethostbyname("google.com")
+
+    # gethostbyname_ex
+    name, aliases, addrs = socket.gethostbyname_ex("localhost")
+    assert name == "localhost"
+    assert "127.0.0.1" in addrs
+
+    # gethostbyaddr
+    h_name, _, h_addrs = socket.gethostbyaddr("127.0.0.1")
+    assert h_name == "localhost"
+    assert "127.0.0.1" in h_addrs
+    with pytest.raises(PrivacyViolationError):
+        socket.gethostbyaddr("8.8.8.8")
+
+    # getnameinfo
+    ni_host, ni_port = socket.getnameinfo(("127.0.0.1", 8080), 0)
+    assert ni_host == "localhost"
+    assert ni_port == "8080"
+    with pytest.raises(PrivacyViolationError):
+        socket.getnameinfo(("8.8.8.8", 80), 0)
+
+
+# 17. Guard activation failure and atomic rollback
 def test_guard_activation_failure_atomic_rollback():
     """If an exception occurs during guard installation, all socket functions must be rolled back."""
     from app.core.privacy.enforcement import _ORIGINAL_SOCKET_CONNECT
@@ -281,7 +424,7 @@ def test_guard_activation_failure_atomic_rollback():
         assert socket.socket.connect == _ORIGINAL_SOCKET_CONNECT
 
 
-# 13. Repeated guard activation
+# 18. Repeated guard activation
 def test_repeated_guard_activation_is_idempotent():
     """Repeated calls to enable_offline_guard do not double-wrap or fail."""
     enable_offline_guard()
@@ -290,7 +433,7 @@ def test_repeated_guard_activation_is_idempotent():
     assert is_offline_guard_active() is True
 
 
-# 14. Explicit test teardown and restoration
+# 19. Explicit test teardown and restoration
 def test_explicit_teardown_restores_original_functions():
     """Calling disable_offline_guard cleanly restores standard socket functions."""
     enable_offline_guard()
@@ -300,9 +443,7 @@ def test_explicit_teardown_restores_original_functions():
     assert is_offline_guard_active() is False
 
     # Under disabled guard, external gethostbyname does not raise PrivacyViolationError
-    # (may succeed or raise socket.gaierror depending on network, but not PrivacyViolationError)
     try:
-        # Resolve localhost
         res = socket.gethostbyname("localhost")
         assert res in ("127.0.0.1", "::1")
     except PrivacyViolationError:

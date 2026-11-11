@@ -134,11 +134,11 @@ def test_offline_privacy_guard_enforcement():
         PrivacyViolationError,
     )
 
-    # Unit check is_loopback_address
+    # Unit check is_loopback_address (requires numeric loopback addresses)
     assert is_loopback_address("127.0.0.1") is True
     assert is_loopback_address("127.0.0.5") is True
     assert is_loopback_address("::1") is True
-    assert is_loopback_address("localhost") is True
+    assert is_loopback_address("localhost") is False  # Must reject non-numeric hostname
     assert is_loopback_address("0.0.0.0") is False  # Must reject unspecified address
     assert is_loopback_address("::") is False       # Must reject unspecified IPv6
     assert is_loopback_address("") is False         # Must reject empty host
