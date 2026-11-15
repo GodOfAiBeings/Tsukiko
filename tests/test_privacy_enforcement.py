@@ -448,3 +448,70 @@ def test_explicit_teardown_restores_original_functions():
         assert res in ("127.0.0.1", "::1")
     except PrivacyViolationError:
         pytest.fail("PrivacyViolationError raised after disable_offline_guard!")
+
+
+# 20. Real Native sendmsg Communication Tests (where supported)
+def test_real_connected_tcp_sendmsg():
+    """Verifies real native socket.sendmsg on a connected loopback TCP socket where supported."""
+    if not hasattr(socket.socket, "sendmsg"):
+        pytest.skip("socket.sendmsg is not supported on this platform.")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(("127.0.0.1", port))
+    conn, _ = server.accept()
+
+    try:
+        bytes_sent = client.sendmsg([b"hello ", b"native ", b"sendmsg"])
+        assert bytes_sent == len(b"hello native sendmsg")
+        received = conn.recv(1024)
+        assert received == b"hello native sendmsg"
+    finally:
+        client.close()
+        conn.close()
+        server.close()
+
+
+def test_real_udp_explicit_destination_sendmsg():
+    """Verifies real native socket.sendmsg on UDP with explicit loopback destination where supported."""
+    if not hasattr(socket.socket, "sendmsg"):
+        pytest.skip("socket.sendmsg is not supported on this platform.")
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.bind(("127.0.0.1", 0))
+    port = receiver.getsockname()[1]
+
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        bytes_sent = sender.sendmsg(
+            [b"udp ", b"datagram ", b"buffer"],
+            (),
+            0,
+            ("127.0.0.1", port),
+        )
+        assert bytes_sent == len(b"udp datagram buffer")
+        data, addr = receiver.recvfrom(1024)
+        assert data == b"udp datagram buffer"
+        assert addr[0] == "127.0.0.1"
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_real_sendmsg_rejects_external_destination():
+    """Verifies real native socket.sendmsg strictly rejects external destination where supported."""
+    if not hasattr(socket.socket, "sendmsg"):
+        pytest.skip("socket.sendmsg is not supported on this platform.")
+
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(PrivacyViolationError) as exc_info:
+            sender.sendmsg([b"blocked payload"], (), 0, ("8.8.8.8", 53))
+        assert "Outbound sendmsg transmission to '('8.8.8.8', 53)' was strictly blocked" in str(exc_info.value)
+    finally:
+        sender.close()
+

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.2] - Final Phase 1 Security Closure - 2026-11-16
+
+### Added
+- **Fail-Closed Windows Firewall Profile Verification (`app/core/privacy/windows_firewall.py`)**:
+  - `validate_firewall_profiles()` strictly fails closed on missing, empty, unknown, and partial profile sets.
+  - Accepts only `Any` or `Domain,Private,Public`.
+  - Eliminates false-positive verification when netsh output omits or truncates the `Profiles` field.
+- **ActiveStore Effective Policy Verification (`app/core/privacy/windows_firewall.py`)**:
+  - `verify_effective_firewall_policy()` queries PowerShell NetSecurity ActiveStore to distinguish persistent rule registration from effective active runtime policy.
+  - Safe parameter passing via process environment variables (`TSUKIKO_TARGET_RULE_NAME`, `TSUKIKO_TARGET_GROUP`) eliminates shell injection and parsing issues.
+  - Verifies that all network profiles (`Domain`, `Private`, `Public`) are enabled in ActiveStore.
+  - Verifies that local rule merging is permitted (`AllowLocalFirewallRules` is true) and not overridden by domain/GPO policy.
+  - Verifies that the effective rule in ActiveStore is enabled, outbound, blocking, targets the dedicated executable, and covers all profiles.
+  - Updated `get_security_status()` to require confirmed ActiveStore effective policy for `os_policy_active`, falling back to `os_policy_unverified` when policy cannot be established.
+- **Precise Rule Ownership & Safe Multi-Rule Deletion (`app/core/privacy/windows_firewall.py`)**:
+  - Defined `FirewallRuleInfo` model and `is_tsukiko_owned_rule()` verifying DisplayName (`Tsukiko Outbound Privacy Boundary`), Name (`Tsukiko_Privacy_Outbound_Block`), Group (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`).
+  - Added multi-rule parsers `parse_netsh_rule_blocks()` and `parse_powershell_rules_json()`.
+  - `remove_firewall_rule()` enumerates all matching rules, verifies exact Tsukiko ownership, safely deletes single owned rules, strictly refuses deletion of foreign rules, and halts if multiple candidates match ambiguously.
+  - `create_firewall_rule()` verifies that no foreign conflicting rule exists with the same name before attempting creation.
+- **Strict Windows Portable Executable (PE) Structural Validation (`app/core/privacy/windows_firewall.py`)**:
+  - Implemented `validate_pe_structure()`:
+    1. Verifies file size >= 64 bytes (minimum DOS header size).
+    2. Validates MS-DOS magic bytes `b"MZ"` (0x4D, 0x5A) at byte 0.
+    3. Reads 4-byte unsigned little-endian integer at offset `0x3C` (`e_lfanew`).
+    4. Validates bounds: `0x40 <= pe_offset <= file_size - 4` (prevents DOS header overlap and file out-of-bounds).
+    5. Reads 4-byte signature at `pe_offset` and confirms equality to `b"PE\x00\x00"`.
+  - Integrated into `is_safe_target_executable()`.
+  - Explicitly documented distinction between binary structural format validation and cryptographic Authenticode code-signing.
+- **Real Native `sendmsg` Integration Testing (`tests/test_privacy_enforcement.py`)**:
+  - Added `test_real_connected_tcp_sendmsg`: Real connected loopback TCP `sendmsg` data exchange.
+  - Added `test_real_udp_explicit_destination_sendmsg`: Real UDP loopback `sendmsg` with explicit destination.
+  - Added `test_real_sendmsg_rejects_external_destination`: UDP `sendmsg` targeting external destination raises `PrivacyViolationError`.
+  - Tests run natively on platforms supporting `sendmsg` (Linux) and skip cleanly on Windows.
+- **Dual-Platform Windows and Linux CI Matrix (`.github/workflows/ci.yml`)**:
+  - Maintained `windows-test-and-packaging` on `windows-latest`.
+  - Added `linux-integration-and-packaging` on `ubuntu-latest` running the complete pytest suite, building wheel, and testing out-of-tree CLI installation.
+  - Validates native `sendmsg` and real `AF_UNIX` socket execution in CI.
+
+### Changed
+- `app/core/privacy/windows_firewall.py`: Integrated structural PE validation, fail-closed profile verification, ActiveStore policy inspection, and safe multi-rule deletion.
+- `tests/test_windows_firewall.py`: Expanded with 41 new regression tests (60 total) covering all PE structure failure modes, profile edge cases, ActiveStore failure conditions, and safe ownership deletion.
+- `tests/test_privacy_enforcement.py`: Added 3 real native `sendmsg` tests (22 total).
+- Total test suite expanded to 115 collected tests (111 passed, 4 skipped on Windows; all 115 passing on Linux).
+
+---
+
 ## [0.1.1] - Final Phase 1 Security Acceptance Pass - 2026-11-11
 
 ### Added

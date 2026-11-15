@@ -14,8 +14,11 @@ Tsukiko is built with a zero-trust, privacy-first architecture. This document de
 | **Socket Family Restrictions** | **Implemented & Tested** | `_is_allowed_destination` explicitly distinguishes `AF_INET`, `AF_INET6`, and `AF_UNIX`. Unsupported families fail closed immediately. | `tests/test_privacy_enforcement.py::test_unsupported_socket_families_fail_closed` |
 | **AF_UNIX Local IPC Support** | **Implemented & Tested** | Socket family inspection distinguishes `AF_UNIX` local IPC from Internet sockets. Filesystem paths are permitted for local IPC where supported, and gracefully skipped on unsupported platforms. | `tests/test_privacy_enforcement.py::test_af_unix_local_ipc_validation`, `test_real_af_unix_ipc_exchange` |
 | **Deterministic Fail-Closed DNS** | **Implemented & Tested** | `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, and `getnameinfo` fail closed on all external destinations. No unrestricted fallback queries. | `tests/test_privacy_enforcement.py::test_localhost_deterministic_dns_resolution`, `test_external_dns_requests_strictly_blocked` |
-| **Windows Firewall Rule Ownership** | **Implemented & Tested** | Unique rule identity (`Tsukiko Outbound Privacy Boundary`), Grouping (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`). Refuses deletion or verification of unowned rules. | `tests/test_windows_firewall.py::test_verify_firewall_rule_rejects_unowned_or_foreign_rule`, `test_remove_firewall_rule_enforces_authorization_prefix_and_ownership` |
-| **Executable Identity & PE Header Check** | **Implemented & Tested** | Validates dedicated regular file named `tsukiko.exe`, checks DOS/PE binary `MZ` magic header, and strictly rejects shared interpreters. | `tests/test_windows_firewall.py::test_is_safe_target_executable_rejects_non_pe_binary_header`, `test_is_safe_target_executable_accepts_dedicated_tsukiko_binary` |
+| **Windows Firewall Rule Ownership & Safe Deletion** | **Implemented & Tested** | Unique rule identity (`Tsukiko Outbound Privacy Boundary`), Stable ID (`Tsukiko_Privacy_Outbound_Block`), Grouping (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`). Enumerates multiple rules, safely deletes single owned rules, refuses foreign deletion, and halts on ambiguous candidates. | `tests/test_windows_firewall.py` (Safe Deletion & Ownership tests) |
+| **Fail-Closed Firewall Profile Validation** | **Implemented & Tested** | `validate_firewall_profiles()` strictly fails closed on missing, empty, unknown, or partial profiles. Only `Any` or `Domain,Private,Public` are accepted. | `tests/test_windows_firewall.py` (Profile Validation tests) |
+| **ActiveStore Effective Policy Verification** | **Implemented & Tested** | `verify_effective_firewall_policy()` inspects PowerShell NetSecurity ActiveStore view. Verifies all profiles are enabled, local rule merging is permitted (`AllowLocalFirewallRules`), and effective Outbound Block rule is active. | `tests/test_windows_firewall.py` (ActiveStore tests) |
+| **Windows PE Binary Structure Validation** | **Implemented & Tested** | `validate_pe_structure()` verifies minimum 64-byte DOS header, `MZ` magic, 32-bit `e_lfanew` offset at `0x3C`, bounds `0x40 <= pe_offset <= file_size - 4`, and `PE\0\0` signature. | `tests/test_windows_firewall.py` (PE Structure tests) |
+| **Native sendmsg Communication (where supported)** | **Implemented & Tested** | Real TCP and UDP `sendmsg` data exchange on loopback, and strict rejection of external destinations on supported platforms (Linux), with clean test skipping on Windows. | `tests/test_privacy_enforcement.py::test_real_connected_tcp_sendmsg`, `test_real_udp_explicit_destination_sendmsg`, `test_real_sendmsg_rejects_external_destination` |
 | **Persistent Guard Lifecycle & Atomic Rollback** | **Implemented & Tested** | Offline guard installs atomically with rollback on failure. Protection persists for process lifetime; orchestrator `stop()` does not disable it. | `tests/test_privacy_enforcement.py::test_guard_activation_failure_atomic_rollback` |
 | **Fail-Safe VRAM Classification** | **Implemented & Tested** | Distinguishes `measured`, `zero_available`, and `unavailable`. Unknown or zero VRAM yields 0 MB GPU budget and safe CPU-only fallback. | `tests/test_hardware.py` (14 passing tests) |
 | **Zero Outbound Telemetry** | **Implemented & Tested** | `PrivacyConfig.validate_no_telemetry()` throws `ValidationError` if `allow_external_telemetry=True`. Socket guard blocks outbound traffic. | `tests/test_config.py::test_privacy_enforcement_raises_on_invalid_settings` |
@@ -59,41 +62,56 @@ Tsukiko explicitly distinguishes between **in-process runtime defense** and **op
 ### A. The Shared Interpreter Prohibition
 Creating a Windows Firewall outbound blocking rule against `python.exe`, `pythonw.exe`, or `py.exe` is dangerous because it indiscriminately cuts off network access for all other Python development, CLI utilities, and package managers across the user's computer. Tsukiko strictly refuses to generate or apply firewall rules targeting shared interpreters.
 
-### B. Dedicated Deployment Binary Requirement & Executable Identity
+### B. Dedicated Deployment Binary Requirement & Structural PE Validation
 OS-level Windows Firewall enforcement is only available when Tsukiko is built and installed as a standalone dedicated executable (`tsukiko.exe`). The path must:
 1. Actually exist as a regular file on disk.
 2. Resolve to a normalized absolute path ending in `.exe`.
 3. Strictly match the dedicated executable name (`tsukiko.exe`). Arbitrary binaries are rejected.
-4. Possess a valid Windows PE binary header (DOS/PE `MZ` magic header, `0x4D 0x5A`).
+4. Pass structural Windows Portable Executable (PE) validation (`validate_pe_structure`):
+   * Minimum file size >= 64 bytes (valid DOS header).
+   * MS-DOS magic bytes `b"MZ"` (0x4D, 0x5A) at offset 0.
+   * 4-byte unsigned little-endian integer at offset `0x3C` (`e_lfanew`).
+   * Validated offset bounds: `0x40 <= pe_offset <= file_size - 4` (preventing DOS header overlap and file out-of-bounds).
+   * Confirmed 4-byte PE signature `b"PE\0\0"` (0x50, 0x45, 0x00, 0x00) at `pe_offset`.
 5. Contain no control characters or command-injection sequences.
 
-> **Explicit Limitation on Executable Identity:** Checking file naming and the Windows PE `MZ` binary header confirms that the file is formatted as a valid Windows PE executable. It is **not** cryptographic proof of identity (such as Authenticode digital signature verification). Real cryptographic integrity verification requires an established code-signing certificate and signature verification infrastructure.
+> **Explicit Limitation on Executable Identity:** Checking file naming and internal Windows PE binary structure confirms that the file is formatted as a valid Windows PE executable. It is **not** cryptographic proof of identity (such as Authenticode digital signature verification). Real cryptographic integrity verification requires an established code-signing certificate and signature verification infrastructure.
 
-### C. Rule Ownership & Property-Level Verification
+### C. Fail-Closed Profile Validation & ActiveStore Effective Policy
+Tsukiko strictly validates network profiles and distinguishes persistent rules from effective runtime policy:
+* **Fail-Closed Profiles (`validate_firewall_profiles`):**
+  * Missing (None), empty, or whitespace profile strings strictly fail verification.
+  * Partial profiles (e.g., Domain-only, Private-only, Public-only) fail verification.
+  * Unrecognized profile tokens fail verification.
+  * Only rules explicitly covering `Any` or all three profiles (`Domain,Private,Public`) are accepted.
+* **ActiveStore Effective Policy (`verify_effective_firewall_policy`):**
+  * Queries PowerShell NetSecurity `ActiveStore` policy store via static script using process environment variables.
+  * Verifies all three network profiles (`Domain`, `Private`, `Public`) are enabled in ActiveStore.
+  * Verifies local firewall rule merging is allowed (`AllowLocalFirewallRules` is true) and not blocked by corporate GPO.
+  * Confirms that an effective Outbound Block rule exists in ActiveStore, is enabled, outbound, blocking, covers all profiles, and matches the target binary.
+
+### D. Rule Ownership Identity & Safe Multi-Rule Deletion
 Tsukiko enforces a unique, documented rule ownership mechanism:
-* **Rule Name:** `Tsukiko Outbound Privacy Boundary`
+* **Display Name:** `Tsukiko Outbound Privacy Boundary`
+* **Internal Name (Stable ID):** `Tsukiko_Privacy_Outbound_Block`
 * **Grouping:** `Tsukiko Desktop Companion`
 * **Ownership Marker:** `[Tsukiko-Privacy-Core:Outbound-Block]`
-* **Required Properties:**
-  1. `Enabled: Yes`
-  2. `Direction: Out`
-  3. `Action: Block`
-  4. `Program: <Normalized Path to tsukiko.exe>`
-  5. `Profiles: Domain,Private,Public` (or `Any`)
-  6. `Ownership: Grouping or Description contains Tsukiko ownership marker`
+* **Safe Deletion & Conflict Avoidance:**
+  * Multi-rule enumeration handles both single- and multi-rule responses from netsh and PowerShell.
+  * Foreign rules sharing the name prefix or display name are rejected and will never be deleted.
+  * If multiple rules claim Tsukiko ownership, deletion halts with an ambiguous identity error requiring operator intervention.
+  * Creation refuses to proceed if a conflicting foreign rule already occupies the rule name.
 
-Rules that share the name prefix but lack the Tsukiko ownership grouping or description marker are strictly rejected as foreign/unowned rules.
-
-### D. Four Honest Security States
-1. `in_process_only`: Running under a development Python interpreter (`python.exe`). In-process socket interception is active; OS-level firewall rules are deliberately omitted to preserve workstation tooling.
+### E. Four Honest Security States
+1. `in_process_only`: Running under a development Python interpreter (`python.exe`) or on non-Windows platforms. In-process socket interception is active; OS-level firewall rules are deliberately omitted to preserve workstation tooling.
 2. `os_policy_not_configured`: Running as dedicated `tsukiko.exe`, but no Windows Firewall outbound rule has been configured.
-3. `os_policy_unverified`: A rule named `Tsukiko Outbound Privacy Boundary` exists, but property or ownership verification failed (e.g., program mismatch, action not Block, profiles incomplete, or missing ownership marker).
-4. `os_policy_active`: Dedicated `tsukiko.exe` with verified active Windows Firewall Outbound Block rule enforced at the Windows kernel filtering layer.
+3. `os_policy_unverified`: A rule named `Tsukiko Outbound Privacy Boundary` exists, but effective policy in ActiveStore could not be proven (e.g. program mismatch, action not Block, profiles incomplete, profile disabled in ActiveStore, local rule merge restricted, or missing ownership marker).
+4. `os_policy_active`: Dedicated `tsukiko.exe` with verified active Windows Firewall Outbound Block rule confirmed in the ActiveStore effective policy layer.
 
-### E. Authorization and Safe Removal
+### F. Authorization and Elevation
 * **No Automatic Modifications**: Tsukiko will **never** modify Windows Firewall rules automatically at startup.
 * **Explicit User Authorization**: Creation and removal functions require `user_authorized=True` and administrative elevation.
-* **Safe Removal**: Only verified Tsukiko-owned rules possessing the Tsukiko ownership marker and prefix can be deleted. Arbitrary firewall rules cannot be deleted.
+* **Refusal on Shared Interpreters**: Strictly refuses rule creation against shared development interpreters.
 
 ---
 

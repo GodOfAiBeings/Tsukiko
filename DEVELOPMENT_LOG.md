@@ -77,6 +77,40 @@ A final security acceptance pass closed all remaining findings from the independ
 
 ---
 
+### Final Phase 1 Security Closure (2026-11-16)
+
+The final security closure pass addressed all remaining findings from the independent security audit, elevating the automated test suite to 115 tests (111 passed, 4 skipped on Windows; all 115 passing on Linux):
+
+1. **Fail-Closed Windows Firewall Profile Verification (`app/core/privacy/windows_firewall.py`):**
+   * **Defect**: Profile applicability was only checked when a `Profiles:` field was found. Missing, empty, or partial profiles could mistakenly pass.
+   * **Fix**: Implemented `validate_firewall_profiles()` which fails closed on missing, empty, unknown, or partial profile sets. Only `Any` or all three profiles (`Domain,Private,Public`) are accepted.
+   * **Tests**: `tests/test_windows_firewall.py` (11 profile validation tests).
+
+2. **ActiveStore Effective Policy Inspection (`app/core/privacy/windows_firewall.py`):**
+   * **Defect**: Persistent rule registration in NetSecurity did not establish effective policy in the `ActiveStore`, ignoring disabled profiles or GPO restrictions on local firewall rule merging (`AllowLocalFirewallRules`).
+   * **Fix**: Implemented `verify_effective_firewall_policy()` querying PowerShell NetSecurity `ActiveStore` via static script and environment variables. Verifies that all profiles are enabled, local firewall rule merging is allowed, and an active outbound blocking rule exists in the effective policy view. Updated `get_security_status()` to report `os_policy_active` only when ActiveStore status is proven, falling back to `os_policy_unverified`.
+   * **Tests**: `tests/test_windows_firewall.py` (12 ActiveStore verification tests).
+
+3. **Precise Ownership Identity & Safe Multi-Rule Deletion (`app/core/privacy/windows_firewall.py`):**
+   * **Defect**: Rule lookup and deletion did not safely handle multiple matching candidates or foreign rules sharing the rule name, and lacked atomic rule identification.
+   * **Fix**: Enforced rule identity: DisplayName `Tsukiko Outbound Privacy Boundary`, Stable ID `Tsukiko_Privacy_Outbound_Block`, Grouping `Tsukiko Desktop Companion`, and Description marker `[Tsukiko-Privacy-Core:Outbound-Block]`. Implemented multi-rule parsers for netsh and PowerShell. Safe deletion verifies ownership before deletion, refuses to delete foreign rules, and refuses deletion if multiple candidates match ambiguously without operator intervention. Pre-creation checks prevent overwriting foreign rules.
+   * **Tests**: `tests/test_windows_firewall.py` (15 ownership and safe deletion tests).
+
+4. **Strict Windows Portable Executable (PE) Structural Validation (`app/core/privacy/windows_firewall.py`):**
+   * **Defect**: Target executable validation only checked file size and first 2 bytes (`b"MZ"`), which could accept corrupt or truncated non-PE files.
+   * **Fix**: Implemented `validate_pe_structure()`: verifies minimum 64-byte DOS header, `b"MZ"` magic bytes, extracts 4-byte little-endian `e_lfanew` offset at `0x3C`, verifies bounds `0x40 <= pe_offset <= file_size - 4`, and confirms 4-byte PE signature `b"PE\x00\x00"`. Documented distinction between binary structural format validation and cryptographic Authenticode code-signing.
+   * **Tests**: `tests/test_windows_firewall.py` (13 PE structural validation and executable safety tests).
+
+5. **Real Native `sendmsg` Integration Testing (`tests/test_privacy_enforcement.py`):**
+   * **Feature**: Added genuine loopback TCP `sendmsg`, UDP `sendmsg` with explicit destination, and external rejection tests. Gracefully skips on platforms lacking `socket.sendmsg` (Windows) and runs natively on Linux.
+   * **Tests**: `tests/test_privacy_enforcement.py::test_real_connected_tcp_sendmsg`, `test_real_udp_explicit_destination_sendmsg`, `test_real_sendmsg_rejects_external_destination`.
+
+6. **Dual-Platform CI Matrix Expansion (`.github/workflows/ci.yml`):**
+   * **Feature**: Added `linux-integration-and-packaging` on `ubuntu-latest` alongside `windows-test-and-packaging` on `windows-latest`.
+   * **Workflow**: Installs dependencies, runs complete 115-test pytest suite, builds wheel distribution, and executes out-of-tree CLI installation test on both operating systems.
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -84,13 +118,19 @@ A final security acceptance pass closed all remaining findings from the independ
 | Workstation Hardware Profiler | **Implemented & Tested** | Queries AMD Ryzen CPU, RAM, RTX 3050 VRAM, and storage with safe fallbacks and status categorization (`measured`/`zero_available`/`unavailable`). |
 | Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
-| Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, and socket family restriction. |
-| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with PE header validation, rule ownership verification, and honest status inspection. |
+| Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, ActiveStore effective policy inspection, and safe multi-rule deletion. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 71 unit, regression, packaging, and integration tests (70 passed, 1 skipped). |
-| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions Windows CI workflow at `.github/workflows/ci.yml`. |
+| Automated Pytest Test Suite | **Implemented & Tested** | 115 unit, regression, packaging, and integration tests (111 passed, 4 skipped on Windows; 115 passed on Linux). |
+| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux). |
+| PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
+| llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
+| SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
+| Desktop Perception Pipeline | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Capture OFF by default. |
+| Offline Voice Subsystem (STT/TTS) | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Voice OFF by default. |
+| Desktop Control Permission Guard | *Designed (Phase 7)* | Staged in `app/desktop/permissions/`. Control strictly disabled. |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |

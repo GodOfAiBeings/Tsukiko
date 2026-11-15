@@ -53,19 +53,27 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (71 unit, regression, packaging, and integration tests):
+Execute the complete automated test suite (115 unit, regression, packaging, and integration tests):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (19 tests).
-* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Property-level firewall rule verification, Tsukiko rule ownership identity, PE binary format validation, shared interpreter protection, and 4-state security reporting (19 tests).
+* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, precise rule ownership identity, and safe multi-rule deletion (60 tests).
+* [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
 * [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
 * [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping (8 tests).
-* [`tests/test_packaging.py`](tests/test_packaging.py): Genuine wheel build, isolated venv installation, and out-of-tree CLI execution (3 tests).
 * [`tests/test_config.py`](tests/test_config.py): Pydantic configuration validation, environment variable parsing, and clean state restoration (6 tests).
+* [`tests/test_packaging.py`](tests/test_packaging.py): Genuine wheel build, isolated venv installation, and out-of-tree CLI execution (3 tests).
 * [`tests/test_logging.py`](tests/test_logging.py): Structured logging format and destination reconfiguration (2 tests).
+
+---
+
+## 5. Dual-Platform CI Matrix
+
+Continuous Integration runs on GitHub Actions across two distinct environments:
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and Windows Firewall policy parsing (111 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 115-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
 
 ---
 
