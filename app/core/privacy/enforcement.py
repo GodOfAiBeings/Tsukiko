@@ -206,6 +206,10 @@ def _validate_connected_socket(sock: socket.socket) -> None:
 
     For unconnected sockets, allows standard socket error behavior (e.g. ENOTCONN).
     """
+    if AF_UNIX is not None and getattr(sock, "family", None) == AF_UNIX:
+        # AF_UNIX is strictly local inter-process communication; cannot communicate externally
+        return
+
     try:
         peer = sock.getpeername()
     except OSError:

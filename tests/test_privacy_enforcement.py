@@ -277,27 +277,41 @@ def test_real_af_unix_ipc_exchange():
     with tempfile.TemporaryDirectory() as tmp_dir:
         sock_path = os.path.join(tmp_dir, "tsukiko_real_ipc.sock")
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.settimeout(5.0)
         server.bind(sock_path)
         server.listen(1)
 
+        server_err = []
+
         def server_worker():
-            conn, _ = server.accept()
-            msg = conn.recv(1024)
-            conn.sendall(msg + b"-ack")
-            conn.close()
+            try:
+                conn, _ = server.accept()
+                conn.settimeout(5.0)
+                try:
+                    msg = conn.recv(1024)
+                    conn.sendall(msg + b"-ack")
+                finally:
+                    conn.close()
+            except Exception as e:
+                server_err.append(e)
 
         t = threading.Thread(target=server_worker)
         t.start()
 
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(sock_path)
-        client.sendall(b"hello-ipc")
-        response = client.recv(1024)
-        assert response == b"hello-ipc-ack"
+        client.settimeout(5.0)
+        try:
+            client.connect(sock_path)
+            client.sendall(b"hello-ipc")
+            response = client.recv(1024)
+            assert response == b"hello-ipc-ack"
+        finally:
+            client.close()
+            t.join(timeout=3.0)
+            server.close()
 
-        client.close()
-        t.join(timeout=2.0)
-        server.close()
+        if server_err:
+            raise server_err[0]
 
 
 # 13. Numeric Loopback Enforcement (No Hostname Trust)
@@ -457,13 +471,16 @@ def test_real_connected_tcp_sendmsg():
         pytest.skip("socket.sendmsg is not supported on this platform.")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.settimeout(5.0)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
     port = server.getsockname()[1]
 
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.settimeout(5.0)
     client.connect(("127.0.0.1", port))
     conn, _ = server.accept()
+    conn.settimeout(5.0)
 
     try:
         bytes_sent = client.sendmsg([b"hello ", b"native ", b"sendmsg"])
@@ -482,10 +499,12 @@ def test_real_udp_explicit_destination_sendmsg():
         pytest.skip("socket.sendmsg is not supported on this platform.")
 
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.settimeout(5.0)
     receiver.bind(("127.0.0.1", 0))
     port = receiver.getsockname()[1]
 
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.settimeout(5.0)
     try:
         bytes_sent = sender.sendmsg(
             [b"udp ", b"datagram ", b"buffer"],
