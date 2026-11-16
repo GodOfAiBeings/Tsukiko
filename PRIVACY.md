@@ -96,7 +96,7 @@ Tsukiko strictly validates network profiles and distinguishes persistent rules f
     4. **Service Filter (`Get-NetFirewallServiceFilter`)**: Applies to all services (`Any`).
     5. **Interface Filter (`Get-NetFirewallInterfaceFilter`)**: Applies to all interfaces (`Any`).
     6. **Interface-Type Filter (`Get-NetFirewallInterfaceTypeFilter`)**: Applies to all interface types (`Any`).
-    7. **Security Filter (`Get-NetFirewallSecurityFilter`)**: Requires no authentication (`NotRequired`), encryption (`NotRequired`), or machine/user restrictions.
+    7. **Security Filter (`Get-NetFirewallSecurityFilter`)**: Requires no authentication (`NotRequired`), encryption (`NotRequired`), explicit boolean verification that `OverrideBlockRules` is `False` (blocking rules cannot be bypassed), and unrestricted user/machine scopes (`LocalUser`, `RemoteUser`, and `RemoteMachine` covering `Any`). Rejects missing, null, unrecognized, or legacy plural properties.
 
 ### D. Rule Ownership Identity, Safe Deletion & Query Results
 Tsukiko enforces a unique, documented rule ownership and query mechanism:
@@ -112,6 +112,16 @@ Tsukiko enforces a unique, documented rule ownership and query mechanism:
   * Foreign rules sharing the name prefix or display name are rejected and will never be deleted.
   * If multiple rules claim Tsukiko ownership, deletion halts with an ambiguous identity error requiring operator intervention.
   * Creation refuses to proceed if pre-creation inspection fails or if a conflicting foreign rule already exists.
+* **PowerShell Fail-Closed Response Envelope:**
+  * Inspection scripts execute under `$ErrorActionPreference = 'Stop'` without `-ErrorAction SilentlyContinue`. Cmdlet failures, missing modules, or CIM filter errors trigger the catch handler, emit a structured error envelope, and terminate with exit code 1.
+  * Output is wrapped in a structured envelope: `{ "Success": bool, "InspectionComplete": bool, "Rules": [...], "Error": string|null }`.
+  * Python query handlers require both `Success=True` and `InspectionComplete=True`. Truncated output, empty stdout, malformed JSON, or missing envelope fields strictly fail closed (`success=False, inspection_complete=False`).
+  * Empty output or query errors are never conflated with confirmed absence.
+  * Pre-creation inspection requires complete, successful inspection before allowing rule creation; post-deletion verification requires complete, successful re-inspection to confirm rule elimination.
+* **Strict Missing-Value Semantics & Fail-Closed Parsing:**
+  * The parser never manufactures unrestricted defaults (`"Any"`, `"NotRequired"`, `False`) when properties are missing or null.
+  * Distinguishes: (1) Explicitly verified unrestricted values, (2) Explicitly verified restrictive values, (3) Missing values (`None`), (4) Null values (`None`), and (5) Malformed values.
+  * Missing or null properties across all 14 filter properties in all 7 categories fail verification closed.
 * **Structured Query Result (`FirewallQueryResult`):**
   * Queries return a structured `FirewallQueryResult` distinguishing:
     * **Confirmed Absence**: `success=True`, `inspection_complete=True`, `rules=[]` (supports `os_policy_not_configured`).

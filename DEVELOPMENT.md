@@ -114,24 +114,35 @@ Enforced in [`app/core/privacy/enforcement.py`](app/core/privacy/enforcement.py)
 
 ### Windows Firewall Strategy
 Enforced in [`app/core/privacy/windows_firewall.py`](app/core/privacy/windows_firewall.py).
-* **Rule Ownership**: Unique rule identity (`Tsukiko Outbound Privacy Boundary`), Grouping (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`). Rejects foreign or unowned rules sharing the Tsukiko prefix.
+* **Rule Ownership**: Unique rule identity (`Tsukiko Outbound Privacy Boundary`), Stable Internal ID (`Tsukiko_Privacy_Outbound_Block`), Grouping (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`). Rejects foreign or unowned rules sharing the Tsukiko prefix.
+* **Exact-Name Deletion**: Rule removal strictly targets `-Name Tsukiko_Privacy_Outbound_Block -PolicyStore PersistentStore`. Rules are never deleted by DisplayName alone. Refuses automatic deletion of legacy rules lacking the internal stable ID. Post-deletion inspection re-verifies removal.
+* **NetSecurity CIM Filter Verification**:
+  * Inspects all 7 filter categories: Application, Address, Port/Protocol, Service, Interface, Interface-Type, and Security.
+  * Security filter strictly enforces Microsoft CIM properties: `Authentication == "NotRequired"`, `Encryption == "NotRequired"`, `OverrideBlockRules is False` (genuine boolean), and unrestricted `LocalUser`, `RemoteUser`, and `RemoteMachine` covering `Any`. Legacy plural property names or restrictive values fail closed.
+* **Fail-Closed Parsing & Envelopes**:
+  * Inspection commands run under `$ErrorActionPreference = 'Stop'` and return structured JSON response envelopes `{ "Success": bool, "InspectionComplete": bool, "Rules": [...], "Error": string|null }`.
+  * Python query handlers require `Success=True` and `InspectionComplete=True`. Truncated, empty, or failed queries fail closed and are never conflated with rule absence.
+  * Parser preserves missing and null values as `None`, strictly failing closed without manufacturing artificial defaults (`"Any"`).
 * **Shared Interpreter Protection**: Rules targeting `python.exe` / `pythonw.exe` are strictly refused.
 * **Dedicated Binary Validation**: Targets must be regular files named `tsukiko.exe` containing the Windows DOS/PE `MZ` binary header.
 * **PE Header Limitation**: Validating the PE header confirms binary format, not cryptographic Authenticode signature verification.
 * **Explicit User Authorization**: Never runs automatic rule modifications at application startup. User authorization (`user_authorized=True`) and administrator elevation are strictly required.
+* **Read-Only Inspection Verification**: Windows CI runs [`scripts/verify_windows_firewall_inspection.py`](scripts/verify_windows_firewall_inspection.py) with 5 stages (profiles, rules sample, 23-property schema, boolean serialization, parser & synthetic rejections) with strictly zero system mutations.
 
 ---
 
 ## 7. Continuous Integration (CI)
 
-A dedicated Windows CI workflow is established at [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-* **Runner**: Windows Server (`windows-latest`).
-* **Environment**: Python 3.11 x64.
+A dual-platform CI workflow is established at [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+* **Matrix Runners**:
+  * Windows Server (`windows-latest`, Python 3.11 x64).
+  * Ubuntu Linux (`ubuntu-latest`, Python 3.11 x64).
 * **Pipeline**:
   1. Installs base and developer dependencies.
-  2. Runs full 71-test pytest suite.
+  2. Runs full 221-item pytest suite (217 passed, 4 skipped on Windows; all 221 passing on Linux).
   3. Builds distribution wheel (`tsukiko-*.whl`).
-  4. Installs wheel and executes `tsukiko --check-hardware` outside source tree.
+  4. Installs wheel in clean environment and executes `tsukiko --check-hardware` outside source tree.
+  5. Windows runner executes read-only ActiveStore inspection verification (`scripts/verify_windows_firewall_inspection.py`).
 
 ---
 

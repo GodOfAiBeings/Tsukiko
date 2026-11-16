@@ -81,20 +81,87 @@ class FirewallRuleInfo(BaseModel):
     direction: str = ""
     action: str = ""
     profiles: str = ""
-    program: str = ""
-    local_address: str = "Any"
-    remote_address: str = "Any"
-    protocol: str = "Any"
-    local_port: str = "Any"
-    remote_port: str = "Any"
-    service: str = "Any"
-    interface_alias: str = "Any"
-    interface_type: str = "Any"
-    authentication: str = "NotRequired"
-    encryption: str = "NotRequired"
-    local_users: str = ""
-    remote_users: str = ""
-    remote_machines: str = ""
+    program: Optional[str] = None
+    local_address: Optional[str] = None
+    remote_address: Optional[str] = None
+    protocol: Optional[str] = None
+    local_port: Optional[str] = None
+    remote_port: Optional[str] = None
+    service: Optional[str] = None
+    interface_alias: Optional[str] = None
+    interface_type: Optional[str] = None
+    authentication: Optional[str] = None
+    encryption: Optional[str] = None
+    override_block_rules: Optional[Any] = None
+    local_user: Optional[str] = None
+    remote_user: Optional[str] = None
+    remote_machine: Optional[str] = None
+    raw_properties: dict[str, Any] = Field(default_factory=dict)
+
+    def __init__(self, **data: Any):
+        # Support deprecated plural keyword arguments if singular is not provided
+        if "local_users" in data and "local_user" not in data:
+            data["local_user"] = data.pop("local_users")
+        if "remote_users" in data and "remote_user" not in data:
+            data["remote_user"] = data.pop("remote_users")
+        if "remote_machines" in data and "remote_machine" not in data:
+            data["remote_machine"] = data.pop("remote_machines")
+        super().__init__(**data)
+
+    @property
+    def local_users(self) -> Optional[str]:
+        return self.local_user
+
+    @property
+    def remote_users(self) -> Optional[str]:
+        return self.remote_user
+
+    @property
+    def remote_machines(self) -> Optional[str]:
+        return self.remote_machine
+
+    @classmethod
+    def create_unrestricted(
+        cls,
+        program: str,
+        name: str = DEFAULT_RULE_NAME,
+        display_name: str = DEFAULT_RULE_NAME,
+        group: str = RULE_GROUPING,
+        description: str = DEFAULT_DESCRIPTION,
+        enabled: bool = True,
+        direction: str = "Outbound",
+        action: str = "Block",
+        profiles: str = "Domain,Private,Public",
+        **overrides: Any,
+    ) -> FirewallRuleInfo:
+        """Creates a FirewallRuleInfo instance with all 7 filter categories positively verified as unrestricted."""
+        kwargs: dict[str, Any] = {
+            "name": name,
+            "display_name": display_name,
+            "group": group,
+            "description": description,
+            "enabled": enabled,
+            "direction": direction,
+            "action": action,
+            "profiles": profiles,
+            "program": program,
+            "local_address": "Any",
+            "remote_address": "Any",
+            "protocol": "Any",
+            "local_port": "Any",
+            "remote_port": "Any",
+            "service": "Any",
+            "interface_alias": "Any",
+            "interface_type": "Any",
+            "authentication": "NotRequired",
+            "encryption": "NotRequired",
+            "override_block_rules": False,
+            "local_user": "Any",
+            "remote_user": "Any",
+            "remote_machine": "Any",
+        }
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
 
 class FirewallQueryResult(BaseModel):
@@ -340,10 +407,19 @@ def validate_firewall_filters(
     4. Service filter: Must apply to all services ('Any' or empty).
     5. Interface filter: Must apply to all interfaces ('Any' or empty).
     6. Interface-type filter: Must apply to all interface types ('Any' or empty).
-    7. Security filter: Must require no IPsec authentication, encryption, or user/machine restrictions.
+    7. Security filter: Must require no IPsec authentication, encryption, or user/machine restrictions,
+       and OverrideBlockRules must be explicitly verified as False.
+
+    Fail-closed semantics:
+    - Missing properties (None) fail closed.
+    - Null properties fail closed.
+    - Restrictive or unrecognized values fail closed.
+    - OverrideBlockRules=True or malformed fails closed.
     """
     # 1. Application filter
-    if not rule.program or rule.program.strip() in ("*", "Any", ""):
+    if rule.program is None:
+        return False, "Application filter is missing or null. A dedicated executable path is required."
+    if rule.program.strip() in ("*", "Any", ""):
         return False, "Application filter is empty or wildcard. A dedicated executable path is required."
     try:
         expected_norm = Path(expected_exe).resolve()
@@ -353,50 +429,89 @@ def validate_firewall_filters(
     except Exception as e:
         return False, f"Could not compare application filter paths: {e}"
 
-    def is_any(val: Optional[str], extra_allowed: tuple[str, ...] = ()) -> bool:
+    # Helper for address, port, service, and interface properties:
+    # Requires non-None presence and explicit membership in allowed unrestricted tokens.
+    def check_unrestricted(val: Optional[str], prop_name: str, extra_allowed: tuple[str, ...] = ()) -> Tuple[bool, str]:
         if val is None:
-            return True
+            return False, f"Filter property '{prop_name}' is missing or null (cannot be verified as unrestricted)."
         clean = val.strip().lower()
-        return clean in ("", "any", "*", *extra_allowed)
+        allowed = ("", "any", "*", *extra_allowed)
+        if clean not in allowed:
+            return False, f"{prop_name} filter is restricted: '{val}' (must be Any or unrestricted)."
+        return True, ""
 
     # 2. Address filter
-    if not is_any(rule.local_address):
-        return False, f"Local address filter is restricted: '{rule.local_address}' (must be Any or unrestricted)."
-    if not is_any(rule.remote_address):
-        return False, f"Remote address filter is restricted: '{rule.remote_address}' (must be Any or unrestricted)."
+    ok, err = check_unrestricted(rule.local_address, "Local address")
+    if not ok:
+        return False, err
+    ok, err = check_unrestricted(rule.remote_address, "Remote address")
+    if not ok:
+        return False, err
 
     # 3. Port & protocol filter
-    if not is_any(rule.protocol, extra_allowed=("0", "256")):
-        return False, f"Protocol filter is restricted: '{rule.protocol}' (must be Any)."
-    if not is_any(rule.local_port):
-        return False, f"Local port filter is restricted: '{rule.local_port}' (must be Any)."
-    if not is_any(rule.remote_port):
-        return False, f"Remote port filter is restricted: '{rule.remote_port}' (must be Any)."
+    ok, err = check_unrestricted(rule.protocol, "Protocol", extra_allowed=("0", "256"))
+    if not ok:
+        return False, err
+    ok, err = check_unrestricted(rule.local_port, "Local port")
+    if not ok:
+        return False, err
+    ok, err = check_unrestricted(rule.remote_port, "Remote port")
+    if not ok:
+        return False, err
 
     # 4. Service filter
-    if not is_any(rule.service):
-        return False, f"Service filter is restricted: '{rule.service}' (must apply to all services)."
+    ok, err = check_unrestricted(rule.service, "Service")
+    if not ok:
+        return False, err
 
     # 5. Interface filter
-    if not is_any(rule.interface_alias):
-        return False, f"Interface filter is restricted: '{rule.interface_alias}' (must apply to all interfaces)."
+    ok, err = check_unrestricted(rule.interface_alias, "Interface")
+    if not ok:
+        return False, err
 
     # 6. Interface-type filter
-    if not is_any(rule.interface_type):
-        return False, f"Interface type filter is restricted: '{rule.interface_type}' (must apply to all interface types)."
+    ok, err = check_unrestricted(rule.interface_type, "Interface type")
+    if not ok:
+        return False, err
 
     # 7. Security filter
-    sec_unrestricted = ("", "notrequired", "no", "any", "none")
-    if rule.authentication and rule.authentication.strip().lower() not in sec_unrestricted:
+    # Authentication must be explicitly NotRequired
+    if rule.authentication is None:
+        return False, "Security filter missing or null Authentication property (must be explicitly NotRequired)."
+    if rule.authentication.strip().lower() not in ("notrequired", "no"):
         return False, f"Security filter requires authentication: '{rule.authentication}' (must be NotRequired)."
-    if rule.encryption and rule.encryption.strip().lower() not in sec_unrestricted:
+
+    # Encryption must be explicitly NotRequired
+    if rule.encryption is None:
+        return False, "Security filter missing or null Encryption property (must be explicitly NotRequired)."
+    if rule.encryption.strip().lower() not in ("notrequired", "no"):
         return False, f"Security filter requires encryption: '{rule.encryption}' (must be NotRequired)."
-    if not is_any(rule.local_users):
-        return False, f"Security filter restricts local users: '{rule.local_users}'."
-    if not is_any(rule.remote_users):
-        return False, f"Security filter restricts remote users: '{rule.remote_users}'."
-    if not is_any(rule.remote_machines):
-        return False, f"Security filter restricts remote machines: '{rule.remote_machines}'."
+
+    # OverrideBlockRules must be explicitly verified as False
+    if rule.override_block_rules is True:
+        return False, "Security filter has OverrideBlockRules enabled (must be False). Outbound block can be bypassed."
+    if rule.override_block_rules is None:
+        return False, "Security filter missing or null OverrideBlockRules property (must be explicitly False)."
+    if rule.override_block_rules is not False:
+        return False, f"Security filter has malformed OverrideBlockRules value: {rule.override_block_rules!r} (must be boolean False)."
+
+    # LocalUser must be unrestricted
+    if rule.local_user is None:
+        return False, "Security filter missing or null LocalUser property (must be unrestricted Any)."
+    if rule.local_user.strip().lower() not in ("", "any", "*"):
+        return False, f"Security filter restricts local users: '{rule.local_user}'."
+
+    # RemoteUser must be unrestricted
+    if rule.remote_user is None:
+        return False, "Security filter missing or null RemoteUser property (must be unrestricted Any)."
+    if rule.remote_user.strip().lower() not in ("", "any", "*"):
+        return False, f"Security filter restricts remote users: '{rule.remote_user}'."
+
+    # RemoteMachine must be unrestricted
+    if rule.remote_machine is None:
+        return False, "Security filter missing or null RemoteMachine property (must be unrestricted Any)."
+    if rule.remote_machine.strip().lower() not in ("", "any", "*"):
+        return False, f"Security filter restricts remote machines: '{rule.remote_machine}'."
 
     return True, "All 7 outbound filter categories positively verified as unrestricted."
 
@@ -443,11 +558,27 @@ def parse_netsh_rule_blocks(output: str) -> list[FirewallRuleInfo]:
 
 
 def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
-    """Parses JSON rule objects from PowerShell into FirewallRuleInfo list."""
+    """Parses JSON rule objects from PowerShell into FirewallRuleInfo list.
+
+    Distinguishes:
+    - Explicitly verified unrestricted values ('Any', 'NotRequired', False).
+    - Explicitly verified restrictive values ('192.168.1.1', 'Required', True).
+    - Missing properties (None in FirewallRuleInfo).
+    - Null properties (None in FirewallRuleInfo).
+    - Malformed values preserved for validator rejection.
+    """
     if not data:
         return []
     if isinstance(data, dict):
-        raw_list = [data]
+        if "Rules" in data:
+            raw_list = data["Rules"]
+            if not isinstance(raw_list, list):
+                raw_list = [raw_list] if isinstance(raw_list, dict) else []
+        elif "Success" in data and "InspectionComplete" in data:
+            # Envelope missing Rules list
+            return []
+        else:
+            raw_list = [data]
     elif isinstance(data, list):
         raw_list = data
     else:
@@ -457,30 +588,58 @@ def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
     for r in raw_list:
         if not isinstance(r, dict):
             continue
+
+        name = str(r["Name"]).strip() if "Name" in r and r["Name"] is not None else ""
+        if not name and "RuleName" in r and r["RuleName"] is not None:
+            name = str(r["RuleName"]).strip()
+        display_name = str(r["DisplayName"]).strip() if "DisplayName" in r and r["DisplayName"] is not None else ""
+        group = str(r["Group"]).strip() if "Group" in r and r["Group"] is not None else ""
+        if not group and "DisplayGroup" in r and r["DisplayGroup"] is not None:
+            group = str(r["DisplayGroup"]).strip()
+        description = str(r["Description"]).strip() if "Description" in r and r["Description"] is not None else ""
+
         enabled_val = r.get("Enabled")
         enabled = bool(enabled_val) if not isinstance(enabled_val, (int, str)) else str(enabled_val).lower() in ("1", "true")
-        name = str(r.get("Name") or r.get("RuleName") or "").strip()
-        display_name = str(r.get("DisplayName", "")).strip()
-        group = str(r.get("Group") or r.get("DisplayGroup") or "").strip()
-        description = str(r.get("Description", "")).strip()
-        direction = str(r.get("Direction", "")).strip()
-        action = str(r.get("Action", "")).strip()
-        profiles = str(r.get("Profiles", "")).strip()
-        program = str(r.get("Program", "")).strip()
+        direction = str(r["Direction"]).strip() if "Direction" in r and r["Direction"] is not None else ""
+        action = str(r["Action"]).strip() if "Action" in r and r["Action"] is not None else ""
+        profiles = str(r["Profiles"]).strip() if "Profiles" in r and r["Profiles"] is not None else ""
 
-        local_address = str(r.get("LocalAddress", "Any")).strip()
-        remote_address = str(r.get("RemoteAddress", "Any")).strip()
-        protocol = str(r.get("Protocol", "Any")).strip()
-        local_port = str(r.get("LocalPort", "Any")).strip()
-        remote_port = str(r.get("RemotePort", "Any")).strip()
-        service = str(r.get("Service", "Any")).strip()
-        interface_alias = str(r.get("InterfaceAlias", "Any")).strip()
-        interface_type = str(r.get("InterfaceType", "Any")).strip()
-        authentication = str(r.get("Authentication", "NotRequired")).strip()
-        encryption = str(r.get("Encryption", "NotRequired")).strip()
-        local_users = str(r.get("LocalUsers", "")).strip()
-        remote_users = str(r.get("RemoteUsers", "")).strip()
-        remote_machines = str(r.get("RemoteMachines", "")).strip()
+        program = str(r["Program"]).strip() if "Program" in r and r["Program"] is not None else None
+        local_address = str(r["LocalAddress"]).strip() if "LocalAddress" in r and r["LocalAddress"] is not None else None
+        remote_address = str(r["RemoteAddress"]).strip() if "RemoteAddress" in r and r["RemoteAddress"] is not None else None
+        protocol = str(r["Protocol"]).strip() if "Protocol" in r and r["Protocol"] is not None else None
+        local_port = str(r["LocalPort"]).strip() if "LocalPort" in r and r["LocalPort"] is not None else None
+        remote_port = str(r["RemotePort"]).strip() if "RemotePort" in r and r["RemotePort"] is not None else None
+        service = str(r["Service"]).strip() if "Service" in r and r["Service"] is not None else None
+        interface_alias = str(r["InterfaceAlias"]).strip() if "InterfaceAlias" in r and r["InterfaceAlias"] is not None else None
+        interface_type = str(r["InterfaceType"]).strip() if "InterfaceType" in r and r["InterfaceType"] is not None else None
+        authentication = str(r["Authentication"]).strip() if "Authentication" in r and r["Authentication"] is not None else None
+        encryption = str(r["Encryption"]).strip() if "Encryption" in r and r["Encryption"] is not None else None
+
+        # OverrideBlockRules: strictly boolean
+        if "OverrideBlockRules" not in r:
+            override_block_rules = None
+        else:
+            raw_obr = r["OverrideBlockRules"]
+            if raw_obr is None:
+                override_block_rules = None
+            elif isinstance(raw_obr, bool):
+                override_block_rules = raw_obr
+            elif isinstance(raw_obr, str) and raw_obr.strip().lower() in ("true", "1"):
+                override_block_rules = True
+            elif isinstance(raw_obr, str) and raw_obr.strip().lower() in ("false", "0"):
+                override_block_rules = False
+            elif isinstance(raw_obr, (int, float)) and raw_obr == 0:
+                override_block_rules = False
+            elif isinstance(raw_obr, (int, float)) and raw_obr == 1:
+                override_block_rules = True
+            else:
+                override_block_rules = raw_obr  # preserve malformed value for validator rejection
+
+        # Exact singular Microsoft NetSecurity CIM properties
+        local_user = str(r["LocalUser"]).strip() if "LocalUser" in r and r["LocalUser"] is not None else None
+        remote_user = str(r["RemoteUser"]).strip() if "RemoteUser" in r and r["RemoteUser"] is not None else None
+        remote_machine = str(r["RemoteMachine"]).strip() if "RemoteMachine" in r and r["RemoteMachine"] is not None else None
 
         rules.append(FirewallRuleInfo(
             name=name,
@@ -502,9 +661,11 @@ def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
             interface_type=interface_type,
             authentication=authentication,
             encryption=encryption,
-            local_users=local_users,
-            remote_users=remote_users,
-            remote_machines=remote_machines,
+            override_block_rules=override_block_rules,
+            local_user=local_user,
+            remote_user=remote_user,
+            remote_machine=remote_machine,
+            raw_properties=dict(r),
         ))
     return rules
 
@@ -553,7 +714,7 @@ $stableId = $env:TSUKIKO_STABLE_RULE_ID
 $ErrorActionPreference = 'Stop'
 
 try {
-    $rules = @(Get-NetFirewallRule -PolicyStore $store -ErrorAction SilentlyContinue | Where-Object {
+    $rules = @(Get-NetFirewallRule -PolicyStore $store | Where-Object {
         $_.Name -eq $ruleId -or $_.DisplayName -eq $ruleId -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $group
     } | ForEach-Object {
         $r = $_
@@ -584,14 +745,25 @@ try {
             InterfaceType = [string]$iftype.InterfaceType
             Authentication = [string]$sec.Authentication
             Encryption = [string]$sec.Encryption
-            LocalUsers = [string]$sec.LocalUsers
-            RemoteUsers = [string]$sec.RemoteUsers
-            RemoteMachines = [string]$sec.RemoteMachines
+            OverrideBlockRules = [bool]$sec.OverrideBlockRules
+            LocalUser = [string]$sec.LocalUser
+            RemoteUser = [string]$sec.RemoteUser
+            RemoteMachine = [string]$sec.RemoteMachine
         }
     })
-    $rules | ConvertTo-Json -Depth 4
+    [PSCustomObject]@{
+        Success = $true
+        InspectionComplete = $true
+        Rules = $rules
+        Error = $null
+    } | ConvertTo-Json -Depth 5
 } catch {
-    Write-Error $_.Exception.Message
+    [PSCustomObject]@{
+        Success = $false
+        InspectionComplete = $false
+        Rules = @()
+        Error = $_.Exception.Message
+    } | ConvertTo-Json -Depth 3
     exit 1
 }
 """
@@ -626,34 +798,17 @@ try {
                     policy_store=policy_store,
                 )
 
-            if res.returncode == 0:
-                raw_out = res.stdout.strip()
-                if not raw_out:
-                    return FirewallQueryResult(
-                        success=True,
-                        inspection_complete=True,
-                        rules=[],
-                        policy_store=policy_store,
-                    )
-                try:
-                    data = json.loads(raw_out)
-                    parsed_rules = parse_powershell_rules_json(data)
-                    return FirewallQueryResult(
-                        success=True,
-                        inspection_complete=True,
-                        rules=parsed_rules,
-                        policy_store=policy_store,
-                    )
-                except Exception as json_err:
-                    return FirewallQueryResult(
-                        success=False,
-                        inspection_complete=False,
-                        rules=[],
-                        error=f"Malformed PowerShell JSON output: {json_err}",
-                        policy_store=policy_store,
-                    )
-            else:
-                err_msg = res.stderr.strip() or res.stdout.strip()
+            if res.returncode != 0:
+                err_msg = ""
+                if res.stdout.strip():
+                    try:
+                        err_data = json.loads(res.stdout.strip())
+                        if isinstance(err_data, dict) and err_data.get("Error"):
+                            err_msg = str(err_data["Error"]).strip()
+                    except Exception:
+                        pass
+                if not err_msg:
+                    err_msg = res.stderr.strip() or res.stdout.strip() or f"PowerShell exited with code {res.returncode}"
                 return FirewallQueryResult(
                     success=False,
                     inspection_complete=False,
@@ -661,6 +816,64 @@ try {
                     error=f"PowerShell inspection failed (exit code {res.returncode}): {err_msg}",
                     policy_store=policy_store,
                 )
+
+            raw_out = res.stdout.strip()
+            if not raw_out:
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error="PowerShell query returned empty standard output; missing response envelope.",
+                    policy_store=policy_store,
+                )
+
+            try:
+                data = json.loads(raw_out)
+            except Exception as json_err:
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error=f"Malformed PowerShell JSON output: {json_err}",
+                    policy_store=policy_store,
+                )
+
+            if not isinstance(data, dict):
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error="PowerShell response envelope is missing (expected JSON object).",
+                    policy_store=policy_store,
+                )
+
+            if "Success" not in data or "InspectionComplete" not in data or "Rules" not in data:
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error="Incomplete PowerShell response envelope: missing required fields.",
+                    policy_store=policy_store,
+                )
+
+            if data.get("Success") is not True or data.get("InspectionComplete") is not True:
+                err_detail = data.get("Error") or "Inspection not marked complete by PowerShell."
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error=f"PowerShell query reported failure: {err_detail}",
+                    policy_store=policy_store,
+                )
+
+            raw_rules = data.get("Rules", [])
+            parsed_rules = parse_powershell_rules_json(raw_rules)
+            return FirewallQueryResult(
+                success=True,
+                inspection_complete=True,
+                rules=parsed_rules,
+                policy_store=policy_store,
+            )
         except subprocess.TimeoutExpired:
             return FirewallQueryResult(
                 success=False,
@@ -776,7 +989,7 @@ $stableId = $env:TSUKIKO_STABLE_RULE_ID
 $ErrorActionPreference = 'Stop'
 try {
     $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Select-Object Name, Enabled, AllowLocalFirewallRules)
-    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {
+    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {
         $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $targetGroup
     } | ForEach-Object {
         $r = $_
@@ -807,17 +1020,27 @@ try {
             InterfaceType = [string]$iftype.InterfaceType
             Authentication = [string]$sec.Authentication
             Encryption = [string]$sec.Encryption
-            LocalUsers = [string]$sec.LocalUsers
-            RemoteUsers = [string]$sec.RemoteUsers
-            RemoteMachines = [string]$sec.RemoteMachines
+            OverrideBlockRules = [bool]$sec.OverrideBlockRules
+            LocalUser = [string]$sec.LocalUser
+            RemoteUser = [string]$sec.RemoteUser
+            RemoteMachine = [string]$sec.RemoteMachine
         }
     })
     [PSCustomObject]@{
+        Success = $true
+        InspectionComplete = $true
         Profiles = $profiles
         Rules = $rules
-    } | ConvertTo-Json -Depth 4
+        Error = $null
+    } | ConvertTo-Json -Depth 5
 } catch {
-    Write-Error $_.Exception.Message
+    [PSCustomObject]@{
+        Success = $false
+        InspectionComplete = $false
+        Profiles = @()
+        Rules = @()
+        Error = $_.Exception.Message
+    } | ConvertTo-Json -Depth 3
     exit 1
 }
 """
@@ -835,17 +1058,36 @@ try {
             env=env,
         )
         if res.returncode != 0:
-            err = res.stderr.strip() or res.stdout.strip()
+            err = ""
+            if res.stdout.strip():
+                try:
+                    err_data = json.loads(res.stdout.strip())
+                    if isinstance(err_data, dict) and err_data.get("Error"):
+                        err = str(err_data["Error"]).strip()
+                except Exception:
+                    pass
+            if not err:
+                err = res.stderr.strip() or res.stdout.strip() or f"PowerShell exited with code {res.returncode}"
             return False, f"PowerShell ActiveStore inspection failed (exit code {res.returncode}): {err}"
 
         output = res.stdout.strip()
         if not output:
-            return False, "PowerShell ActiveStore query returned empty output."
+            return False, "PowerShell ActiveStore query returned empty output; missing response envelope."
 
         try:
             data = json.loads(output)
         except json.JSONDecodeError as e:
             return False, f"Malformed PowerShell output: unable to parse JSON: {e}"
+
+        if not isinstance(data, dict):
+            return False, "ActiveStore response envelope is missing (expected JSON object)."
+
+        if "Success" not in data or "InspectionComplete" not in data:
+            return False, "Incomplete ActiveStore response envelope: missing Success/InspectionComplete."
+
+        if data.get("Success") is not True or data.get("InspectionComplete") is not True:
+            err_detail = data.get("Error") or "ActiveStore inspection failed."
+            return False, f"ActiveStore inspection failed: {err_detail}"
 
         # 1. Verify Profiles in ActiveStore
         profiles_raw = data.get("Profiles", [])

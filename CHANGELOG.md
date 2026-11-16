@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.4] - Phase 1 Final Security Hardening - 2026-11-16
+
+### Added
+- **Exact NetSecurity CIM Security Filter Properties (`app/core/privacy/windows_firewall.py`)**:
+  - Migrated security-filter queries and Python validation from incorrect plural names to exact Microsoft NetSecurity CIM properties:
+    - `Authentication: [string]$sec.Authentication` (requires `NotRequired`)
+    - `Encryption: [string]$sec.Encryption` (requires `NotRequired`)
+    - `OverrideBlockRules: [bool]$sec.OverrideBlockRules` (strictly requires boolean `False`)
+    - `LocalUser: [string]$sec.LocalUser` (requires unrestricted `Any`)
+    - `RemoteUser: [string]$sec.RemoteUser` (requires unrestricted `Any`)
+    - `RemoteMachine: [string]$sec.RemoteMachine` (requires unrestricted `Any`)
+  - Added `override_block_rules: Optional[Any] = None` in `FirewallRuleInfo` to prevent missing values from silently defaulting to `False`.
+  - Added backwards-compatible `@property` accessors (`local_users`, `remote_users`, `remote_machines`) mapping to singular CIM fields.
+  - Added helper `FirewallRuleInfo.create_unrestricted()` for test and synthesis baseline creation.
+- **Fail-Closed Parsing & Strict Missing-Value Semantics (`parse_powershell_rules_json`, `validate_firewall_filters`)**:
+  - Removed artificial fallback defaults (`.get("LocalAddress", "Any")`, etc.) in `parse_powershell_rules_json`.
+  - Distinguishes explicitly verified unrestricted values from explicitly verified restrictive values, missing properties (`None`), null properties (`None`), and malformed properties.
+  - All 14 required properties across all 7 filter categories strictly fail validation closed if missing or null.
+- **PowerShell Fail-Closed Response Envelopes & Strict Error Propagation**:
+  - Set `$ErrorActionPreference = 'Stop'` and removed `-ErrorAction SilentlyContinue` across all NetSecurity queries.
+  - Cmdlet and filter query failures now propagate to PowerShell's outer catch handler, emitting a JSON envelope with `Success = $false`, `InspectionComplete = $false`, and terminating with exit code 1.
+  - Python query handlers require both `Success=True` and `InspectionComplete=True`. Truncated, empty, or failed queries fail closed (`success=False, inspection_complete=False`) and are never conflated with rule absence.
+  - `create_firewall_rule()` refuses creation if pre-creation inspection fails or is incomplete.
+  - `remove_firewall_rule()` refuses deletion confirmation if post-deletion inspection fails or is incomplete.
+- **Enhanced 5-Stage Read-Only Windows Inspection Verification (`scripts/verify_windows_firewall_inspection.py`)**:
+  - Rewritten to execute a 5-stage inspection test:
+    1. ActiveStore Firewall Profiles schema and state verification.
+    2. Real Windows Firewall rules sampling.
+    3. Full 23-property schema verification across all 7 filter categories.
+    4. NetSecurity CIM boolean property serialization (`OverrideBlockRules`, `Enabled`).
+    5. Python parser validation and synthetic rejection tests (missing property, OverrideBlockRules=True, malformed booleans, plural property substitution).
+  - Strictly read-only with zero system mutations.
+- **Expanded Test Suite (`tests/test_windows_firewall.py`)**:
+  - Added 10 Defect A regression tests.
+  - Added 60 parameterized matrix regression tests (15 properties x 4 conditions) for Defect B fail-closed semantics.
+  - Added 7 Defect C fail-closed PowerShell integration tests.
+  - Total test suite expanded to 221 tests (217 passed, 4 skipped on Windows; all 221 passed on Linux).
+
+---
+
 ## [0.1.3] - Final Windows Firewall Security Correction - 2026-11-16
 
 ### Added

@@ -136,6 +136,30 @@ The final Windows Firewall security correction addressed the remaining findings 
 
 ---
 
+### Phase 1 Final Security Hardening: Correct Security Filter Semantics, Fail-Closed Parsing, and PowerShell Inspection (2026-11-16)
+
+An independent security review identified three remaining defects in NetSecurity filter verification, elevating the automated test suite to 221 tests (217 passed, 4 skipped on Windows; all 221 passed on Linux):
+
+1. **Defect A: Correct NetSecurity Security-Filter Properties (`app/core/privacy/windows_firewall.py`):**
+   * **Root Cause**: PowerShell queries and Python verification checked non-existent plural properties (`LocalUsers`, `RemoteUsers`, `RemoteMachines`) instead of exact Microsoft NetSecurity CIM properties (`Authentication`, `Encryption`, `OverrideBlockRules`, `LocalUser`, `RemoteUser`, `RemoteMachine`). Missing properties defaulted silently to unrestricted.
+   * **Fix**: Migrated PowerShell script to query exact CIM properties. Added `override_block_rules: Optional[Any] = None` to `FirewallRuleInfo`. Python `validate_firewall_filters()` requires: `Authentication == "NotRequired"`, `Encryption == "NotRequired"`, `OverrideBlockRules is False` (strictly boolean), and `LocalUser`, `RemoteUser`, `RemoteMachine` covering `Any`. Rejects missing, null, unrecognized, or plural properties.
+   * **Tests**: 10 Defect A regression tests in `tests/test_windows_firewall.py`.
+
+2. **Defect B: Strict Missing-Value Handling & Fail-Closed Parsing (`app/core/privacy/windows_firewall.py`):**
+   * **Root Cause**: `parse_powershell_rules_json` manufactured artificial defaults (`.get("LocalAddress", "Any")`, etc.), turning missing or corrupted JSON properties into valid unrestricted rules.
+   * **Fix**: Removed manufactured defaults. Missing and null properties are preserved as `None`. Parameterized matrix test verifies that every single one of the 14 required properties fails closed if missing, null, or restrictive.
+   * **Tests**: 60 parameterized matrix regression tests (15 properties x 4 conditions) in `tests/test_windows_firewall.py`.
+
+3. **Defect C: PowerShell Inspection Fail-Closed Envelopes & Error Propagation (`app/core/privacy/windows_firewall.py`):**
+   * **Root Cause**: PowerShell inspection commands used `-ErrorAction SilentlyContinue`, suppressing cmdlet errors, and returned unformatted JSON where empty output was misinterpreted as confirmed absence.
+   * **Fix**: Enforced `$ErrorActionPreference = 'Stop'` and removed `-ErrorAction SilentlyContinue`. Filter query failures propagate to PowerShell outer catch handler and return exit code 1. Output is wrapped in a structured envelope `{ "Success": bool, "InspectionComplete": bool, "Rules": [...], "Error": string|null }`. Python query handlers strictly require `Success=True` and `InspectionComplete=True`. Rule creation refuses when pre-creation inspection fails or is incomplete; rule deletion refuses confirmation when post-deletion inspection fails or is incomplete.
+   * **Tests**: 7 Defect C fail-closed integration tests in `tests/test_windows_firewall.py`.
+
+4. **Enhanced 5-Stage Read-Only Windows Inspection Verification (`scripts/verify_windows_firewall_inspection.py`):**
+   * Rewritten to test real ActiveStore profiles, sample real rules, verify 23-property schema, confirm CIM boolean serialization, and validate Python parser rejection rules. 100% read-only with zero system mutations.
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -144,12 +168,12 @@ The final Windows Firewall security correction addressed the remaining findings 
 | Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
 | Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
-| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, all 7 filter category verification, exact stable-name creation/deletion via PowerShell, and honest structured query inspection. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, all 7 filter category verification with exact CIM properties, exact stable-name creation/deletion via PowerShell, fail-closed JSON envelopes, and honest structured query inspection. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 135 unit, regression, packaging, and integration tests (131 passed, 4 skipped on Windows; 135 passed on Linux). |
-| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with read-only ActiveStore inspection). |
+| Automated Pytest Test Suite | **Implemented & Tested** | 221 unit, regression, packaging, and integration tests (217 passed, 4 skipped on Windows; all 221 passed on Linux). |
+| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 5-stage read-only ActiveStore inspection). |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
