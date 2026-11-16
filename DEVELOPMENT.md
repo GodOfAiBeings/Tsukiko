@@ -53,13 +53,13 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (115 unit, regression, packaging, and integration tests):
+Execute the complete automated test suite (135 unit, regression, packaging, and integration tests):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, precise rule ownership identity, and safe multi-rule deletion (60 tests).
+* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, 7 outbound filter category verification, precise rule ownership identity, safe deletion by stable internal Name, and structured query result parsing (80 tests).
 * [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
 * [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
 * [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping (8 tests).
@@ -72,8 +72,8 @@ pytest -v
 ## 5. Dual-Platform CI Matrix
 
 Continuous Integration runs on GitHub Actions across two distinct environments:
-1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and Windows Firewall policy parsing (111 passed, 4 Unix-specific skipped).
-2. **Linux (`ubuntu-latest`)**: Validates full 115-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets (131 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 135-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
 
 ---
 

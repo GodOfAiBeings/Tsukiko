@@ -89,29 +89,46 @@ Tsukiko strictly validates network profiles and distinguishes persistent rules f
   * Verifies all three network profiles (`Domain`, `Private`, `Public`) are enabled in ActiveStore.
   * Verifies local firewall rule merging is allowed (`AllowLocalFirewallRules` is true) and not blocked by corporate GPO.
   * Confirms that an effective Outbound Block rule exists in ActiveStore, is enabled, outbound, blocking, covers all profiles, and matches the target binary.
+  * Verifies all 7 outbound filter categories are unrestricted (`validate_firewall_filters`):
+    1. **Application Filter (`Get-NetFirewallApplicationFilter`)**: Matches the dedicated deployment binary path (`tsukiko.exe`). Wildcards and empty targets are rejected.
+    2. **Address Filter (`Get-NetFirewallAddressFilter`)**: Both `LocalAddress` and `RemoteAddress` cover `Any`. Any specific IP, subnet, or keyword restriction is rejected.
+    3. **Port & Protocol Filter (`Get-NetFirewallPortFilter`)**: `Protocol`, `LocalPort`, and `RemotePort` cover `Any`. Port or protocol limits fail verification.
+    4. **Service Filter (`Get-NetFirewallServiceFilter`)**: Applies to all services (`Any`).
+    5. **Interface Filter (`Get-NetFirewallInterfaceFilter`)**: Applies to all interfaces (`Any`).
+    6. **Interface-Type Filter (`Get-NetFirewallInterfaceTypeFilter`)**: Applies to all interface types (`Any`).
+    7. **Security Filter (`Get-NetFirewallSecurityFilter`)**: Requires no authentication (`NotRequired`), encryption (`NotRequired`), or machine/user restrictions.
 
-### D. Rule Ownership Identity & Safe Multi-Rule Deletion
-Tsukiko enforces a unique, documented rule ownership mechanism:
+### D. Rule Ownership Identity, Safe Deletion & Query Results
+Tsukiko enforces a unique, documented rule ownership and query mechanism:
 * **Display Name:** `Tsukiko Outbound Privacy Boundary`
 * **Internal Name (Stable ID):** `Tsukiko_Privacy_Outbound_Block`
 * **Grouping:** `Tsukiko Desktop Companion`
 * **Ownership Marker:** `[Tsukiko-Privacy-Core:Outbound-Block]`
-* **Safe Deletion & Conflict Avoidance:**
-  * Multi-rule enumeration handles both single- and multi-rule responses from netsh and PowerShell.
+* **PowerShell Creation & Deletion:**
+  * Rule creation uses `New-NetFirewallRule` with explicit `-Name Tsukiko_Privacy_Outbound_Block`, `-DisplayName`, `-Group`, `-Description`, `-Direction Outbound`, `-Action Block`, `-Enabled True`, `-Profile Any`, and `-Program`.
+  * Rule removal strictly targets `-Name Tsukiko_Privacy_Outbound_Block -PolicyStore PersistentStore` via `Remove-NetFirewallRule`. Rules are never deleted by DisplayName alone.
+  * Post-deletion re-query in the policy store verifies that the rule was actually removed.
+  * Legacy rules without the stable internal identifier are reported as unverified legacy rules and automatic deletion is strictly refused.
   * Foreign rules sharing the name prefix or display name are rejected and will never be deleted.
   * If multiple rules claim Tsukiko ownership, deletion halts with an ambiguous identity error requiring operator intervention.
-  * Creation refuses to proceed if a conflicting foreign rule already occupies the rule name.
+  * Creation refuses to proceed if pre-creation inspection fails or if a conflicting foreign rule already exists.
+* **Structured Query Result (`FirewallQueryResult`):**
+  * Queries return a structured `FirewallQueryResult` distinguishing:
+    * **Confirmed Absence**: `success=True`, `inspection_complete=True`, `rules=[]` (supports `os_policy_not_configured`).
+    * **Confirmed Presence**: `success=True`, `inspection_complete=True`, `len(rules) > 0` (proceeds to effective policy checks).
+    * **Inspection Failure**: `success=False` or `inspection_complete=False` (reports `os_policy_unverified`; never conflated with rule absence).
 
 ### E. Four Honest Security States
 1. `in_process_only`: Running under a development Python interpreter (`python.exe`) or on non-Windows platforms. In-process socket interception is active; OS-level firewall rules are deliberately omitted to preserve workstation tooling.
-2. `os_policy_not_configured`: Running as dedicated `tsukiko.exe`, but no Windows Firewall outbound rule has been configured.
-3. `os_policy_unverified`: A rule named `Tsukiko Outbound Privacy Boundary` exists, but effective policy in ActiveStore could not be proven (e.g. program mismatch, action not Block, profiles incomplete, profile disabled in ActiveStore, local rule merge restricted, or missing ownership marker).
-4. `os_policy_active`: Dedicated `tsukiko.exe` with verified active Windows Firewall Outbound Block rule confirmed in the ActiveStore effective policy layer.
+2. `os_policy_not_configured`: Running as dedicated `tsukiko.exe`, confirmed absence of matching rules in the policy store.
+3. `os_policy_unverified`: Inspection failure, or rule exists in configuration but effective policy in ActiveStore could not be verified (e.g. program mismatch, action not Block, profiles incomplete, profile disabled in ActiveStore, local rule merge restricted, restrictive filter, or missing ownership marker).
+4. `os_policy_active`: Dedicated `tsukiko.exe` with verified active Windows Firewall Outbound Block rule and all 7 filter categories confirmed unrestricted in the ActiveStore effective policy layer.
 
 ### F. Authorization and Elevation
 * **No Automatic Modifications**: Tsukiko will **never** modify Windows Firewall rules automatically at startup.
 * **Explicit User Authorization**: Creation and removal functions require `user_authorized=True` and administrative elevation.
 * **Refusal on Shared Interpreters**: Strictly refuses rule creation against shared development interpreters.
+* **Continuous Integration Verification**: Windows CI runs non-destructive read-only ActiveStore queries verifying NetSecurity cmdlets and Python JSON parser compatibility without altering host firewall state.
 
 ---
 

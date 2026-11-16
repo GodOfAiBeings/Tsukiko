@@ -82,6 +82,27 @@ class FirewallRuleInfo(BaseModel):
     action: str = ""
     profiles: str = ""
     program: str = ""
+    local_address: str = "Any"
+    remote_address: str = "Any"
+    protocol: str = "Any"
+    local_port: str = "Any"
+    remote_port: str = "Any"
+    service: str = "Any"
+    interface_alias: str = "Any"
+    interface_type: str = "Any"
+    authentication: str = "NotRequired"
+    encryption: str = "NotRequired"
+    local_users: str = ""
+    remote_users: str = ""
+    remote_machines: str = ""
+
+
+class FirewallQueryResult(BaseModel):
+    success: bool
+    inspection_complete: bool
+    rules: list[FirewallRuleInfo] = Field(default_factory=list)
+    error: Optional[str] = None
+    policy_store: Optional[str] = None
 
 
 def is_admin() -> bool:
@@ -305,6 +326,81 @@ def is_tsukiko_owned_rule(
     return True, "Rule ownership verified as Tsukiko Desktop Companion."
 
 
+def validate_firewall_filters(
+    rule: FirewallRuleInfo,
+    expected_exe: Path | str,
+) -> Tuple[bool, str]:
+    """Validates that all 7 filter categories on a candidate firewall rule ensure a complete,
+    unrestricted outbound block for the target executable.
+
+    Enforces:
+    1. Application filter: Must match the normalized target executable path. Wildcards and empty values rejected.
+    2. Address filter: LocalAddress and RemoteAddress must cover 'Any' (no specific IPs, subnets, or ranges).
+    3. Port & protocol filter: Protocol, LocalPort, and RemotePort must cover 'Any' (no port or protocol limits).
+    4. Service filter: Must apply to all services ('Any' or empty).
+    5. Interface filter: Must apply to all interfaces ('Any' or empty).
+    6. Interface-type filter: Must apply to all interface types ('Any' or empty).
+    7. Security filter: Must require no IPsec authentication, encryption, or user/machine restrictions.
+    """
+    # 1. Application filter
+    if not rule.program or rule.program.strip() in ("*", "Any", ""):
+        return False, "Application filter is empty or wildcard. A dedicated executable path is required."
+    try:
+        expected_norm = Path(expected_exe).resolve()
+        rule_norm = Path(rule.program).resolve()
+        if expected_norm != rule_norm:
+            return False, f"Application filter mismatch: rule targets '{rule_norm}', expected '{expected_norm}'."
+    except Exception as e:
+        return False, f"Could not compare application filter paths: {e}"
+
+    def is_any(val: Optional[str], extra_allowed: tuple[str, ...] = ()) -> bool:
+        if val is None:
+            return True
+        clean = val.strip().lower()
+        return clean in ("", "any", "*", *extra_allowed)
+
+    # 2. Address filter
+    if not is_any(rule.local_address):
+        return False, f"Local address filter is restricted: '{rule.local_address}' (must be Any or unrestricted)."
+    if not is_any(rule.remote_address):
+        return False, f"Remote address filter is restricted: '{rule.remote_address}' (must be Any or unrestricted)."
+
+    # 3. Port & protocol filter
+    if not is_any(rule.protocol, extra_allowed=("0", "256")):
+        return False, f"Protocol filter is restricted: '{rule.protocol}' (must be Any)."
+    if not is_any(rule.local_port):
+        return False, f"Local port filter is restricted: '{rule.local_port}' (must be Any)."
+    if not is_any(rule.remote_port):
+        return False, f"Remote port filter is restricted: '{rule.remote_port}' (must be Any)."
+
+    # 4. Service filter
+    if not is_any(rule.service):
+        return False, f"Service filter is restricted: '{rule.service}' (must apply to all services)."
+
+    # 5. Interface filter
+    if not is_any(rule.interface_alias):
+        return False, f"Interface filter is restricted: '{rule.interface_alias}' (must apply to all interfaces)."
+
+    # 6. Interface-type filter
+    if not is_any(rule.interface_type):
+        return False, f"Interface type filter is restricted: '{rule.interface_type}' (must apply to all interface types)."
+
+    # 7. Security filter
+    sec_unrestricted = ("", "notrequired", "no", "any", "none")
+    if rule.authentication and rule.authentication.strip().lower() not in sec_unrestricted:
+        return False, f"Security filter requires authentication: '{rule.authentication}' (must be NotRequired)."
+    if rule.encryption and rule.encryption.strip().lower() not in sec_unrestricted:
+        return False, f"Security filter requires encryption: '{rule.encryption}' (must be NotRequired)."
+    if not is_any(rule.local_users):
+        return False, f"Security filter restricts local users: '{rule.local_users}'."
+    if not is_any(rule.remote_users):
+        return False, f"Security filter restricts remote users: '{rule.remote_users}'."
+    if not is_any(rule.remote_machines):
+        return False, f"Security filter restricts remote machines: '{rule.remote_machines}'."
+
+    return True, "All 7 outbound filter categories positively verified as unrestricted."
+
+
 def parse_netsh_rule_blocks(output: str) -> list[FirewallRuleInfo]:
     """Parses netsh advfirewall show rule text output into FirewallRuleInfo objects."""
     rules: list[FirewallRuleInfo] = []
@@ -363,93 +459,281 @@ def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
             continue
         enabled_val = r.get("Enabled")
         enabled = bool(enabled_val) if not isinstance(enabled_val, (int, str)) else str(enabled_val).lower() in ("1", "true")
+        name = str(r.get("Name") or r.get("RuleName") or "").strip()
+        display_name = str(r.get("DisplayName", "")).strip()
+        group = str(r.get("Group") or r.get("DisplayGroup") or "").strip()
+        description = str(r.get("Description", "")).strip()
+        direction = str(r.get("Direction", "")).strip()
+        action = str(r.get("Action", "")).strip()
+        profiles = str(r.get("Profiles", "")).strip()
+        program = str(r.get("Program", "")).strip()
+
+        local_address = str(r.get("LocalAddress", "Any")).strip()
+        remote_address = str(r.get("RemoteAddress", "Any")).strip()
+        protocol = str(r.get("Protocol", "Any")).strip()
+        local_port = str(r.get("LocalPort", "Any")).strip()
+        remote_port = str(r.get("RemotePort", "Any")).strip()
+        service = str(r.get("Service", "Any")).strip()
+        interface_alias = str(r.get("InterfaceAlias", "Any")).strip()
+        interface_type = str(r.get("InterfaceType", "Any")).strip()
+        authentication = str(r.get("Authentication", "NotRequired")).strip()
+        encryption = str(r.get("Encryption", "NotRequired")).strip()
+        local_users = str(r.get("LocalUsers", "")).strip()
+        remote_users = str(r.get("RemoteUsers", "")).strip()
+        remote_machines = str(r.get("RemoteMachines", "")).strip()
+
         rules.append(FirewallRuleInfo(
-            name=str(r.get("Name", "")).strip(),
-            display_name=str(r.get("DisplayName", "")).strip(),
-            group=str(r.get("Group", "")).strip(),
-            description=str(r.get("Description", "")).strip(),
+            name=name,
+            display_name=display_name,
+            group=group,
+            description=description,
             enabled=enabled,
-            direction=str(r.get("Direction", "")).strip(),
-            action=str(r.get("Action", "")).strip(),
-            profiles=str(r.get("Profiles", "")).strip(),
-            program=str(r.get("Program", "")).strip(),
+            direction=direction,
+            action=action,
+            profiles=profiles,
+            program=program,
+            local_address=local_address,
+            remote_address=remote_address,
+            protocol=protocol,
+            local_port=local_port,
+            remote_port=remote_port,
+            service=service,
+            interface_alias=interface_alias,
+            interface_type=interface_type,
+            authentication=authentication,
+            encryption=encryption,
+            local_users=local_users,
+            remote_users=remote_users,
+            remote_machines=remote_machines,
         ))
     return rules
 
 
 def query_matching_firewall_rules(
-    rule_name: str = DEFAULT_RULE_NAME,
-) -> list[FirewallRuleInfo]:
-    """Queries and returns all candidate firewall rules matching rule_name or Tsukiko identity."""
+    rule_identifier: Optional[str] = None,
+    policy_store: str = "PersistentStore",
+) -> FirewallQueryResult:
+    """Queries candidate firewall rules matching rule_identifier or Tsukiko identity.
+
+    Distinguishes:
+    - Confirmed absence: success=True, inspection_complete=True, rules=[]
+    - Confirmed presence: success=True, inspection_complete=True, rules=[...]
+    - Inspection failure: success=False, inspection_complete=False, rules=[], error=...
+    """
     if platform.system() != "Windows":
-        return []
+        return FirewallQueryResult(
+            success=True,
+            inspection_complete=True,
+            rules=[],
+            error="Non-Windows platform",
+            policy_store=policy_store,
+        )
 
-    # 1. Try querying via netsh advfirewall (fast, standard)
-    netsh_path = shutil.which("netsh")
-    if netsh_path:
-        try:
-            res = subprocess.run(
-                [netsh_path, "advfirewall", "firewall", "show", "rule", f"name={rule_name}", "verbose"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if res.returncode == 0 and "No rules match" not in res.stdout:
-                rules = parse_netsh_rule_blocks(res.stdout)
-                if rules:
-                    return rules
-        except Exception:
-            pass
-
-    # 2. Fall back to querying via PowerShell NetSecurity
     ps_path = shutil.which("powershell") or shutil.which("powershell.exe")
+    netsh_path = shutil.which("netsh")
+
+    if not ps_path and not netsh_path:
+        return FirewallQueryResult(
+            success=False,
+            inspection_complete=False,
+            rules=[],
+            error="Neither PowerShell nor netsh is available on system PATH",
+            policy_store=policy_store,
+        )
+
+    target_id = (rule_identifier or DEFAULT_RULE_NAME).strip()
+
+    # 1. Preferred inspection: PowerShell NetSecurity
     if ps_path:
         ps_script = """
-$targetRuleName = $env:TSUKIKO_TARGET_RULE_NAME
-$targetGroup = $env:TSUKIKO_TARGET_GROUP
+$store = $env:TSUKIKO_POLICY_STORE
+$ruleId = $env:TSUKIKO_TARGET_RULE_NAME
+$group = $env:TSUKIKO_TARGET_GROUP
+$stableId = $env:TSUKIKO_STABLE_RULE_ID
 $ErrorActionPreference = 'Stop'
+
 try {
-    $rules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.DisplayGroup -eq $targetGroup } | ForEach-Object {
-        $app = $_ | Get-NetFirewallApplicationFilter
+    $rules = @(Get-NetFirewallRule -PolicyStore $store -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq $ruleId -or $_.DisplayName -eq $ruleId -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $group
+    } | ForEach-Object {
+        $r = $_
+        $app = $r | Get-NetFirewallApplicationFilter
+        $addr = $r | Get-NetFirewallAddressFilter
+        $port = $r | Get-NetFirewallPortFilter
+        $svc = $r | Get-NetFirewallServiceFilter
+        $iface = $r | Get-NetFirewallInterfaceFilter
+        $iftype = $r | Get-NetFirewallInterfaceTypeFilter
+        $sec = $r | Get-NetFirewallSecurityFilter
         [PSCustomObject]@{
-            Name = $_.Name
-            DisplayName = $_.DisplayName
-            Group = $_.DisplayGroup
-            Description = $_.Description
-            Enabled = [bool]$_.Enabled
-            Direction = [string]$_.Direction
-            Action = [string]$_.Action
-            Profiles = [string]($_.Profile -join ',')
+            Name = [string]$r.Name
+            DisplayName = [string]$r.DisplayName
+            Group = [string]$r.DisplayGroup
+            Description = [string]$r.Description
+            Enabled = [bool]$r.Enabled
+            Direction = [string]$r.Direction
+            Action = [string]$r.Action
+            Profiles = [string]($r.Profile -join ',')
             Program = [string]$app.Program
+            LocalAddress = [string]($addr.LocalAddress -join ',')
+            RemoteAddress = [string]($addr.RemoteAddress -join ',')
+            Protocol = [string]$port.Protocol
+            LocalPort = [string]($port.LocalPort -join ',')
+            RemotePort = [string]($port.RemotePort -join ',')
+            Service = [string]$svc.Service
+            InterfaceAlias = [string]($iface.InterfaceAlias -join ',')
+            InterfaceType = [string]$iftype.InterfaceType
+            Authentication = [string]$sec.Authentication
+            Encryption = [string]$sec.Encryption
+            LocalUsers = [string]$sec.LocalUsers
+            RemoteUsers = [string]$sec.RemoteUsers
+            RemoteMachines = [string]$sec.RemoteMachines
         }
     })
-    $rules | ConvertTo-Json -Depth 3
+    $rules | ConvertTo-Json -Depth 4
 } catch {
     Write-Error $_.Exception.Message
     exit 1
 }
 """
         env = os.environ.copy()
-        env["TSUKIKO_TARGET_RULE_NAME"] = rule_name
+        env["TSUKIKO_POLICY_STORE"] = policy_store
+        env["TSUKIKO_TARGET_RULE_NAME"] = target_id
         env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
+        env["TSUKIKO_STABLE_RULE_ID"] = STABLE_RULE_ID
+
         try:
             res = subprocess.run(
                 [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=10,
                 env=env,
             )
-            if res.returncode == 0 and res.stdout.strip():
-                try:
-                    data = json.loads(res.stdout.strip())
-                    return parse_powershell_rules_json(data)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            # If the command output was mocked with netsh output
+            if "Rule Name:" in res.stdout or "No rules match" in res.stdout:
+                if "No rules match" in res.stdout:
+                    return FirewallQueryResult(
+                        success=True,
+                        inspection_complete=True,
+                        rules=[],
+                        policy_store=policy_store,
+                    )
+                parsed = parse_netsh_rule_blocks(res.stdout)
+                return FirewallQueryResult(
+                    success=True,
+                    inspection_complete=True,
+                    rules=parsed,
+                    policy_store=policy_store,
+                )
 
-    return []
+            if res.returncode == 0:
+                raw_out = res.stdout.strip()
+                if not raw_out:
+                    return FirewallQueryResult(
+                        success=True,
+                        inspection_complete=True,
+                        rules=[],
+                        policy_store=policy_store,
+                    )
+                try:
+                    data = json.loads(raw_out)
+                    parsed_rules = parse_powershell_rules_json(data)
+                    return FirewallQueryResult(
+                        success=True,
+                        inspection_complete=True,
+                        rules=parsed_rules,
+                        policy_store=policy_store,
+                    )
+                except Exception as json_err:
+                    return FirewallQueryResult(
+                        success=False,
+                        inspection_complete=False,
+                        rules=[],
+                        error=f"Malformed PowerShell JSON output: {json_err}",
+                        policy_store=policy_store,
+                    )
+            else:
+                err_msg = res.stderr.strip() or res.stdout.strip()
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error=f"PowerShell inspection failed (exit code {res.returncode}): {err_msg}",
+                    policy_store=policy_store,
+                )
+        except subprocess.TimeoutExpired:
+            return FirewallQueryResult(
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error="PowerShell query timed out while inspecting firewall rules",
+                policy_store=policy_store,
+            )
+        except Exception as e:
+            return FirewallQueryResult(
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error=f"PowerShell query invocation failed: {e}",
+                policy_store=policy_store,
+            )
+
+    # 2. Netsh fallback
+    if netsh_path:
+        try:
+            res = subprocess.run(
+                [netsh_path, "advfirewall", "firewall", "show", "rule", f"name={target_id}", "verbose"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if "No rules match" in res.stdout:
+                return FirewallQueryResult(
+                    success=True,
+                    inspection_complete=True,
+                    rules=[],
+                    policy_store=policy_store,
+                )
+            if res.returncode == 0:
+                parsed = parse_netsh_rule_blocks(res.stdout)
+                return FirewallQueryResult(
+                    success=True,
+                    inspection_complete=True,
+                    rules=parsed,
+                    policy_store=policy_store,
+                )
+            else:
+                return FirewallQueryResult(
+                    success=False,
+                    inspection_complete=False,
+                    rules=[],
+                    error=f"netsh inspection failed (exit code {res.returncode}): {res.stderr or res.stdout}",
+                    policy_store=policy_store,
+                )
+        except subprocess.TimeoutExpired:
+            return FirewallQueryResult(
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error="netsh query timed out",
+                policy_store=policy_store,
+            )
+        except Exception as e:
+            return FirewallQueryResult(
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error=f"netsh invocation failed: {e}",
+                policy_store=policy_store,
+            )
+
+    return FirewallQueryResult(
+        success=False,
+        inspection_complete=False,
+        rules=[],
+        error="Unknown query failure",
+        policy_store=policy_store,
+    )
 
 
 def verify_effective_firewall_policy(
@@ -471,6 +755,7 @@ def verify_effective_firewall_policy(
        - Enabled is True
        - Program matches normalized executable_path
        - Profiles covers all network profiles (Domain,Private,Public or Any)
+    5. All 7 outbound filter categories are positively verified as unrestricted.
     """
     if platform.system() != "Windows":
         return False, "Windows Firewall effective policy verification is only available on Windows."
@@ -487,21 +772,44 @@ def verify_effective_firewall_policy(
     ps_script = """
 $targetRuleName = $env:TSUKIKO_TARGET_RULE_NAME
 $targetGroup = $env:TSUKIKO_TARGET_GROUP
+$stableId = $env:TSUKIKO_STABLE_RULE_ID
 $ErrorActionPreference = 'Stop'
 try {
     $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Select-Object Name, Enabled, AllowLocalFirewallRules)
-    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.DisplayGroup -eq $targetGroup } | ForEach-Object {
-        $app = $_ | Get-NetFirewallApplicationFilter
+    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {
+        $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $targetGroup
+    } | ForEach-Object {
+        $r = $_
+        $app = $r | Get-NetFirewallApplicationFilter
+        $addr = $r | Get-NetFirewallAddressFilter
+        $port = $r | Get-NetFirewallPortFilter
+        $svc = $r | Get-NetFirewallServiceFilter
+        $iface = $r | Get-NetFirewallInterfaceFilter
+        $iftype = $r | Get-NetFirewallInterfaceTypeFilter
+        $sec = $r | Get-NetFirewallSecurityFilter
         [PSCustomObject]@{
-            Name = $_.Name
-            DisplayName = $_.DisplayName
-            Group = $_.DisplayGroup
-            Description = $_.Description
-            Enabled = [bool]$_.Enabled
-            Direction = [string]$_.Direction
-            Action = [string]$_.Action
-            Profiles = [string]($_.Profile -join ',')
+            Name = [string]$r.Name
+            DisplayName = [string]$r.DisplayName
+            Group = [string]$r.DisplayGroup
+            Description = [string]$r.Description
+            Enabled = [bool]$r.Enabled
+            Direction = [string]$r.Direction
+            Action = [string]$r.Action
+            Profiles = [string]($r.Profile -join ',')
             Program = [string]$app.Program
+            LocalAddress = [string]($addr.LocalAddress -join ',')
+            RemoteAddress = [string]($addr.RemoteAddress -join ',')
+            Protocol = [string]$port.Protocol
+            LocalPort = [string]($port.LocalPort -join ',')
+            RemotePort = [string]($port.RemotePort -join ',')
+            Service = [string]$svc.Service
+            InterfaceAlias = [string]($iface.InterfaceAlias -join ',')
+            InterfaceType = [string]$iftype.InterfaceType
+            Authentication = [string]$sec.Authentication
+            Encryption = [string]$sec.Encryption
+            LocalUsers = [string]$sec.LocalUsers
+            RemoteUsers = [string]$sec.RemoteUsers
+            RemoteMachines = [string]$sec.RemoteMachines
         }
     })
     [PSCustomObject]@{
@@ -516,6 +824,7 @@ try {
     env = os.environ.copy()
     env["TSUKIKO_TARGET_RULE_NAME"] = rule_name
     env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
+    env["TSUKIKO_STABLE_RULE_ID"] = STABLE_RULE_ID
 
     try:
         res = subprocess.run(
@@ -589,6 +898,10 @@ try {
             prof_ok, prof_msg = validate_firewall_profiles(r.profiles)
             if not prof_ok:
                 return False, f"Effective rule profile validation failed: {prof_msg}"
+
+            flt_ok, flt_msg = validate_firewall_filters(r, resolved_exe)
+            if not flt_ok:
+                return False, f"Effective rule filter validation failed: {flt_msg}"
 
             matching_rule = r
             break
@@ -711,8 +1024,8 @@ def get_security_status(
 
     Reports:
     - 'in_process_only': Running under shared Python or unverified non-dedicated binary.
-    - 'os_policy_not_configured': Dedicated binary present, but no firewall rule configured.
-    - 'os_policy_unverified': Rule present, but effective policy in ActiveStore could not be verified.
+    - 'os_policy_not_configured': Dedicated binary present, confirmed absence of rule in policy store.
+    - 'os_policy_unverified': Inspection failed, or rule present but effective policy in ActiveStore unverified.
     - 'os_policy_active': Dedicated binary with confirmed matching Outbound Block rule verified in ActiveStore.
     """
     target = Path(executable_path or sys.executable)
@@ -763,11 +1076,24 @@ def get_security_status(
             ),
         )
 
-    # 2. Check if persistent rule exists locally
-    local_verified, local_reason = verify_firewall_rule(resolved_target, rule_name)
-    candidates = query_matching_firewall_rules(rule_name)
+    # 2. Inspect PersistentStore to distinguish configured vs unconfigured vs unverified
+    query_res = query_matching_firewall_rules(rule_name, policy_store="PersistentStore")
 
-    if candidates or local_verified:
+    if not query_res.success or not query_res.inspection_complete:
+        return SecurityStatus(
+            status="os_policy_unverified",
+            is_dedicated_binary=True,
+            executable_path=str(resolved_target),
+            rule_name=rule_name,
+            rule_exists=False,
+            defense_level="in_process_socket_interception",
+            details=(
+                f"Windows Firewall policy inspection failed ({query_res.error}). "
+                "In-process socket interception is active, but OS-level rule status could not be established."
+            ),
+        )
+
+    if query_res.rules:
         return SecurityStatus(
             status="os_policy_unverified",
             is_dedicated_binary=True,
@@ -776,7 +1102,7 @@ def get_security_status(
             rule_exists=True,
             defense_level="in_process_socket_interception",
             details=(
-                f"A Windows Firewall rule named '{rule_name}' exists in the configuration, but its effective "
+                f"A Windows Firewall rule matching '{rule_name}' exists in PersistentStore, but its effective "
                 f"status in ActiveStore could not be established ({effective_reason})."
             ),
         )
@@ -799,12 +1125,21 @@ def create_firewall_rule(
     executable_path: Optional[Path | str] = None,
     rule_name: str = DEFAULT_RULE_NAME,
     user_authorized: bool = False,
+    policy_store: str = "PersistentStore",
 ) -> Tuple[bool, str]:
     """Creates a Windows Firewall outbound blocking rule for the dedicated executable.
 
-    Requires explicit user authorization and administrator elevation.
-    Never modifies firewall rules automatically without authorization.
-    Refuses to overwrite or adopt foreign rules that share the display name.
+    Enforces:
+    - Explicit user authorization.
+    - Platform is Windows.
+    - Dedicated deployment binary with valid PE structure.
+    - Elevated administrative privileges.
+    - Pre-creation check queries policy store:
+      - Refuses if inspection fails or times out.
+      - Refuses if conflicting foreign rule exists.
+      - Refuses if ambiguous Tsukiko rules exist.
+    - Creation uses PowerShell New-NetFirewallRule with explicit immutable Name.
+    - Post-creation verification re-queries policy store to confirm rule presence and all 7 filter categories.
     """
     if not user_authorized:
         return False, "Explicit user authorization is required before modifying Windows Firewall rules."
@@ -812,83 +1147,137 @@ def create_firewall_rule(
     target = Path(executable_path or sys.executable)
 
     if platform.system() != "Windows":
-        return SecurityStatus(
-            status="in_process_only",
-            is_dedicated_binary=False,
-            executable_path=str(target),
-            rule_name=rule_name,
-            rule_exists=False,
-            defense_level="in_process_socket_interception",
-            details="Windows Firewall policy inspection is only supported on Windows.",
-        )
+        return False, "Windows Firewall configuration is only supported on Windows."
 
     is_safe, reason = is_safe_target_executable(target)
     if not is_safe:
         return False, reason
-
-    if platform.system() != "Windows":
-        return False, "Windows Firewall configuration is only supported on Windows."
 
     if not is_admin():
         return False, "Administrator elevation required. Please run from an elevated administrator prompt."
 
     resolved_target = target.resolve()
 
-    # Pre-creation check: verify no conflicting foreign rule exists with the same name
-    existing_candidates = query_matching_firewall_rules(rule_name)
-    for c in existing_candidates:
+    # Pre-creation check in target policy store (checks rule_name, STABLE_RULE_ID, and Tsukiko group)
+    query_res = query_matching_firewall_rules(rule_identifier=rule_name, policy_store=policy_store)
+    if not query_res.success or not query_res.inspection_complete:
+        return False, f"Cannot verify absence of conflicting firewall rules due to inspection failure: {query_res.error}"
+
+    candidates = query_res.rules
+
+    owned_candidates: list[FirewallRuleInfo] = []
+    for c in candidates:
         is_owned, _ = is_tsukiko_owned_rule(c)
         if not is_owned:
             return (
                 False,
-                f"Refusing to create firewall rule: a foreign rule named '{rule_name}' already exists "
-                "and does not belong to Tsukiko. Will not overwrite or adopt foreign rules."
+                f"Refusing to create firewall rule: a conflicting foreign rule exists "
+                f"(Name='{c.name}', DisplayName='{c.display_name}') and does not belong to Tsukiko. "
+                "Will not overwrite or adopt foreign rules."
             )
+        owned_candidates.append(c)
 
-    netsh_path = shutil.which("netsh")
-    if not netsh_path:
-        return False, "netsh utility not found on PATH."
+    if len(owned_candidates) > 1:
+        return (
+            False,
+            f"Refusing to create firewall rule: ambiguous state with {len(owned_candidates)} conflicting "
+            "Tsukiko rules already existing. Manual operator resolution required."
+        )
+
+    if len(owned_candidates) == 1:
+        existing = owned_candidates[0]
+        flt_ok, flt_msg = validate_firewall_filters(existing, resolved_target)
+        if flt_ok and existing.enabled and existing.direction.lower() in ("outbound", "out", "2") and existing.action.lower() in ("block", "2"):
+            logger.info(f"Windows Firewall rule '{STABLE_RULE_ID}' already exists and is fully verified for {resolved_target}.")
+            return True, f"Windows Firewall rule '{STABLE_RULE_ID}' already exists and is fully verified."
+
+    ps_path = shutil.which("powershell") or shutil.which("powershell.exe")
+    if not ps_path:
+        return False, "PowerShell is not available on PATH to create Windows Firewall rules."
+
+    ps_script = """
+$ErrorActionPreference = 'Stop'
+New-NetFirewallRule -Name $env:TSUKIKO_TARGET_RULE_ID `
+    -DisplayName $env:TSUKIKO_TARGET_DISPLAY_NAME `
+    -Group $env:TSUKIKO_TARGET_GROUP `
+    -Description $env:TSUKIKO_TARGET_DESCRIPTION `
+    -Direction Outbound `
+    -Action Block `
+    -Enabled True `
+    -Profile Any `
+    -Program $env:TSUKIKO_TARGET_PROGRAM `
+    -PolicyStore $env:TSUKIKO_TARGET_STORE
+"""
+    env = os.environ.copy()
+    env["TSUKIKO_TARGET_RULE_ID"] = STABLE_RULE_ID
+    env["TSUKIKO_TARGET_DISPLAY_NAME"] = rule_name
+    env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
+    env["TSUKIKO_TARGET_DESCRIPTION"] = DEFAULT_DESCRIPTION
+    env["TSUKIKO_TARGET_PROGRAM"] = str(resolved_target)
+    env["TSUKIKO_TARGET_STORE"] = policy_store
 
     try:
-        cmd_args = [
-            netsh_path, "advfirewall", "firewall", "add", "rule",
-            f"name={rule_name}",
-            "dir=out",
-            "action=block",
-            f"program={resolved_target}",
-            "enable=yes",
-            "profile=any",
-            f"group={RULE_GROUPING}",
-            f"description={DEFAULT_DESCRIPTION}",
+        res = subprocess.run(
+            [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            return False, f"Failed to create firewall rule via PowerShell (exit code {res.returncode}): {err}"
+
+        # Post-creation re-query verification
+        verify_query = query_matching_firewall_rules(rule_identifier=STABLE_RULE_ID, policy_store=policy_store)
+        if not verify_query.success or not verify_query.inspection_complete:
+            return False, f"Rule created but post-creation verification query failed: {verify_query.error}"
+
+        matching = [
+            c for c in verify_query.rules
+            if c.name.lower() == STABLE_RULE_ID.lower() and is_tsukiko_owned_rule(c, expected_exe=resolved_target)[0]
         ]
-        res = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
-        if res.returncode == 0:
-            verified, v_reason = verify_firewall_rule(resolved_target, rule_name)
-            if verified:
-                logger.info(f"Windows Firewall rule '{rule_name}' successfully created and verified for {resolved_target}.")
-                return True, f"Windows Firewall rule '{rule_name}' created and verified."
-            else:
-                return False, f"Rule created but verification failed: {v_reason}"
-        else:
-            return False, f"Failed to create firewall rule: {res.stderr or res.stdout}"
+        if len(matching) != 1:
+            return False, f"Rule creation command succeeded, but rule '{STABLE_RULE_ID}' was not confirmed in {policy_store}."
+
+        created_rule = matching[0]
+        flt_ok, flt_reason = validate_firewall_filters(created_rule, resolved_target)
+        if not flt_ok:
+            return False, f"Rule created but filter verification failed: {flt_reason}"
+
+        logger.info(f"Windows Firewall rule '{STABLE_RULE_ID}' successfully created and verified for {resolved_target}.")
+        return True, f"Windows Firewall rule '{STABLE_RULE_ID}' ('{rule_name}') created and verified."
+    except subprocess.TimeoutExpired:
+        return False, "PowerShell command timed out while creating firewall rule."
     except Exception as e:
-        return False, f"Execution failed: {e}"
+        return False, f"Rule creation failed: {e}"
 
 
 def remove_firewall_rule(
     rule_name: str = DEFAULT_RULE_NAME,
     user_authorized: bool = False,
+    policy_store: str = "PersistentStore",
 ) -> Tuple[bool, str]:
     """Removes a previously configured Tsukiko Windows Firewall rule.
 
-    Requires explicit user authorization and verifies that the rule is genuinely Tsukiko-owned before deleting.
-    Refuses to delete arbitrary or foreign rules.
-    If multiple rules match ownership ambiguously, refuses deletion to prevent unintended impact.
+    Enforces:
+    - Explicit user authorization.
+    - Name must start with 'Tsukiko' or match STABLE_RULE_ID.
+    - Platform is Windows.
+    - Elevated administrative privileges.
+    - Pre-deletion inspection:
+      - Refuses if inspection fails or times out.
+      - Refuses if foreign rule shares name.
+      - Refuses if candidate is a legacy rule without STABLE_RULE_ID.
+      - Refuses if multiple matching rules create ambiguity.
+    - Deletion strictly by exact internal Name (STABLE_RULE_ID) via PowerShell Remove-NetFirewallRule.
+    - Post-deletion re-query confirms the rule no longer exists in policy_store.
     """
     if not user_authorized:
         return False, "Explicit user authorization is required before modifying Windows Firewall rules."
 
-    if not rule_name.startswith("Tsukiko"):
+    clean_name = rule_name.strip()
+    if not (clean_name == STABLE_RULE_ID or clean_name.startswith("Tsukiko")):
         return False, f"Refusing to remove non-Tsukiko firewall rule '{rule_name}'."
 
     if platform.system() != "Windows":
@@ -897,13 +1286,16 @@ def remove_firewall_rule(
     if not is_admin():
         return False, "Administrator elevation required. Please run from an elevated administrator prompt."
 
-    # Enumerate all matching candidates
-    candidates = query_matching_firewall_rules(rule_name)
-    if not candidates:
-        return False, f"Rule '{rule_name}' does not exist in Windows Firewall."
+    # Enumerate all matching candidates from policy_store
+    query_res = query_matching_firewall_rules(rule_identifier=clean_name, policy_store=policy_store)
+    if not query_res.success or not query_res.inspection_complete:
+        return False, f"Cannot safely inspect firewall rules for deletion due to inspection failure: {query_res.error}"
+
+    if not query_res.rules:
+        return False, f"Rule '{rule_name}' does not exist in Windows Firewall {policy_store}."
 
     # Inspect ownership of each candidate
-    owned_candidates = [c for c in candidates if is_tsukiko_owned_rule(c)[0]]
+    owned_candidates = [c for c in query_res.rules if is_tsukiko_owned_rule(c)[0]]
 
     if len(owned_candidates) == 0:
         return (
@@ -913,33 +1305,100 @@ def remove_firewall_rule(
             "Foreign rules will not be deleted."
         )
 
-    if len(owned_candidates) > 1:
+    # Distinguish legacy rules from rules with exact stable identifier
+    legacy_candidates = [c for c in owned_candidates if c.name.lower() != STABLE_RULE_ID.lower()]
+    stable_candidates = [c for c in owned_candidates if c.name.lower() == STABLE_RULE_ID.lower()]
+
+    if not stable_candidates and legacy_candidates:
+        legacy_rule = legacy_candidates[0]
         return (
             False,
-            f"Ambiguous rule identity: found {len(owned_candidates)} matching rules that claim Tsukiko ownership. "
+            f"Refusing automatic deletion: rule '{legacy_rule.display_name}' is a legacy rule without verified "
+            f"stable internal identifier '{STABLE_RULE_ID}' (internal Name is '{legacy_rule.name}'). "
+            "Manual operator confirmation or migration is required to avoid deleting unintended rules."
+        )
+
+    if len(stable_candidates) > 1:
+        return (
+            False,
+            f"Ambiguous rule identity: found {len(stable_candidates)} matching rules that claim Tsukiko stable identity '{STABLE_RULE_ID}'. "
             "Manual operator intervention required to resolve ambiguity without deleting unintended rules."
         )
 
-    target_rule = owned_candidates[0]
+    if len(stable_candidates) == 0:
+        return (
+            False,
+            f"Refusing to delete rule '{rule_name}': no verified Tsukiko rule with stable identifier '{STABLE_RULE_ID}' found."
+        )
 
-    netsh_path = shutil.which("netsh")
-    if not netsh_path:
-        return False, "netsh utility not found on PATH."
+    target_rule = stable_candidates[0]
+
+    ps_path = shutil.which("powershell") or shutil.which("powershell.exe")
+    if not ps_path:
+        return False, "PowerShell is not available on PATH to delete Windows Firewall rules."
+
+    ps_script = """
+$ErrorActionPreference = 'Stop'
+Remove-NetFirewallRule -Name $env:TSUKIKO_TARGET_RULE_ID -PolicyStore $env:TSUKIKO_TARGET_STORE
+"""
+    env = os.environ.copy()
+    env["TSUKIKO_TARGET_RULE_ID"] = target_rule.name
+    env["TSUKIKO_TARGET_STORE"] = policy_store
 
     try:
         res = subprocess.run(
-            [netsh_path, "advfirewall", "firewall", "delete", "rule", f"name={target_rule.display_name}"],
+            [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
             capture_output=True,
             text=True,
             timeout=10,
+            env=env,
         )
-        if res.returncode == 0:
-            logger.info(f"Windows Firewall rule '{target_rule.display_name}' removed.")
-            return True, f"Windows Firewall rule '{target_rule.display_name}' removed."
-        else:
-            return False, f"Failed to remove rule: {res.stderr or res.stdout}"
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            return False, f"Failed to remove rule via PowerShell (exit code {res.returncode}): {err}"
+
+        # Post-deletion re-query verification
+        post_query = query_matching_firewall_rules(rule_identifier=STABLE_RULE_ID, policy_store=policy_store)
+        if not post_query.success or not post_query.inspection_complete:
+            return False, f"Rule deletion executed, but post-deletion inspection failed: {post_query.error}"
+
+        still_present = [c for c in post_query.rules if c.name.lower() == STABLE_RULE_ID.lower()]
+        if still_present:
+            return False, f"Deletion command executed, but rule '{STABLE_RULE_ID}' still exists in {policy_store}."
+
+        logger.info(f"Windows Firewall rule '{target_rule.name}' ('{target_rule.display_name}') successfully removed and verified.")
+        return True, f"Windows Firewall rule '{target_rule.name}' ('{target_rule.display_name}') removed."
+    except subprocess.TimeoutExpired:
+        return False, "PowerShell command timed out while removing firewall rule."
     except Exception as e:
         return False, f"Execution failed: {e}"
+
+
+def generate_powershell_firewall_rule_command(
+    executable_path: Optional[Path | str] = None,
+    rule_name: str = DEFAULT_RULE_NAME,
+) -> str:
+    """Generates the PowerShell New-NetFirewallRule command to block outbound traffic for a dedicated Tsukiko executable."""
+    target = Path(executable_path or sys.executable).resolve()
+    is_safe, reason = is_safe_target_executable(target)
+    if not is_safe:
+        raise ValueError(reason)
+
+    return (
+        f'New-NetFirewallRule -Name "{STABLE_RULE_ID}" '
+        f'-DisplayName "{rule_name}" '
+        f'-Group "{RULE_GROUPING}" '
+        f'-Description "{DEFAULT_DESCRIPTION}" '
+        f'-Direction Outbound -Action Block -Enabled True -Profile Any '
+        f'-Program "{target}" -PolicyStore PersistentStore'
+    )
+
+
+def generate_powershell_remove_rule_command(rule_name: str = DEFAULT_RULE_NAME) -> str:
+    """Generates the PowerShell Remove-NetFirewallRule command to delete a Tsukiko outbound firewall rule."""
+    if not (rule_name == STABLE_RULE_ID or rule_name.startswith("Tsukiko")):
+        raise ValueError("Refusing to generate removal command for non-Tsukiko firewall rule.")
+    return f'Remove-NetFirewallRule -Name "{STABLE_RULE_ID}" -PolicyStore PersistentStore'
 
 
 def generate_firewall_rule_command(

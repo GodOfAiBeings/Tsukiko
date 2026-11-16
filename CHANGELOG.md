@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.3] - Final Windows Firewall Security Correction - 2026-11-16
+
+### Added
+- **Exact Firewall Rule Identity & PowerShell Creation (`app/core/privacy/windows_firewall.py`)**:
+  - Stable, immutable internal identifier `STABLE_RULE_ID = "Tsukiko_Privacy_Outbound_Block"`.
+  - Rule creation migrated to PowerShell `New-NetFirewallRule` with explicit `-Name`, `-DisplayName`, `-Group`, `-Description`, `-Direction Outbound`, `-Action Block`, `-Enabled True`, `-Profile Any`, `-Program`, and `-PolicyStore`.
+  - Pre-creation check queries policy store and halts if inspection fails, if foreign conflicting rules exist, or if ambiguous matching rules exist.
+  - Added `generate_powershell_firewall_rule_command()` and `generate_powershell_remove_rule_command()`.
+- **Safe Exact-Name Deletion & Post-Deletion Verification (`app/core/privacy/windows_firewall.py`)**:
+  - `remove_firewall_rule()` strictly deletes rules by exact internal Name using PowerShell `Remove-NetFirewallRule -Name Tsukiko_Privacy_Outbound_Block -PolicyStore PersistentStore`.
+  - Never deletes rules by DisplayName alone.
+  - Automatically detects legacy rules lacking the internal stable ID and refuses automatic deletion with actionable operator guidance.
+  - Re-queries the policy store post-deletion to confirm the rule was genuinely removed from the system.
+- **Complete Effective Outbound Traffic-Filter Verification (`validate_firewall_filters`)**:
+  - `verify_effective_firewall_policy()` queries and validates all 7 NetSecurity filter categories:
+    1. **Application Filter**: Matches normalized target executable path (`tsukiko.exe`); wildcards and empty targets fail verification.
+    2. **Address Filter**: `LocalAddress` and `RemoteAddress` cover `Any`; specific IPs, subnets, and ranges fail verification.
+    3. **Port & Protocol Filter**: `Protocol`, `LocalPort`, and `RemotePort` cover `Any`; port and protocol restrictions fail verification.
+    4. **Service Filter**: Applies to all services (`Any` / unrestricted).
+    5. **Interface Filter**: Applies to all interfaces (`Any` / unrestricted).
+    6. **Interface-Type Filter**: Applies to all interface types (`Any` / unrestricted).
+    7. **Security Filter**: Requires no IPsec authentication (`NotRequired`), encryption (`NotRequired`), or machine/user restrictions.
+  - Rejection of any restrictive filter fails closed to prevent partial bypasses.
+- **Structured Query Results & Honest Status Reporting (`FirewallQueryResult`)**:
+  - Replaced ambiguous list-only return in `query_matching_firewall_rules()` with `FirewallQueryResult(success, inspection_complete, rules, error, policy_store)`.
+  - Positively distinguishes confirmed absence (`success=True, rules=[]`) from inspection failure (`success=False, error=...`).
+  - `get_security_status()` reports `os_policy_unverified` on inspection failure; never falsely reports `os_policy_not_configured`.
+- **Read-Only Windows Firewall CI Verification (`scripts/verify_windows_firewall_inspection.py`)**:
+  - Created standalone read-only policy inspection verification script.
+  - Added step to `.github/workflows/ci.yml` on `windows-latest` running real ActiveStore queries across all 7 filter categories and validating Python JSON deserialization.
+  - Completely non-destructive: does not create, modify, or delete any firewall rules.
+- **Expanded Test Suite (`tests/test_windows_firewall.py`)**:
+  - 20 new regression tests (80 total in module, 135 total across test suite).
+
+---
+
 ## [0.1.2] - Final Phase 1 Security Closure - 2026-11-16
 
 ### Added
