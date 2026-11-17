@@ -134,85 +134,110 @@ class ModelManager:
         self,
         hardware: Optional[HardwareProfile] = None,
     ) -> Dict[str, Any]:
-        """Calculates safe GPU offload layers and memory allocations."""
+        """Calculates safe GPU offload layers and memory allocations.
+
+        Strictly enforces:
+        1. Configured RAM ceiling (max_ram_mb, default 3500 MB).
+        2. Available system RAM and safety headroom (minimum 500 MB margin).
+        3. Configured safe VRAM ceiling (max_vram_mb, default 2800 MB) with >= 400 MB headroom.
+        4. Explicit gpu_layers overrides MUST NEVER bypass the safe VRAM budget.
+        5. Consistent memory estimation across CPU, Hybrid, and GPU modes.
+        """
         profile = hardware or HardwareInspector.inspect()
         file_size_mb = self._info.file_size_mb
         ctx = self._info.context_window
         total_layers = self._info.block_count or 28
 
-        # 1. RAM Safety Check
-        available_ram = profile.memory.available_ram_mb
-        max_ram_limit = min(self._ai_config.max_ram_mb, available_ram)
-        # Required RAM: weights (if on CPU) + runtime overhead (~500MB)
-        if available_ram < file_size_mb + 400:
-            return {
-                "safe_to_load": False,
-                "reason": (
-                    f"Insufficient system RAM: Available {available_ram} MB is less than "
-                    f"model size ({file_size_mb} MB) + safety headroom (400 MB)."
-                ),
-                "gpu_layers": 0,
-                "backend": "cpu",
-            }
+        mb_per_layer = max(1.0, file_size_mb / max(1, total_layers))
+        kv_cache_mb = int((ctx / 4096.0) * 450)
+        runtime_overhead_mb = 400
 
-        # 2. VRAM Safety & GPU Offload Check
+        # Safe VRAM Budget (honors profile headroom and configured max)
         safe_vram_budget = min(self._ai_config.max_vram_mb, profile.recommended_max_vram_mb)
         cuda_supported = (
             profile.frameworks.llama_cpp_cuda_supported or isinstance(self._engine, DeterministicFakeEngine)
         )
 
-        # Force CPU if requested, no CUDA, or budget is zero
+        # Calculate max safe GPU layers that can physically fit within safe VRAM
         if self._ai_config.backend == "cpu" or not cuda_supported or safe_vram_budget <= 0:
-            return {
-                "safe_to_load": True,
-                "gpu_layers": 0,
-                "backend": "cpu",
-                "safe_vram_budget_mb": 0,
-                "estimated_vram_mb": 0,
-                "estimated_ram_mb": file_size_mb + 400,
-                "reason": "CPU inference selected or GPU VRAM safe budget is 0 MB.",
-            }
-
-        # Calculate memory footprint
-        footprint: ModelMemoryEstimate = HardwareInspector.estimate_model_vram_footprint(
-            file_size_mb=file_size_mb,
-            context_window=ctx,
-            model_name=self._info.model_name,
-            available_vram_mb=safe_vram_budget,
-        )
-
-        # Configured layers override
-        if self._ai_config.gpu_layers > 0:
-            gpu_layers = min(self._ai_config.gpu_layers, total_layers)
-        elif self._ai_config.gpu_layers == -1:
-            gpu_layers = total_layers if footprint.fits_in_vram else 0
+            max_safe_gpu_layers = 0
         else:
-            # Auto-calculate based on safe VRAM budget
-            if footprint.fits_in_vram:
-                gpu_layers = total_layers
-            elif footprint.recommended_offload_strategy == "hybrid_cpu_gpu":
-                mb_per_layer = max(1, file_size_mb / max(1, total_layers))
-                usable_vram = max(0, safe_vram_budget - footprint.runtime_overhead_mb - footprint.estimated_kv_cache_mb)
-                gpu_layers = int(usable_vram / mb_per_layer)
-                gpu_layers = max(0, min(gpu_layers, total_layers))
-            else:
-                gpu_layers = 0
+            usable_vram = max(0, safe_vram_budget - kv_cache_mb - runtime_overhead_mb)
+            max_safe_gpu_layers = min(total_layers, int(usable_vram / mb_per_layer))
+
+        # Determine effective GPU layers
+        # Explicit configured gpu_layers MUST NEVER bypass safe VRAM!
+        if self._ai_config.backend == "cpu" or not cuda_supported or safe_vram_budget <= 0:
+            gpu_layers = 0
+        elif self._ai_config.gpu_layers > 0:
+            # Clamp user override to the safe maximum
+            gpu_layers = min(self._ai_config.gpu_layers, max_safe_gpu_layers)
+        elif self._ai_config.gpu_layers == -1:
+            gpu_layers = max_safe_gpu_layers
+        else:
+            # Default auto: use max safe layers
+            gpu_layers = max_safe_gpu_layers
 
         backend = "cuda" if gpu_layers > 0 else "cpu"
-        estimated_vram = (
-            int((gpu_layers / max(1, total_layers)) * file_size_mb) + footprint.estimated_kv_cache_mb + 400
-            if gpu_layers > 0
-            else 0
-        )
+
+        # Harmonized Footprint Estimation
+        if gpu_layers > 0:
+            gpu_weight_mb = int((gpu_layers / max(1, total_layers)) * file_size_mb)
+            estimated_vram_mb = gpu_weight_mb + kv_cache_mb + runtime_overhead_mb
+        else:
+            estimated_vram_mb = 0
+
+        cpu_layers = max(0, total_layers - gpu_layers)
+        cpu_weight_mb = int((cpu_layers / max(1, total_layers)) * file_size_mb)
+        estimated_ram_mb = cpu_weight_mb + (kv_cache_mb if gpu_layers == 0 else 0) + runtime_overhead_mb
+
+        # Enforce RAM Limits & System Safety Headroom
+        configured_ram_ceiling = self._ai_config.max_ram_mb
+        available_ram = profile.memory.available_ram_mb
+        min_system_headroom = 500
+
+        # Check 1: Configured RAM Ceiling (3500 MB)
+        if estimated_ram_mb > configured_ram_ceiling:
+            return {
+                "safe_to_load": False,
+                "reason": (
+                    f"Estimated RAM footprint ({estimated_ram_mb} MB) exceeds configured RAM limit "
+                    f"({configured_ram_ceiling} MB). Reduce model size or context window."
+                ),
+                "gpu_layers": 0,
+                "backend": backend,
+                "safe_vram_budget_mb": safe_vram_budget,
+                "estimated_vram_mb": estimated_vram_mb,
+                "estimated_ram_mb": estimated_ram_mb,
+            }
+
+        # Check 2: Available System RAM & Safety Headroom
+        if available_ram - estimated_ram_mb < min_system_headroom:
+            return {
+                "safe_to_load": False,
+                "reason": (
+                    f"Insufficient system RAM headroom: Available RAM ({available_ram} MB) cannot "
+                    f"safely accommodate estimated model RAM ({estimated_ram_mb} MB) with required "
+                    f"{min_system_headroom} MB system safety margin."
+                ),
+                "gpu_layers": 0,
+                "backend": backend,
+                "safe_vram_budget_mb": safe_vram_budget,
+                "estimated_vram_mb": estimated_vram_mb,
+                "estimated_ram_mb": estimated_ram_mb,
+            }
 
         return {
             "safe_to_load": True,
             "gpu_layers": gpu_layers,
             "backend": backend,
             "safe_vram_budget_mb": safe_vram_budget,
-            "estimated_vram_mb": estimated_vram,
-            "estimated_ram_mb": file_size_mb + 400 if gpu_layers == 0 else 800,
-            "reason": footprint.details,
+            "estimated_vram_mb": estimated_vram_mb,
+            "estimated_ram_mb": estimated_ram_mb,
+            "reason": (
+                f"Safe allocation approved: {gpu_layers}/{total_layers} layers on GPU "
+                f"({estimated_vram_mb} MB VRAM), {cpu_layers} layers on CPU ({estimated_ram_mb} MB RAM)."
+            ),
         }
 
     def load_model(self, force: bool = False) -> bool:

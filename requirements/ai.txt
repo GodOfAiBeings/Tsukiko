@@ -2,10 +2,17 @@
 # Tsukiko Phase 3: Local Neural Inference Dependencies
 # Note: Keep runtime imports lazy. Core application starts cleanly without this package.
 #
-# CPU-only installation:
-#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# Tested minimum version with native Qwen2.5 / Qwen3.5 architecture support:
+#   llama-cpp-python>=0.3.4
 #
-# CUDA 12.x GPU-accelerated installation (for RTX 3050 Laptop GPU):
-#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+# IMPORTANT (Windows 11 / Python 3.11):
+# To prevent unexpected source compilation requiring MSVC and CMake, install pre-built
+# binary wheels using the official abetlen wheel index:
 #
-llama-cpp-python>=0.3.0
+# Option A: CPU-only inference (AVX2):
+#   pip install "llama-cpp-python>=0.3.4" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#
+# Option B: CUDA 12.4 GPU acceleration (for NVIDIA RTX 3050 Laptop GPU):
+#   pip install "llama-cpp-python>=0.3.4" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+#
+llama-cpp-python>=0.3.4

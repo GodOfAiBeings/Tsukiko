@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ai = [
-    "llama-cpp-python>=0.3.0",
+    "llama-cpp-python>=0.3.4",
 ]
 ui = [
     "PySide6>=6.6.0",

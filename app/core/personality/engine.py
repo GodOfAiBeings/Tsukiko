@@ -1,7 +1,8 @@
 """Tsukiko Local AI Brain — Personality Engine.
 
-Constructs context-aware conversation payloads, applies system prompt policies,
-and cleanses internal model artifacts (such as reasoning/thinking tokens).
+Controls Tsukiko's personality, conversation context packaging,
+character identity grounding, gradual self-disclosure progression,
+conversational initiative, and response filtering.
 """
 
 from __future__ import annotations
@@ -9,22 +10,38 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from app.core.personality.prompts import TSUKIKO_DEFAULT_SYSTEM_PROMPT
+from app.core.personality.biography import CharacterBiography, TSUKIKO_BIOGRAPHY
+from app.core.personality.disclosure import DisclosureStage, DisclosureTracker
+from app.core.personality.initiative import ConversationalInitiativeEngine
+from app.core.personality.prompts import TSUKIKO_DEFAULT_SYSTEM_PROMPT, build_system_prompt
 
 THINK_REGEX = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class PersonalityEngine:
-    """Controls Tsukiko's personality, conversation context packaging, and response filtering."""
+    """Controls Tsukiko's character identity, self-disclosure, initiative, and response filtering."""
 
-    def __init__(self, custom_system_prompt: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        custom_system_prompt: Optional[str] = None,
+        biography: Optional[CharacterBiography] = None,
+        initial_stage: DisclosureStage = DisclosureStage.ACQUAINTANCE,
+    ) -> None:
         self._custom_prompt = custom_system_prompt
+        self.biography = biography or TSUKIKO_BIOGRAPHY
+        self.disclosure_tracker = DisclosureTracker(initial_stage=initial_stage)
+        self.initiative_engine = ConversationalInitiativeEngine()
 
     def get_system_prompt(self) -> str:
-        """Returns the active system prompt."""
+        """Returns the active context-aware system prompt."""
         if self._custom_prompt and self._custom_prompt.strip():
             return self._custom_prompt.strip()
-        return TSUKIKO_DEFAULT_SYSTEM_PROMPT.strip()
+
+        return build_system_prompt(
+            biography=self.biography,
+            stage=self.disclosure_tracker.stage,
+            custom_override=self._custom_prompt,
+        ).strip()
 
     def set_custom_prompt(self, prompt: Optional[str]) -> None:
         """Updates the custom system prompt."""
@@ -36,13 +53,13 @@ class PersonalityEngine:
         new_user_message: str,
     ) -> List[Dict[str, str]]:
         """Formats the full message list for local model inference.
-        
+
         Ensures the system prompt is positioned at the head, existing conversation
         history is preserved, and the new user message is appended cleanly.
         """
         messages: List[Dict[str, str]] = []
 
-        # Head system prompt
+        # Head system prompt reflecting current disclosure stage
         messages.append({"role": "system", "content": self.get_system_prompt()})
 
         # Append existing turns (skipping redundant system messages)

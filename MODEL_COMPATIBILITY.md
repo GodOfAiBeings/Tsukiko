@@ -36,8 +36,10 @@ Tsukiko applies non-negotiable memory safety rules:
    where `recommended_max_vram_mb` is computed as:
    $$\min\left(\max(0, \text{Total VRAM} - 1200\text{ MB}), \max(0, \text{Free VRAM} - 400\text{ MB})\right)$$
 2. **Headroom Guarantee**: Maintains at least **400 MB of VRAM headroom** beyond any calculated GPU allocation to prevent OS desktop stutter.
-3. **Fail-Safe CPU Fallback**: If `Free VRAM == 0` or GPU state is `unavailable` or `llama_cpp_cuda_supported` is `False`, Tsukiko automatically sets `gpu_layers = 0` (CPU-only AVX2 inference).
-4. **Graceful RAM Protection**: If available system RAM is less than model size + 400 MB headroom, model loading is rejected gracefully with `InsufficientMemoryError` rather than crashing the process.
+3. **Strict GPU Layer Clamping**: Explicit `gpu_layers` configuration values can NEVER bypass the safe VRAM budget. If the user or profile requests more layers than `safe_vram_budget` allows, layers are strictly clamped down to `max_safe_gpu_layers`.
+4. **Enforced RAM Ceiling**: System RAM consumption for the model + context cannot exceed `AIConfig.max_ram_mb` (configured ceiling: **3,500 MB**). Models exceeding this ceiling are refused with `safe_to_load = False`.
+5. **System Headroom Protection**: Safe loading requires at least **500 MB of system RAM headroom** beyond the model footprint ($$\text{Estimated RAM Footprint} \le \text{Available RAM} - 500\text{ MB}$$). Rejects loading gracefully rather than risking system thrashing.
+6. **Fail-Safe CPU Fallback**: If `Free VRAM == 0` or GPU state is `unavailable` or `llama_cpp_cuda_supported` is `False`, Tsukiko automatically sets `gpu_layers = 0` (CPU-only AVX2 inference).
 
 ---
 
@@ -57,12 +59,12 @@ For a 2B–3B parameter instruction-tuned model within Tsukiko's 2,800 MB safe V
 
 ## 4. Inference Engine Installation Procedures
 
-Inference libraries are kept completely optional and decoupled from base dependencies. The core application runs cleanly in headless and UI modes without `llama-cpp-python`.
+Inference libraries are kept completely optional and decoupled from base dependencies. The core application runs cleanly in headless and UI modes without `llama-cpp-python`. Tested with `llama-cpp-python>=0.3.4` (verified compatibility with Qwen2.5/Qwen3.5 architectures).
 
 ### Option A: Optimized CPU-Only Runtime (Default Fallback)
 For lightweight CPU execution using AVX2 instructions:
 ```powershell
-pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+pip install "llama-cpp-python>=0.3.4" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 ```
 
 ### Option B: CUDA 12.x Hardware-Accelerated Runtime (RTX 3050 Laptop)
@@ -72,11 +74,11 @@ For GPU offloading via NVIDIA CUDA:
 nvidia-smi
 
 # Install prebuilt CUDA 12.4 wheel
-pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+pip install "llama-cpp-python>=0.3.4" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 ```
 
 > [!IMPORTANT]
-> Tsukiko never silently installs CUDA wheels or forces source compilation. Check `python -m app.main --check-hardware` after installation to verify `llama_cpp_cuda_supported: True`.
+> Always use prebuilt wheels via `--extra-index-url` on Windows to prevent unexpected source compilation requiring MSVC and CMake toolchains. Tsukiko never silently installs CUDA wheels or triggers unvetted network downloads. Check `tsukiko --check-hardware` after installation to verify `llama_cpp_cuda_supported: True`.
 
 ---
 

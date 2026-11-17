@@ -60,19 +60,19 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (373 test items: 369 passed, 4 Unix-specific skipped on Windows; 371 passed, 2 skipped on Linux):
+Execute the complete automated test suite (394 test items: 390 passed, 4 Unix-specific skipped on Windows; 392 passed, 2 skipped on Linux):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_local_brain.py`](tests/test_local_brain.py): Comprehensive verification of the Phase 3 local AI brain subsystem: pure-Python binary GGUF parser and metadata validation, ModelManager 9-state lifecycle machine, safe RAM/VRAM offload calculations, headroom preservation, insufficient memory rejection, engine abstraction, non-thinking personality prompts and reasoning token stripping, temporary in-memory history pruning, ChatWorker QThread streaming, cancellation, error bubbles with retry, clear chat, Settings card model loading/unloading, SystemStatus telemetry, and zero-telemetry offline invariants (31 tests).
+* [`tests/test_local_brain.py`](tests/test_local_brain.py): Comprehensive verification of the Phase 3 local AI brain subsystem: pure-Python binary GGUF parser and metadata validation, ModelManager 9-state lifecycle machine, safe RAM/VRAM offload calculations, headroom preservation, insufficient memory rejection, engine abstraction, non-thinking personality prompts and reasoning token stripping, temporary in-memory history pruning, ChatWorker QThread streaming, cancellation, error bubbles with retry, clear chat, Settings card model loading/unloading, SystemStatus telemetry, character identity (Sayo, 1814-1846, Ogimachi, Unfinished Atlas, snake dread, practical craft), 4-stage gradual self-disclosure (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`), bounded conversational autonomy/initiative with anti-spam backoff, reentrant reload safety without deadlocks, and zero-telemetry offline invariants (51 tests).
 * [`tests/test_desktop_companion.py`](tests/test_desktop_companion.py): Verifies complete Phase 2 PySide6 desktop companion UI: Moonlight theme styling, procedural vector avatar rendering, floating companion widget, compact left menu ordering and locked states, safe fullscreen detection with Win32 ctypes signatures, Game Mode animation suspension without game hooking, system tray recovery and fallback mode, dynamic settings application and YAML persistence, SystemStatusView real hardware telemetry, PrivacyView locked sensors, MemoryView zero-database placeholder, SettingsView validation, and CLI/headless execution (49 tests).
 * [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, strict CIM field-state invariants, non-null StringValue consistency checks, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, precise rule ownership identity, safe deletion by stable internal Name, strict 8-key response envelope validation, and structured query result parsing (224 tests).
 * [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
 * [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
 * [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping (8 tests).
-* [`tests/test_config.py`](tests/test_config.py): Pydantic configuration validation, environment variable parsing, and clean state restoration (6 tests).
+* [`tests/test_config.py`](tests/test_config.py): Pydantic configuration validation, environment variable parsing, clean state restoration, and safe defaults / integrity regression checks (7 tests).
 * [`tests/test_packaging.py`](tests/test_packaging.py): Genuine wheel build, isolated venv installation, and out-of-tree CLI execution (3 tests).
 * [`tests/test_logging.py`](tests/test_logging.py): Structured logging format and destination reconfiguration (2 tests).
 
@@ -81,8 +81,8 @@ pytest -v
 ## 5. Dual-Platform CI Matrix
 
 Continuous Integration runs on GitHub Actions across two distinct environments:
-1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, full desktop companion UI with offscreen Qt platform, local AI brain verification, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (369 passed, 4 Unix-specific skipped).
-2. **Linux (`ubuntu-latest`)**: Validates full 373-test suite including genuine native `sendmsg` (TCP/UDP) communication, real `AF_UNIX` domain socket IPC, offscreen PySide6 UI, and local AI brain inference abstractions (371 passed, 2 skipped).
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, full desktop companion UI with offscreen Qt platform, local AI brain verification, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (390 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 394-test suite including genuine native `sendmsg` (TCP/UDP) communication, real `AF_UNIX` domain socket IPC, offscreen PySide6 UI, and local AI brain inference abstractions (392 passed, 2 skipped).
 
 ---
 

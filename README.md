@@ -37,9 +37,9 @@ Tsukiko is engineered from first principles for:
 | **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
 | **Packaging & Distribution** | **Implemented & Tested** | Genuine wheel build, isolated venv installation, out-of-tree CLI execution, and resource isolation verified. Verified in `tests/test_packaging.py` (3 tests). |
 | **Continuous Integration (CI)** | **Implemented & Tested** | Windows 11 / Python 3.11 GitHub Actions workflow in `.github/workflows/ci.yml`. |
-| **Automated Test Suite** | **Implemented & Tested** | 373 unit, regression, packaging, and integration tests (369 passing, 4 skipped on Windows; 371 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
+| **Automated Test Suite** | **Implemented & Tested** | 394 unit, regression, packaging, and integration tests (390 passing, 4 skipped on Windows; 392 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
 | **Desktop Companion UI** | **Implemented & Tested** | PySide6-Essentials floating companion widget, procedural moonlight avatar, compact vertical left menu, main window, and 5 views. Verified in `tests/test_desktop_companion.py` (49 tests). |
-| **Local AI Brain (llama.cpp)** | **Implemented & Tested** | Offline GGUF binary inspection, ModelManager with 9 lifecycle states, safe RAM/VRAM offload budgeting, non-thinking prompt engine, streaming chat via QThread, cancellation, auto-scroll, retry on error, and temporary in-memory history pruning. Verified in `tests/test_local_brain.py` (31 tests). |
+| **Local AI Brain (llama.cpp)** | **Implemented & Tested** | Offline GGUF binary inspection, ModelManager with 9 lifecycle states, safe RAM/VRAM offload budgeting (3,500 MB RAM ceiling, $\ge 500$ MB headroom, safe VRAM layer clamping), historical character identity (Sayo, 1814-1846, Ogimachi, Unfinished Atlas, snake dread, practical craft), 4-stage gradual disclosure (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`), bounded conversational autonomy/initiative with anti-spam backoff, reentrant reload safety without deadlocks, non-blocking Qt worker, streaming chat via QThread, cancellation, auto-scroll, retry on error, and temporary in-memory history pruning. Verified in `tests/test_local_brain.py` (51 tests). |
 | **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
 | **Desktop Perception Pipeline** | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Screen capture OFF by default. |
 | **Offline Voice Subsystem** | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Microphone OFF by default. |
@@ -86,7 +86,7 @@ tsukiko --headless
 ```
 
 ### 5. Execute Test Suite
-Run automated unit and integration tests (373 tests):
+Run automated unit and integration tests (394 tests):
 ```powershell
 pytest -v
 ```

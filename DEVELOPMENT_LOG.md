@@ -1,5 +1,56 @@
 # Tsukiko Development Log
 
+## Phase 3: Local AI Brain Implementation & Character Identity (2026-11-18)
+
+### Status: Complete, Hardened & Verified across Windows and Linux
+
+### Architecture & Deliverables
+
+1. **Default Configuration Restoration & Test Isolation (`config/default_config.yaml`, `tests/test_config.py`, `app/desktop/companion/views/settings_view.py`)**:
+   - Cleaned and restored safe defaults: `model_path: null`, `context_window: 4096`, `threads: 6`, `max_vram_mb: 2800`, `max_ram_mb: 3500`, `backend: "auto"`, `lazy_load: true`, `unload_timeout_seconds: 300`.
+   - Removed all temporary pytest paths and machine-specific directories from the repository configuration.
+   - Decoupled `SettingsView` tests from the default config using an isolated temporary configuration path.
+   - Added `test_default_config_safe_defaults_and_integrity` in `tests/test_config.py` proving default configs remain clean and untouched after test runs.
+
+2. **Strict Resource Limit Enforcement & Allocation Safety (`app/core/model_manager/manager.py`)**:
+   - Actually enforced the 3,500 MB RAM ceiling: models requiring more memory than `max_ram_mb` are strictly rejected with `safe_to_load = False`.
+   - Required system RAM headroom: requires $\ge 500$ MB free system RAM beyond model needs ($$\text{Estimated RAM} \le \text{Available RAM} - 500\text{ MB}$$), failing gracefully under memory pressure.
+   - Strict Safe VRAM Layer Clamping: explicit `gpu_layers` overrides can NEVER bypass the safe VRAM budget; layers are strictly clamped down to `max_safe_gpu_layers`.
+   - Harmonized memory footprint calculations across CPU, Hybrid, and GPU modes.
+
+3. **Reentrant Lock Safety & Reload Deadlock Elimination (`app/core/model_manager/engine.py`)**:
+   - Converted `LlamaCppInferenceEngine._lock` and `DeterministicFakeEngine._lock` from `threading.Lock` to `threading.RLock`.
+   - Added internal `_unload_locked()` helper to release resources without re-locking during `load()`.
+   - Verified that reloading an already-loaded model with `force=True` executes consecutively without freezing or deadlocking.
+
+4. **Non-Blocking Qt Model Lifecycle Worker (`app/desktop/companion/views/settings_view.py`)**:
+   - Built `ModelLifecycleWorker(QThread)` to handle asynchronous model loading and unloading in the background.
+   - UI status label truthfully reports `"⏳ Loading model into memory/VRAM..."` and `"⏳ Unloading model from memory/VRAM..."`.
+   - Qt main GUI thread remains completely responsive and interactive throughout model load/unload operations.
+
+5. **Historical Character Identity & Ground Truth (`app/core/personality/biography.py`)**:
+   - Rooted in Edo-period Japan: Sayo (佐代), born 1814, died 1846 (age 32), mountain farming family in Ogimachi, Shirakawa-go, Hida Province.
+   - Ordinary mountain life: agriculture, seed and soil observation, silkworms, Mulberry care, brush records, winter food preservation, cooking, sewing.
+   - Dream: *Unfinished Atlas* (*Mikan no Chizu* / 未完の地図)—a self-taught regional atlas recording mountain passes, soil types, water sources, and seasonal plant cycles.
+   - Tragic passing: Bitten by a *mamushi* (pit viper) on a rainy mountain slope in late spring 1846; died after three days of fever at age 32.
+   - Modern awakening: Awakened into Tsukiko's digital body at the age of 32. Retains adult maturity, mountain pragmatism, stubborn pride, intellectual ambition, and dread of snakes. Not an agreeable corporate assistant; she has human flaws, an ego, patience with genuine learning, and impatience with pretension.
+
+6. **Gradual Self-Disclosure Architecture (`app/core/personality/disclosure.py`)**:
+   - 4 progressive stages of disclosure: `ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`.
+   - Suppresses biographical info-dumping on early conversation turns. Sayo reveals her past, her village memories, the Unfinished Atlas, her birth name, and her death only as relationship depth and turn thresholds naturally deepen.
+
+7. **Bounded Conversational Autonomy & Initiative Engine (`app/core/personality/initiative.py`)**:
+   - Proactive remarks based on idle duration (minimum 45s), time of day, and session context.
+   - Anti-spam backoff: Strictly suppresses repeated initiatives if the user has not responded to a prior proactive remark (`consecutive_unanswered >= 1`).
+   - Suppression invariants: Strictly silenced during Game Mode, when the floating widget is hidden, or when the window is minimized.
+   - Silence token (`[SILENCE]`): When Tsukiko evaluates the session and decides not to speak, the engine emits `[SILENCE]` and remains quiet.
+
+8. **Runtime Compatibility & Pre-built Wheel Guidance (`requirements/ai.txt`, `pyproject.toml`, `MODEL_COMPATIBILITY.md`)**:
+   - Pinned `llama-cpp-python>=0.3.4` (tested for Qwen2.5/Qwen3.5 architectures).
+   - Documented pre-built wheel index URLs (`https://abetlen.github.io/llama-cpp-python/whl/cpu` and `cu124`) to eliminate unexpected MSVC/CMake source compilation on Windows.
+
+---
+
 ## Phase 2: Acceptance Corrections & Hardening (2026-11-17)
 
 ### Status: Complete, Hardened & Verified across Windows and Linux

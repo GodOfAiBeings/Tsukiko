@@ -26,6 +26,34 @@ def test_default_config_privacy_guarantees():
     assert config.desktop_control.enabled is False
 
 
+def test_default_config_safe_defaults_and_integrity():
+    """Regression test: Proves default configuration files remain intact with safe defaults."""
+    import yaml
+    project_root = Path(__file__).resolve().parent.parent
+
+    config_paths = [
+        project_root / "config" / "default_config.yaml",
+        project_root / "app" / "core" / "config" / "default_config.yaml",
+    ]
+
+    for p in config_paths:
+        assert p.exists(), f"Configuration file {p} must exist."
+        content = p.read_text(encoding="utf-8")
+        assert "pytest" not in content, f"Temporary pytest path leaked into {p.name}!"
+        assert "AppData" not in content, f"Machine-specific AppData path leaked into {p.name}!"
+
+        data = yaml.safe_load(content)
+        ai = data.get("ai", {})
+        assert ai.get("model_path") is None, f"{p.name} must have model_path: null by default"
+        assert ai.get("context_window") == 4096, f"{p.name} must have context_window: 4096"
+        assert ai.get("threads") == 6, f"{p.name} must have threads: 6"
+        assert ai.get("max_vram_mb") == 2800, f"{p.name} must have max_vram_mb: 2800"
+        assert ai.get("max_ram_mb") == 3500, f"{p.name} must have max_ram_mb: 3500"
+        assert ai.get("backend") == "auto", f"{p.name} must have backend: auto"
+        assert ai.get("lazy_load") is True, f"{p.name} must have lazy_load: true"
+        assert ai.get("unload_timeout_seconds") == 300, f"{p.name} must have unload_timeout_seconds: 300"
+
+
 def test_privacy_enforcement_raises_on_invalid_settings():
     """Regression test for Issue 3: Verify that PrivacyConfig raises validation error if local_only is False."""
     with pytest.raises(ValidationError) as exc_info:

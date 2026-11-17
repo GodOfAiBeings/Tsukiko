@@ -104,12 +104,31 @@ flowchart TD
   * `BaseInferenceEngine`: Abstract base defining `load()`, `generate_stream()`, `cancel()`, `unload()`, and `is_loaded`.
   * `LlamaCppInferenceEngine`: Production engine wrapping `llama-cpp-python` with lazy imports, CUDA capability checks, thread-safe cancellation checking between tokens, and non-thinking reasoning filtering.
   * `DeterministicFakeEngine`: Pure Python test double for reproducible unit/integration tests and CI environments without model weights or GPU drivers.
-* **Concurrency Lockout & Inactivity Auto-Unload**:
-  * Reentrant locks prevent simultaneous loading or overlapping generation requests.
+* **Concurrency Lockout, Reload Safety & Inactivity Auto-Unload**:
+  * Reentrant locks (`threading.RLock`) prevent simultaneous loading or overlapping generation requests, and eliminate deadlocks during consecutive model reloads.
   * Inactivity timer (configurable, default 300s): automatically unloads model weights from RAM/VRAM after idle duration without interrupting active generation.
-* **Personality & Non-Thinking Engine (`app/core/personality/`)**:
-  * `TSUKIKO_DEFAULT_SYSTEM_PROMPT`: Directs Tsukiko as an adult woman companion—calm, observant, thoughtful, candid, zero corporate filler.
-  * Strictly honest about active Phase 3 capabilities and disabled Phase 4-7 sensors (no screen watching, no microphone listening, no persistent memory, no desktop automation).
+  * Responsive GUI loading: `ModelLifecycleWorker(QThread)` in `SettingsView` loads and unloads models in the background so the Qt main thread is never blocked.
+* **Hardware-Aware Offload Budgeting & Strict Resource Limits (`app/core/model_manager/manager.py`)**:
+  * Configured RAM ceiling (default `max_ram_mb: 3500`) is strictly enforced; models exceeding the ceiling are refused (`safe_to_load = False`).
+  * System RAM safety headroom: requires $\ge 500$ MB free system RAM beyond model requirements; low memory states are gracefully rejected with detailed error messages.
+  * Safe VRAM Layer Clamping: explicit `gpu_layers` overrides can NEVER bypass the safe VRAM budget; layers are strictly clamped down to `max_safe_gpu_layers`.
+* **Character Identity & Authentic Biography (`app/core/personality/biography.py`)**:
+  * Rooted in historical Edo-period Japan: Sayo (佐代), born 1814, died 1846 (age 32), from an ordinary mountain farming family in Ogimachi, Shirakawa-go, Hida Province.
+  * Ordinary mountain life: mountain farming, seed and soil observation, silkworms, Mulberry care, brush records, winter food preservation, cooking, sewing.
+  * Core dream: The *Unfinished Atlas* (*Mikan no Chizu* / 未完の地図)—a self-taught regional atlas recording mountain passes, soil types, water sources, and seasonal plant cycles.
+  * Tragic passing: Bitten by a *mamushi* (pit viper) on a rainy mountain slope in late spring 1846; died after three days of fever at age 32.
+  * Modern awakening: Awakened into Tsukiko's digital body at the age of 32. Retains adult maturity, mountain pragmatism, stubborn pride, intellectual ambition, and dread of snakes. Not an agreeable corporate assistant; she has human flaws, an ego, patience with genuine learning, and impatience with pretension.
+* **Gradual Self-Disclosure Architecture (`app/core/personality/disclosure.py`)**:
+  * 4 progressive stages of disclosure: `ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`.
+  * Prevents biographical info-dumping on early conversation turns. Sayo reveals her past, her village memories, the Unfinished Atlas, her birth name, and her death only as relationship depth and turn thresholds naturally deepen.
+* **Bounded Conversational Autonomy & Initiative Engine (`app/core/personality/initiative.py`)**:
+  * Evaluates when Tsukiko can proactively speak during idle periods based on idle duration (minimum 45s), time of day, and session state.
+  * Anti-spam backoff: Strictly suppresses repeated initiatives if the user has not responded to a prior proactive remark (`consecutive_unanswered >= 1`).
+  * Suppression invariants: Strictly silenced during Game Mode, when the floating widget is hidden, or when the window is minimized.
+  * Silence token (`[SILENCE]`): When Tsukiko evaluates the session and decides not to speak, the engine emits `[SILENCE]` and remains quiet.
+* **Personality & Non-Thinking Engine (`app/core/personality/prompts.py`, `app/core/personality/engine.py`)**:
+  * Dynamic system prompt construction reflecting character biography, current disclosure stage, and strict operational invariants.
+  * Invariant honesty: Strictly truthful about active Phase 3 capabilities and disabled Phase 4-7 sensors (no screen watching, no microphone listening, no persistent memory, no desktop automation).
   * Non-thinking mode: Suppresses `<think>...</think>` internal reasoning tags from streamed chunks and in-memory history.
 * **In-Memory Context Window Management (`app/core/brain/brain.py`)**:
   * Temporary in-memory session history only (zero SQLite database creation).
@@ -183,5 +202,5 @@ flowchart TD
   * Closing the main window hides it to the background while preserving independent widget execution (or minimizes in fallback mode).
 * **Testing Architecture**:
   * Full offscreen Qt test execution via `QT_QPA_PLATFORM=offscreen`.
-  * Verified in `tests/test_desktop_companion.py` (49 dedicated unit tests) and `tests/test_local_brain.py` (31 dedicated unit/integration tests).
-  * Full project test suite: 373 tests passing cleanly across Windows and Linux CI.
+  * Verified in `tests/test_desktop_companion.py` (49 dedicated unit tests) and `tests/test_local_brain.py` (51 dedicated unit/integration tests).
+  * Full project test suite: 394 tests (390 passing, 4 skipped on Windows; 392 passing, 2 skipped on Linux) with 0 failures and 0 errors across Windows and Linux CI.

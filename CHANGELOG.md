@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - Phase 3 Corrections and Character Identity - 2026-11-18
+
+### Added
+- **Historical Character Identity & Ground Truth (`app/core/personality/biography.py`)**:
+  - Sayo (佐代), born 1814, died 1846 (age 32), mountain farming family in Ogimachi, Shirakawa-go, Hida Province.
+  - Life skills: agriculture, seed and soil observation, silkworms, Mulberry care, brush records, winter food preservation, cooking, sewing.
+  - Life ambition: *Unfinished Atlas* (*Mikan no Chizu* / 未完の地図)—recording mountain passes, soil types, water sources, and seasonal plant cycles.
+  - Tragic passing: Bitten by a *mamushi* (pit viper) on a rainy mountain slope in late spring 1846; died after three days of fever at age 32.
+  - Modern awakening: Awakened into Tsukiko's digital body at age 32 with adult maturity, mountain pragmatism, stubborn pride, intellectual curiosity, and dread of snakes. Not an agreeable corporate assistant; has flaws, ego, patience with genuine learning, and impatience with pretension.
+- **Gradual Self-Disclosure Engine (`app/core/personality/disclosure.py`)**:
+  - 4 progressive disclosure stages: `ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`.
+  - Suppresses biographical info-dumping on early conversation turns. Sayo reveals her past, her village memories, the Unfinished Atlas, her birth name, and her death only as relationship depth and turn thresholds naturally deepen.
+- **Bounded Conversational Autonomy & Initiative Engine (`app/core/personality/initiative.py`)**:
+  - Proactive remarks based on idle duration (minimum 45s), time of day, and session state.
+  - Anti-spam backoff: Strictly suppresses repeated initiatives if the user has not responded to a prior proactive remark (`consecutive_unanswered >= 1`).
+  - Suppression invariants: Strictly silenced during Game Mode, when the floating widget is hidden, or when the window is minimized.
+  - Silence token (`[SILENCE]`): When Tsukiko evaluates the session and decides not to speak, the engine emits `[SILENCE]` and remains quiet.
+- **Non-Blocking Qt Model Lifecycle Worker (`app/desktop/companion/views/settings_view.py`)**:
+  - Asynchronous background loading/unloading via `ModelLifecycleWorker(QThread)`.
+  - Status label truthfully reports `"⏳ Loading model into memory/VRAM..."` and `"⏳ Unloading model from memory/VRAM..."`.
+  - Main GUI thread never freezes or becomes unresponsive during model lifecycle transitions.
+
+### Fixed
+- **Safe Default Configuration & Test Isolation (`config/default_config.yaml`, `tests/test_config.py`, `app/desktop/companion/views/settings_view.py`)**:
+  - Restored `config/default_config.yaml` to safe defaults (`model_path: null`, `context_window: 4096`, `threads: 6`, `max_vram_mb: 2800`, `max_ram_mb: 3500`, `backend: "auto"`, `lazy_load: true`, `unload_timeout_seconds: 300`).
+  - Removed temporary pytest paths and machine-specific directories from repository configurations.
+  - Decoupled `SettingsView` tests from default config using temporary test config files.
+  - Added regression test `test_default_config_safe_defaults_and_integrity` in `tests/test_config.py`.
+- **Resource Limit Enforcement & Safe VRAM Clamping (`app/core/model_manager/manager.py`)**:
+  - Enforced 3,500 MB RAM ceiling: rejects oversized models with `safe_to_load = False`.
+  - Enforced system RAM headroom: requires $\ge 500$ MB free system RAM beyond model needs.
+  - Explicit `gpu_layers` overrides strictly capped to safe VRAM budget layers (`max_safe_gpu_layers`).
+- **Model Reload Deadlock (`app/core/model_manager/engine.py`)**:
+  - Replaced non-reentrant `threading.Lock` with `threading.RLock`.
+  - Added internal `_unload_locked()` helper to avoid re-locking during `load()`.
+  - Verified consecutive reload with `force=True` without deadlocks or thread freezing.
+- **Runtime Compatibility Documentation (`requirements/ai.txt`, `pyproject.toml`, `MODEL_COMPATIBILITY.md`)**:
+  - Pinned `llama-cpp-python>=0.3.4` (verified compatibility with Qwen2.5/Qwen3.5 architectures).
+  - Documented Windows Python 3.11 pre-built wheel indices (`--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu` and `cu124`).
+
+---
+
 ## [0.3.0] - Phase 3: Local AI Brain Implementation - 2026-11-18
 
 ### Added

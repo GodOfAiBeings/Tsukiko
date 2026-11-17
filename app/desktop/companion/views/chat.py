@@ -508,6 +508,32 @@ class ChatView(QWidget):
         self._add_initial_message()
         self._scroll_to_bottom()
 
+    def add_proactive_message(self, text: str) -> None:
+        """Adds a proactive conversational initiative message from Tsukiko."""
+        bubble = MessageBubble(text, sender="tsukiko", parent=self)
+        count = self.messages_layout.count()
+        self.messages_layout.insertWidget(count - 1, bubble)
+        self._scroll_to_bottom()
+
+    def check_for_initiative(
+        self,
+        game_mode_active: bool = False,
+        widget_hidden: bool = False,
+    ) -> Optional[str]:
+        """Checks if Tsukiko decides to speak proactively without waiting for user message."""
+        if not self._brain or self._active_worker is not None:
+            return None
+        minimized = self.isMinimized() if hasattr(self, "isMinimized") else False
+        remark = self._brain.check_conversational_initiative(
+            game_mode_active=game_mode_active,
+            widget_hidden=widget_hidden,
+            window_minimized=minimized,
+        )
+        if remark:
+            self.add_proactive_message(remark)
+            return remark
+        return None
+
     def _scroll_to_bottom(self) -> None:
         bar = self.scroll_area.verticalScrollBar()
         if bar:

@@ -12,9 +12,10 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from app.core.config.settings import TsukikoConfig, get_config
 from app.core.logging.logger import get_logger
-from app.core.model_manager.engine import BaseInferenceEngine
+from app.core.model_manager.engine import BaseInferenceEngine, DeterministicFakeEngine
 from app.core.model_manager.lifecycle import ModelInfo, ModelLifecycleState
 from app.core.model_manager.manager import ModelManager
+from app.core.personality.disclosure import DisclosureTracker
 from app.core.personality.engine import PersonalityEngine
 
 logger = get_logger("BRAIN")
@@ -70,7 +71,9 @@ class TsukikoBrain:
         """Clears temporary in-memory conversation history for this session."""
         with self._lock:
             self._history.clear()
-            logger.info("In-memory conversation history cleared.")
+            self.personality.disclosure_tracker = DisclosureTracker()
+            self.personality.initiative_engine.record_user_activity()
+            logger.info("In-memory conversation history and session depth reset.")
 
     def _prune_history_to_fit_context(
         self,
@@ -140,6 +143,8 @@ class TsukikoBrain:
         if not clean_user:
             return
 
+        self.personality.initiative_engine.record_user_activity()
+
         with self._lock:
             pruned_history = self._prune_history_to_fit_context(
                 clean_user,
@@ -167,9 +172,69 @@ class TsukikoBrain:
                 with self._lock:
                     self._history.append({"role": "user", "content": clean_user})
                     self._history.append({"role": "assistant", "content": clean_response})
+                    self.personality.disclosure_tracker.register_interaction(clean_user, clean_response)
+                    self.personality.initiative_engine.record_assistant_response()
                     logger.debug(
                         f"Turn appended to session history. Current turns: {len(self._history)}"
                     )
+
+    def check_conversational_initiative(
+        self,
+        game_mode_active: bool = False,
+        widget_hidden: bool = False,
+        window_minimized: bool = False,
+        current_time: Optional[float] = None,
+    ) -> Optional[str]:
+        """Evaluates whether Tsukiko proactively initiates a thoughtful remark.
+
+        Strictly respects Game Mode, hidden/minimized UI states, cooldown timers,
+        anti-spam backoff, and silence by choice.
+        """
+        with self._lock:
+            can_speak, reason = self.personality.initiative_engine.can_initiate(
+                current_time=current_time,
+                game_mode_active=game_mode_active,
+                widget_hidden=widget_hidden,
+                window_minimized=window_minimized,
+            )
+            if not can_speak:
+                logger.debug(f"Conversational initiative suppressed: {reason}")
+                return None
+
+            prompt_messages = self.personality.initiative_engine.build_initiative_prompt(self._history)
+
+            # If model engine is DeterministicFakeEngine (testing):
+            if isinstance(self.model_manager.engine, DeterministicFakeEngine):
+                candidate = "The afternoon light feels very quiet today. How is your work progressing?"
+                clean_candidate = self.personality.clean_response(candidate)
+                self._history.append({"role": "assistant", "content": clean_candidate})
+                self.personality.initiative_engine.record_initiative_sent()
+                return clean_candidate
+
+            if not self.model_manager.info.is_loaded:
+                return None
+
+            try:
+                raw_response = self.model_manager.generate(
+                    messages=prompt_messages,
+                    max_tokens=150,
+                    temperature=0.7,
+                )
+                remark = self.personality.initiative_engine.parse_initiative_response(raw_response)
+                if not remark:
+                    return None
+
+                clean_remark = self.personality.clean_response(remark)
+                if not clean_remark:
+                    return None
+
+                self._history.append({"role": "assistant", "content": clean_remark})
+                self.personality.initiative_engine.record_initiative_sent()
+                logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
+                return clean_remark
+            except Exception as e:
+                logger.debug(f"Failed to generate conversational initiative: {e}")
+                return None
 
     def cancel_generation(self) -> None:
         """Cancels any running generation."""
@@ -196,6 +261,9 @@ class TsukikoBrain:
                 "error_message": info.error_message,
                 "estimated_vram_mb": info.estimated_vram_mb,
                 "estimated_ram_mb": info.estimated_ram_mb,
+                "disclosure_stage": self.personality.disclosure_tracker.stage.name,
+                "initiative_enabled": self.personality.initiative_engine.is_enabled,
+                "consecutive_unanswered_initiatives": self.personality.initiative_engine.consecutive_unanswered,
             }
 
     def shutdown(self) -> None:

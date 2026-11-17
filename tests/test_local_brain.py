@@ -659,11 +659,16 @@ class TestSettingsAndStatusIntegration:
         model_file = tmp_path / "model.gguf"
         model_file.write_bytes(create_synthetic_gguf_binary())
 
+        test_cfg_file = tmp_path / "isolated_settings_config.yaml"
         cfg = TsukikoConfig()
         orch = TsukikoOrchestrator(config=cfg)
-        orch.brain.set_engine = orch.brain.model_manager.set_engine(DeterministicFakeEngine())
+        orch.brain.model_manager.set_engine(DeterministicFakeEngine())
 
-        settings = SettingsView(config=cfg, orchestrator=orch)
+        settings = SettingsView(
+            config=cfg,
+            orchestrator=orch,
+            target_config_path=test_cfg_file,
+        )
         assert hasattr(settings, "edit_model_path")
         assert hasattr(settings, "btn_validate_model")
         assert hasattr(settings, "btn_load_model")
@@ -680,12 +685,34 @@ class TestSettingsAndStatusIntegration:
         assert "Valid GGUF" in settings.lbl_model_status.text()
         assert "Qwen3.5-2B-Instruct" in settings.lbl_model_status.text()
 
-        # Save AI settings
+        # Test non-blocking model loading via worker
+        settings.btn_load_model.click()
+        if settings._lifecycle_worker:
+            settings._lifecycle_worker.wait(5000)
+            qapp.processEvents()
+        assert "Model loaded" in settings.lbl_model_status.text()
+
+        # Test reloading already-loaded model without deadlock
+        settings.btn_load_model.click()
+        if settings._lifecycle_worker:
+            settings._lifecycle_worker.wait(5000)
+            qapp.processEvents()
+        assert "Model loaded" in settings.lbl_model_status.text()
+
+        # Test unloading
+        settings.btn_unload_model.click()
+        if settings._lifecycle_worker:
+            settings._lifecycle_worker.wait(5000)
+            qapp.processEvents()
+        assert "Model unloaded" in settings.lbl_model_status.text()
+
+        # Save AI settings to isolated test configuration file
         settings.spin_context_window.setValue(8192)
         settings.spin_threads.setValue(8)
         settings.save_settings()
         assert cfg.ai.context_window == 8192
         assert cfg.ai.threads == 8
+        assert test_cfg_file.exists()
 
     def test_system_status_view_displays_brain_card(self, qapp: QApplication, tmp_path: Path) -> None:
         model_file = tmp_path / "model.gguf"
@@ -746,3 +773,334 @@ class TestOfflinePrivacyInvariants:
         # Generation works cleanly without touching network
         res = brain.generate_response("Generate offline response")
         assert len(res) > 0
+
+
+# ==============================================================================
+# 10. Character Identity and Biography Tests
+# ==============================================================================
+
+class TestCharacterIdentityAndBiography:
+    """Verifies Tsukiko's permanent character identity, traits, and former life."""
+
+    def test_biography_ground_truth(self) -> None:
+        from app.core.personality.biography import TSUKIKO_BIOGRAPHY
+
+        assert TSUKIKO_BIOGRAPHY.birth_name == "Sayo"
+        assert TSUKIKO_BIOGRAPHY.birth_year == 1814
+        assert TSUKIKO_BIOGRAPHY.death_year == 1846
+        assert TSUKIKO_BIOGRAPHY.age_at_death == 32
+        assert "Ogimachi" in TSUKIKO_BIOGRAPHY.origin
+        assert "Shirakawa-go" in TSUKIKO_BIOGRAPHY.origin
+        assert "Hida Province" in TSUKIKO_BIOGRAPHY.origin
+        assert "Unfinished Atlas" in TSUKIKO_BIOGRAPHY.dream_project
+        assert "mamushi" in TSUKIKO_BIOGRAPHY.death_incident.lower()
+        assert TSUKIKO_BIOGRAPHY.present_name == "Tsukiko"
+
+    def test_character_traits_flaws_and_nuances(self) -> None:
+        from app.core.personality.biography import TSUKIKO_BIOGRAPHY
+
+        traits = [t.lower() for t in TSUKIKO_BIOGRAPHY.primary_traits]
+        assert "independent" in traits
+        assert "stubborn" in traits
+        assert "proud" in traits
+        assert any("jealousy" in t for t in traits)
+        assert any("impatient" in t for t in traits)
+
+    def test_practical_craft_and_fears(self) -> None:
+        from app.core.personality.biography import TSUKIKO_BIOGRAPHY
+
+        skills = [s.lower() for s in TSUKIKO_BIOGRAPHY.practical_skills]
+        assert any("agriculture" in s for s in skills)
+        assert any("silkworm" in s or "sericulture" in s for s in skills)
+        assert any("preservation" in s for s in skills)
+
+        fears = [f.lower() for f in TSUKIKO_BIOGRAPHY.instincts_and_fears]
+        assert any("snakes" in f or "mamushi" in f or "reptiles" in f for f in fears)
+        assert any("seasonal" in f for f in fears)
+
+    def test_system_prompt_reflects_character(self) -> None:
+        from app.core.personality.engine import PersonalityEngine
+
+        engine = PersonalityEngine()
+        prompt = engine.get_system_prompt()
+        assert "Tsukiko (月子)" in prompt
+        assert "Sayo" in prompt or "adult woman" in prompt
+        assert "Shirakawa-go" in prompt or "living as a desktop companion" in prompt
+
+
+# ==============================================================================
+# 11. Gradual Self-Disclosure Tests
+# ==============================================================================
+
+class TestGradualSelfDisclosure:
+    """Verifies that Tsukiko reveals her past identity organically through dialogue."""
+
+    def test_acquaintance_stage_suppresses_biography_dump(self) -> None:
+        from app.core.personality.disclosure import DisclosureStage, DisclosureTracker
+        from app.core.personality.prompts import build_system_prompt
+
+        tracker = DisclosureTracker(initial_stage=DisclosureStage.ACQUAINTANCE)
+        prompt = build_system_prompt(stage=tracker.stage)
+
+        assert "Tsukiko (月子)" in prompt
+        assert "Do NOT state your former name (Sayo)" in prompt
+        assert "Do NOT mention the year 1814" in prompt
+        assert "mamushi snakebite upfront" in prompt
+
+    def test_familiar_stage_reveals_atlas_and_village_hints(self) -> None:
+        from app.core.personality.disclosure import DisclosureStage
+        from app.core.personality.prompts import build_system_prompt
+
+        prompt = build_system_prompt(stage=DisclosureStage.FAMILIAR)
+        assert "snowy mountain village" in prompt
+        assert "Atlas" in prompt
+        assert "Still hold your birth name (Sayo) and tragic end close" in prompt
+
+    def test_trusted_stage_reveals_birth_name_and_former_life(self) -> None:
+        from app.core.personality.disclosure import DisclosureStage
+        from app.core.personality.prompts import build_system_prompt
+
+        prompt = build_system_prompt(stage=DisclosureStage.TRUSTED)
+        assert "birth name was Sayo" in prompt
+        assert "1814 in Shirakawa-go" in prompt
+        assert "silkworms" in prompt
+
+    def test_confidant_stage_reveals_mamushi_bite_and_passing(self) -> None:
+        from app.core.personality.disclosure import DisclosureStage
+        from app.core.personality.prompts import build_system_prompt
+
+        prompt = build_system_prompt(stage=DisclosureStage.CONFIDANT)
+        assert "mamushi viper bite" in prompt
+        assert "1846" in prompt
+        assert "leaving the Atlas unfinished" in prompt
+
+    def test_automatic_progression_with_turns(self) -> None:
+        from app.core.personality.disclosure import DisclosureStage, DisclosureTracker
+
+        tracker = DisclosureTracker(initial_stage=DisclosureStage.ACQUAINTANCE)
+        for i in range(6):
+            tracker.register_interaction(f"Tell me about your thoughts turn {i}", "Here is my perspective.")
+        assert tracker.stage == DisclosureStage.FAMILIAR
+
+        for i in range(8):
+            tracker.register_interaction(f"Where are you from, tell me about your past {i}", "I remember mountains.")
+        assert tracker.stage == DisclosureStage.TRUSTED
+
+
+# ==============================================================================
+# 12. Conversational Autonomy and Bounded Initiative Tests
+# ==============================================================================
+
+class TestConversationalAutonomy:
+    """Verifies respectful, bounded conversational initiative without spam."""
+
+    def test_initiative_permitted_when_idle(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine
+        import time
+
+        engine = ConversationalInitiativeEngine(cooldown_seconds=10.0, min_idle_seconds=5.0)
+        # Immediately after interaction, cannot initiate
+        engine.record_user_activity()
+        can, reason = engine.can_initiate()
+        assert can is False
+        assert "recently active" in reason
+
+        # After idle time passes, permitted
+        can, reason = engine.can_initiate(current_time=time.time() + 10.0)
+        assert can is True
+
+    def test_game_mode_strictly_suppresses_initiative(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine
+        import time
+
+        engine = ConversationalInitiativeEngine()
+        can, reason = engine.can_initiate(game_mode_active=True, current_time=time.time() + 1000.0)
+        assert can is False
+        assert "Game Mode active" in reason
+
+    def test_hidden_widget_strictly_suppresses_initiative(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine
+        import time
+
+        engine = ConversationalInitiativeEngine()
+        can, reason = engine.can_initiate(widget_hidden=True, current_time=time.time() + 1000.0)
+        assert can is False
+        assert "Widget is hidden" in reason
+
+    def test_cooldown_enforcement_after_initiative(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine
+        import time
+
+        engine = ConversationalInitiativeEngine(cooldown_seconds=60.0)
+        engine.record_initiative_sent()
+        can, reason = engine.can_initiate(current_time=time.time() + 10.0)
+        assert can is False
+        assert "Cooldown active" in reason
+
+    def test_anti_spam_backoff_when_unanswered(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine
+        import time
+
+        engine = ConversationalInitiativeEngine(max_consecutive_unanswered=1)
+        engine.record_initiative_sent()
+        assert engine.consecutive_unanswered == 1
+
+        # Even after cooldown, cannot initiate again until user replies
+        can, reason = engine.can_initiate(current_time=time.time() + 500.0)
+        assert can is False
+        assert "remaining quiet" in reason
+
+        # User activity resets backoff
+        engine.record_user_activity()
+        assert engine.consecutive_unanswered == 0
+        can, reason = engine.can_initiate(current_time=time.time() + 500.0)
+        assert can is True
+
+    def test_silence_token_yields_none(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine, SILENCE_TOKEN
+
+        engine = ConversationalInitiativeEngine()
+        res = engine.parse_initiative_response(f"  {SILENCE_TOKEN}  ")
+        assert res is None
+
+    def test_brain_check_conversational_initiative_end_to_end(self, tmp_path: Path) -> None:
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        brain = TsukikoBrain(config=cfg, engine=DeterministicFakeEngine())
+        brain.initialize()
+
+        # Suppressed in Game Mode
+        assert brain.check_conversational_initiative(game_mode_active=True) is None
+
+        # Permitted when idle in normal mode with test double
+        import time
+        remark = brain.check_conversational_initiative(
+            game_mode_active=False,
+            current_time=time.time() + 500.0,
+        )
+        assert remark is not None
+        assert len(remark) > 0
+        # Appended to history
+        assert brain.get_history()[-1]["content"] == remark
+
+
+# ==============================================================================
+# 13. Resource Limit Enforcement & Reload Deadlock Tests
+# ==============================================================================
+
+class TestResourceLimitEnforcementAndDeadlock:
+    """Verifies RAM/VRAM limit enforcement, headroom protection, and reload safety."""
+
+    def test_oversized_model_rejected_by_ram_ceiling(self, tmp_path: Path) -> None:
+        from app.core.model_manager.manager import ModelManager
+        from app.core.resource_manager.hardware import HardwareProfile, SystemMemoryInfo, CPUInfo, StorageInfo
+
+        cfg = TsukikoConfig()
+        cfg.ai.max_ram_mb = 3500
+        mgr = ModelManager(config=cfg, engine=DeterministicFakeEngine())
+
+        # Set fake model info with 4200 MB file size
+        mgr._info.file_size_mb = 4200
+        mgr._info.block_count = 28
+        mgr._info.context_window = 4096
+
+        hw = HardwareProfile(
+            os_name="Windows",
+            os_version="11",
+            cpu=CPUInfo(brand="AMD", physical_cores=6, logical_cores=12, utilization_percent=10.0),
+            memory=SystemMemoryInfo(total_ram_mb=16000, available_ram_mb=12000, used_ram_mb=4000, percent_used=25.0),
+            storage=StorageInfo(drive_path="C:\\", total_gb=500.0, free_gb=100.0, used_gb=400.0),
+            recommended_max_vram_mb=0,  # CPU mode
+        )
+
+        strategy = mgr.calculate_offload_strategy(hardware=hw)
+        assert strategy["safe_to_load"] is False
+        assert "exceeds configured RAM limit" in strategy["reason"]
+
+    def test_low_ram_headroom_rejected(self, tmp_path: Path) -> None:
+        from app.core.model_manager.manager import ModelManager
+        from app.core.resource_manager.hardware import HardwareProfile, SystemMemoryInfo, CPUInfo, StorageInfo
+
+        cfg = TsukikoConfig()
+        cfg.ai.max_ram_mb = 3500
+        mgr = ModelManager(config=cfg, engine=DeterministicFakeEngine())
+
+        mgr._info.file_size_mb = 1500
+        mgr._info.block_count = 28
+        mgr._info.context_window = 4096
+
+        # Available RAM is only 1600 MB (1500 + 400 = 1900 > 1600 - 500)
+        hw = HardwareProfile(
+            os_name="Windows",
+            os_version="11",
+            cpu=CPUInfo(brand="AMD", physical_cores=6, logical_cores=12, utilization_percent=10.0),
+            memory=SystemMemoryInfo(total_ram_mb=16000, available_ram_mb=1600, used_ram_mb=14400, percent_used=90.0),
+            storage=StorageInfo(drive_path="C:\\", total_gb=500.0, free_gb=100.0, used_gb=400.0),
+            recommended_max_vram_mb=0,
+        )
+
+        strategy = mgr.calculate_offload_strategy(hardware=hw)
+        assert strategy["safe_to_load"] is False
+        assert "Insufficient system RAM headroom" in strategy["reason"]
+
+    def test_explicit_gpu_layers_capped_by_safe_vram(self, tmp_path: Path) -> None:
+        from app.core.model_manager.manager import ModelManager
+        from app.core.resource_manager.hardware import (
+            HardwareProfile,
+            SystemMemoryInfo,
+            CPUInfo,
+            StorageInfo,
+            FrameworkSupport,
+        )
+
+        cfg = TsukikoConfig()
+        cfg.ai.max_vram_mb = 2800
+        cfg.ai.gpu_layers = 100  # Extreme override
+        mgr = ModelManager(config=cfg, engine=DeterministicFakeEngine())
+
+        mgr._info.file_size_mb = 1400
+        mgr._info.block_count = 28
+        mgr._info.context_window = 4096
+
+        # Safe VRAM budget is only 800 MB (can only fit ~8 layers of 50MB each)
+        hw = HardwareProfile(
+            os_name="Windows",
+            os_version="11",
+            cpu=CPUInfo(brand="AMD", physical_cores=6, logical_cores=12, utilization_percent=10.0),
+            memory=SystemMemoryInfo(total_ram_mb=16000, available_ram_mb=10000, used_ram_mb=6000, percent_used=37.5),
+            storage=StorageInfo(drive_path="C:\\", total_gb=500.0, free_gb=100.0, used_gb=400.0),
+            recommended_max_vram_mb=800,
+            has_nvidia_gpu=True,
+            frameworks=FrameworkSupport(llama_cpp_cuda_supported=True),
+        )
+
+        strategy = mgr.calculate_offload_strategy(hardware=hw)
+        assert strategy["safe_to_load"] is True
+        # Must be capped to safe layers, NEVER 100 or 28!
+        assert strategy["gpu_layers"] <= 10
+        assert strategy["gpu_layers"] < 28
+
+    def test_repeated_model_reload_without_deadlock(self, tmp_path: Path) -> None:
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        mgr = ModelManager(config=cfg, engine=fake_engine)
+        mgr.inspect_configured_model()
+
+        # Load initially
+        assert mgr.load_model() is True
+        assert fake_engine.is_loaded() is True
+        assert fake_engine.load_call_count == 1
+
+        # Reload with force=True 5 times consecutively
+        for _ in range(5):
+            assert mgr.load_model(force=True) is True
+            assert fake_engine.is_loaded() is True
+
+        assert fake_engine.load_call_count == 6

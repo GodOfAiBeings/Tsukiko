@@ -108,7 +108,7 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
         self._llm: Optional[Any] = None
         self._is_generating = False
         self._cancelled = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._active_backend = "cpu"
 
     @property
@@ -129,6 +129,18 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
         except Exception:
             return "not_installed"
 
+    def _unload_locked(self) -> None:
+        """Internal helper to deallocate model while holding self._lock."""
+        if self._llm is not None:
+            logger.info("Unloading llama-cpp-python model and releasing memory...")
+            try:
+                del self._llm
+            except Exception as e:
+                logger.warning(f"Error during llama-cpp-python deallocation: {e}")
+            self._llm = None
+            import gc
+            gc.collect()
+
     def load(
         self,
         model_path: Path,
@@ -138,7 +150,7 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
     ) -> None:
         with self._lock:
             if self._llm is not None:
-                self.unload()
+                self._unload_locked()
 
             try:
                 import llama_cpp  # type: ignore
@@ -180,15 +192,7 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
 
     def unload(self) -> None:
         with self._lock:
-            if self._llm is not None:
-                logger.info("Unloading llama-cpp-python model and releasing memory...")
-                try:
-                    del self._llm
-                except Exception as e:
-                    logger.warning(f"Error during llama-cpp-python deallocation: {e}")
-                self._llm = None
-                import gc
-                gc.collect()
+            self._unload_locked()
 
     def is_loaded(self) -> bool:
         return self._llm is not None
@@ -296,6 +300,7 @@ class DeterministicFakeEngine(BaseInferenceEngine):
         self._is_loaded = False
         self._is_generating = False
         self._cancelled = False
+        self._lock = threading.RLock()
         self.load_call_count = 0
         self.unload_call_count = 0
         self.last_loaded_path: Optional[Path] = None
@@ -323,16 +328,20 @@ class DeterministicFakeEngine(BaseInferenceEngine):
         gpu_layers: int = 0,
         threads: int = 6,
     ) -> None:
-        if self.fail_on_load:
-            raise RuntimeError("Simulated model load failure for testing.")
-        self.load_call_count += 1
-        self.last_loaded_path = model_path
-        self._is_loaded = True
+        with self._lock:
+            if self.fail_on_load:
+                raise RuntimeError("Simulated model load failure for testing.")
+            if self._is_loaded:
+                self.unload()
+            self.load_call_count += 1
+            self.last_loaded_path = model_path
+            self._is_loaded = True
 
     def unload(self) -> None:
-        self.unload_call_count += 1
-        self._is_loaded = False
-        self.last_loaded_path = None
+        with self._lock:
+            self.unload_call_count += 1
+            self._is_loaded = False
+            self.last_loaded_path = None
 
     def is_loaded(self) -> bool:
         return self._is_loaded

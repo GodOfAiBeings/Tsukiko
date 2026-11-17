@@ -8,8 +8,9 @@ Privacy policies cannot be altered or bypassed from this view.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import re
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from app.core.config.settings import AIConfig, TsukikoConfig, UIConfig, get_config, save_config
 from app.core.model_manager.gguf_parser import GGUFValidationError, inspect_gguf_file
@@ -17,7 +18,7 @@ from app.core.model_manager.gguf_parser import GGUFValidationError, inspect_gguf
 logger = logging.getLogger(__name__)
 
 try:
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import QThread, Qt, Signal
     from PySide6.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -39,9 +40,63 @@ except ImportError:
     HAS_PYSIDE6 = False
     QWidget = object  # type: ignore[misc,assignment]
     QFileDialog = object  # type: ignore[misc,assignment]
+    QThread = object  # type: ignore[misc,assignment]
 
 
 HEX_COLOR_REGEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+if HAS_PYSIDE6:
+
+    class ModelLifecycleWorker(QThread):
+        """Worker thread for asynchronous model loading and unloading.
+
+        Guarantees the desktop GUI never freezes while weights are loaded or unloaded.
+        """
+
+        finished_signal = Signal(bool, str)  # (success, status_message)
+
+        def __init__(
+            self,
+            action: str,
+            brain: Any,
+            model_path: Optional[str] = None,
+            parent: Optional[QWidget] = None,
+        ) -> None:
+            super().__init__(parent)
+            self.action = action
+            self.brain = brain
+            self.model_path = model_path
+
+        def run(self) -> None:
+            try:
+                if self.action == "load":
+                    if self.model_path is not None:
+                        self.brain.model_manager._ai_config.model_path = self.model_path
+                        self.brain.model_manager.inspect_configured_model()
+                    ok = self.brain.load_model(force=True)
+                    if ok:
+                        info = self.brain.model_manager.info
+                        msg = (
+                            f"✓ Model loaded: {info.model_name} "
+                            f"({info.backend.upper()}, {info.gpu_layers_offloaded} GPU layers)"
+                        )
+                        self.finished_signal.emit(True, msg)
+                    else:
+                        err = self.brain.model_manager.info.error_message or "Unknown error"
+                        self.finished_signal.emit(False, f"❌ Load failed: {err}")
+                elif self.action == "unload":
+                    ok = self.brain.unload_model()
+                    if ok:
+                        self.finished_signal.emit(True, "Model unloaded from memory/VRAM.")
+                    else:
+                        self.finished_signal.emit(
+                            False, "Cannot unload model right now (generation may be active)."
+                        )
+            except Exception as e:
+                self.finished_signal.emit(False, f"❌ Operation error: {e}")
+else:
+    ModelLifecycleWorker = object  # type: ignore[misc,assignment]
 
 
 class SettingsView(QWidget):
@@ -56,6 +111,7 @@ class SettingsView(QWidget):
         config: Optional[TsukikoConfig] = None,
         orchestrator: Optional[Any] = None,
         parent: Optional[QWidget] = None,
+        target_config_path: Optional[Path] = None,
     ) -> None:
         if not HAS_PYSIDE6:
             raise RuntimeError("PySide6 is required to instantiate SettingsView")
@@ -66,6 +122,8 @@ class SettingsView(QWidget):
         self._ai_config: AIConfig = self._config.ai
         self._orchestrator = orchestrator
         self._brain = getattr(orchestrator, "brain", None) if orchestrator else None
+        self._target_config_path = target_config_path
+        self._lifecycle_worker: Optional[ModelLifecycleWorker] = None
         self._init_ui()
         self._load_values()
 
@@ -416,30 +474,47 @@ class SettingsView(QWidget):
             self.lbl_model_status.setText("Local AI Brain is not available.")
             self.lbl_model_status.setStyleSheet("color: #E06C75;")
             return
-        self._brain.model_manager._ai_config.model_path = self.edit_model_path.text().strip() or None
-        self._brain.model_manager.inspect_configured_model()
-        ok = self._brain.load_model(force=True)
-        if ok:
-            info = self._brain.model_manager.info
-            self.lbl_model_status.setText(
-                f"✓ Model loaded: {info.model_name} ({info.backend.upper()}, {info.gpu_layers_offloaded} GPU layers)"
-            )
-            self.lbl_model_status.setStyleSheet("color: #A8D5BA;")
-        else:
-            err = self._brain.model_manager.info.error_message or "Unknown error"
-            self.lbl_model_status.setText(f"❌ Load failed: {err}")
-            self.lbl_model_status.setStyleSheet("color: #E06C75;")
+
+        if self._lifecycle_worker is not None and self._lifecycle_worker.isRunning():
+            return
+
+        self.btn_load_model.setEnabled(False)
+        self.btn_unload_model.setEnabled(False)
+        self.lbl_model_status.setText("⏳ Loading model into memory/VRAM...")
+        self.lbl_model_status.setStyleSheet("color: #7FB3D5;")
+
+        path_text = self.edit_model_path.text().strip() or None
+        self._lifecycle_worker = ModelLifecycleWorker("load", self._brain, path_text, self)
+        self._lifecycle_worker.finished_signal.connect(self._on_lifecycle_finished)
+        self._lifecycle_worker.start()
 
     def _unload_model(self) -> None:
         if not self._brain:
             return
-        ok = self._brain.unload_model()
+
+        if self._lifecycle_worker is not None and self._lifecycle_worker.isRunning():
+            return
+
+        self.btn_load_model.setEnabled(False)
+        self.btn_unload_model.setEnabled(False)
+        self.lbl_model_status.setText("⏳ Unloading model from memory/VRAM...")
+        self.lbl_model_status.setStyleSheet("color: #7FB3D5;")
+
+        self._lifecycle_worker = ModelLifecycleWorker("unload", self._brain, None, self)
+        self._lifecycle_worker.finished_signal.connect(self._on_lifecycle_finished)
+        self._lifecycle_worker.start()
+
+    def _on_lifecycle_finished(self, ok: bool, msg: str) -> None:
+        self.btn_load_model.setEnabled(True)
+        self.btn_unload_model.setEnabled(True)
+        self.lbl_model_status.setText(msg)
         if ok:
-            self.lbl_model_status.setText("Model unloaded from memory/VRAM.")
-            self.lbl_model_status.setStyleSheet("color: #7FB3D5;")
+            if "unloaded" in msg.lower():
+                self.lbl_model_status.setStyleSheet("color: #D4E6F1;")
+            else:
+                self.lbl_model_status.setStyleSheet("color: #A8D5BA;")
         else:
-            self.lbl_model_status.setText("Cannot unload model right now (generation may be active).")
-            self.lbl_model_status.setStyleSheet("color: #F5B041;")
+            self.lbl_model_status.setStyleSheet("color: #E06C75;")
 
     def _update_model_status_label(self) -> None:
         if self._brain:
@@ -517,9 +592,9 @@ class SettingsView(QWidget):
         if HAS_PYSIDE6:
             self.settings_applied.emit(self._ui_config)
 
-        # Persist to disk using active config path
+        # Persist to disk using active or specified config path
         try:
-            saved_path = save_config(self._config)
+            saved_path = save_config(self._config, target_path=self._target_config_path)
             self.status_label.setText(f"✓ Settings applied to current session and saved to {saved_path.name}.")
             self.status_label.setStyleSheet("color: #A8D5BA; font-size: 12px;")
             return True
