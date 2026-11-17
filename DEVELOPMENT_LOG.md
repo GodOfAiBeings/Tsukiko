@@ -275,6 +275,32 @@ The final blocker correction resolved all three source-level defects identified 
 
 ---
 
+### Final CIM Value Validation Correction (2026-11-17)
+
+The final CIM value validation correction addressed the malformed-CIM-value acceptance defect, ensuring unsupported types cannot remain in the `VALID` state or be silently coerced to unrestricted values:
+
+1. **Strict CIM Value Type Validation (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: In `CimFieldRecord.from_raw()`, records marked `PROPERTY_PRESENT_WITH_VALID_VALUE` checked strings, lists, booleans, and numbers, but lacked an `else` branch rejecting unsupported Python types (such as dictionaries, sets, tuples, or custom objects). Consequently, a record with `Value={}` and `StringValue="Any"` was accepted as `VALID`.
+   - **Fix**: Added strict type checking in `CimFieldRecord.from_raw()` for `state == CimFieldState.VALID`:
+     - Accepts only `bool`, `str`, `int`, `float`, and `list` of supported scalars (`str`, `bool`, `int`, `float`).
+     - Dictionaries, nested objects, and nested structures inside arrays are strictly marked `MALFORMED`.
+     - Validates consistency between declared `Type` metadata and actual Python value types (e.g., rejecting boolean values declared as `Array` or integers declared as `Boolean`), marking contradictory records as `MALFORMED`.
+
+2. **Exhaustive Filter Value Type Enforcement (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: `check_field_unrestricted()` similarly lacked an `else` branch for unsupported `field.value` types, and `validate_firewall_filters()` converted `rule.package_field.value` via `str(rule.package_field.value or "")`, which could theoretically permit a dictionary `{}` to be evaluated as a string.
+   - **Fix**:
+     - Added an explicit `else` rejection branch in `check_field_unrestricted()` returning `False, f"{prop_label} filter has unsupported Value type: {type(field.value).__name__}."`.
+     - Added a strict type guard in `validate_firewall_filters()` on `rule.package_field.value`, rejecting non-scalar types with `Application filter has unsupported Package Value type: {type(pkg_raw).__name__}.`.
+
+3. **Verification Smoke Test Enhancements (`scripts/verify_windows_firewall_inspection.py`):**
+   - Added synthetic rejection checks in Stage 5 for unsupported dict `Value` in `VALID` state and inconsistent `Type` metadata.
+
+4. **Expanded Test Suite (`tests/test_windows_firewall.py`):**
+   - Added 10 new regression tests covering rejection of dictionaries, nested objects in arrays, unsupported object types (sets, tuples, objects), inconsistent `Type` metadata, legitimate unrestricted values, and filter property rejections for dict values on `Program`, `Package`, and all generic filter properties.
+   - Raised `tests/test_windows_firewall.py` to 234 tests. Total test suite expanded to 289 collected items (285 passed, 4 skipped on Windows; all 289 passing on Linux).
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -283,11 +309,11 @@ The final blocker correction resolved all three source-level defects identified 
 | Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
 | Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
-| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization with strict invariant checking, strict StringValue integrity, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, exact stable-name creation/deletion via PowerShell, fail-closed strict 8-key JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization with strict invariant checking, strict Value type validation (rejecting dicts/nested objects), Type metadata consistency enforcement, strict StringValue integrity, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, exact stable-name creation/deletion via PowerShell, fail-closed strict 8-key JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 279 unit, regression, packaging, and integration tests (275 passed, 4 skipped on Windows; all 279 passed on Linux). |
+| Automated Pytest Test Suite | **Implemented & Tested** | 289 unit, regression, packaging, and integration tests (285 passed, 4 skipped on Windows; all 289 passed on Linux). |
 | Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 6-stage read-only ActiveStore inspection). |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |

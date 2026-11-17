@@ -3114,23 +3114,25 @@ def test_cim_record_valid_non_string_string_value_marked_malformed():
 
 def test_cim_record_contradictory_value_and_string_value_marked_malformed():
     """Contradictions between Value and StringValue across string, list, boolean, and numeric types are rejected."""
+    # Each entry: (value, string_value, type_name)
     contradictory_pairs = [
-        ("TCP", "Any"),
-        ("Any", "TCP"),
-        (["80", "443"], "80"),
-        (["80"], "80,443"),
-        (True, "False"),
-        (False, "True"),
-        (42, "99"),
-        (8080, "80"),
+        ("TCP", "Any", "String"),
+        ("Any", "TCP", "String"),
+        (["80", "443"], "80", "Array"),
+        (["80"], "80,443", "Array"),
+        (True, "False", "Boolean"),
+        (False, "True", "Boolean"),
+        (42, "99", "Integer"),
+        (8080, "80", "Integer"),
     ]
-    for val, str_val in contradictory_pairs:
+    for val, str_val, t_name in contradictory_pairs:
         raw = {
             "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
             "Exists": True,
             "IsNull": False,
             "Value": val,
             "StringValue": str_val,
+            "Type": t_name,
         }
         rec = CimFieldRecord.from_raw(raw)
         assert rec.state == CimFieldState.MALFORMED
@@ -3294,3 +3296,244 @@ $results | ConvertTo-Json -Depth 3
 
 
 
+
+# ── Strict Value type validation and Type metadata consistency tests ──
+
+
+def test_cim_record_rejects_dict_value_as_malformed():
+    """Value={} with StringValue='Any' must be MALFORMED — dicts are unsupported."""
+    raw = {
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": {},
+        "StringValue": "Any",
+        "Type": "String",
+    }
+    rec = CimFieldRecord.from_raw(raw)
+    assert rec.state == CimFieldState.MALFORMED
+    assert "Unsupported Value type" in (rec.string_value or "")
+    assert "dict" in (rec.string_value or "")
+
+
+def test_cim_record_rejects_nested_dict_in_array():
+    """Value=[{"key":"val"}] with StringValue='key,val' must be MALFORMED — nested objects in arrays are unsupported."""
+    raw = {
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": [{"key": "val"}],
+        "StringValue": "key,val",
+        "Type": "Array",
+    }
+    rec = CimFieldRecord.from_raw(raw)
+    assert rec.state == CimFieldState.MALFORMED
+    assert "Unsupported element type" in (rec.string_value or "")
+    assert "dict" in (rec.string_value or "")
+
+
+def test_cim_record_rejects_unsupported_object_types():
+    """Sets, tuples, and custom objects as Value must all be MALFORMED."""
+    unsupported_values = [
+        ({1, 2, 3}, "set"),
+        ((1, 2, 3), "tuple"),
+        (object(), "object"),
+        (frozenset([1]), "frozenset"),
+        (bytearray(b"abc"), "bytearray"),
+    ]
+    for val, expected_type in unsupported_values:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": val,
+            "StringValue": "Any",
+            "Type": "String",
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.MALFORMED, f"Expected MALFORMED for {expected_type}"
+        assert "Unsupported Value type" in (rec.string_value or ""), f"Wrong message for {expected_type}"
+
+
+def test_cim_record_rejects_inconsistent_type_metadata():
+    """Value type must be consistent with declared Type metadata."""
+    inconsistent_cases = [
+        # Boolean value declared as Array type
+        {"Value": True, "StringValue": "True", "Type": "Array"},
+        # Boolean value declared as Integer type
+        {"Value": False, "StringValue": "False", "Type": "Integer"},
+        # Integer value declared as Array type
+        {"Value": 42, "StringValue": "42", "Type": "Array"},
+        # Integer value declared as Boolean type
+        {"Value": 8080, "StringValue": "8080", "Type": "Boolean"},
+        # Array value declared as Boolean type
+        {"Value": ["Any"], "StringValue": "Any", "Type": "Boolean"},
+        # Array value declared as Integer type
+        {"Value": ["80", "443"], "StringValue": "80,443", "Type": "Integer"},
+        # Float value declared as Array type
+        {"Value": 3.14, "StringValue": "3.14", "Type": "Array"},
+    ]
+    for case in inconsistent_cases:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            **case,
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.MALFORMED, f"Expected MALFORMED for {case}"
+        assert "Inconsistent Type" in (rec.string_value or ""), f"Wrong message for {case}"
+
+
+def test_cim_record_accepts_consistent_type_metadata():
+    """Legitimate type metadata combinations must still be accepted as VALID."""
+    consistent_cases = [
+        {"Value": True, "StringValue": "True", "Type": "Boolean"},
+        {"Value": False, "StringValue": "False", "Type": "Boolean"},
+        {"Value": 42, "StringValue": "42", "Type": "Integer"},
+        {"Value": 0, "StringValue": "0", "Type": "Integer"},
+        {"Value": "Any", "StringValue": "Any", "Type": "String"},
+        {"Value": "TCP", "StringValue": "TCP", "Type": "String"},
+        {"Value": ["Any"], "StringValue": "Any", "Type": "Array"},
+        {"Value": ["80", "443"], "StringValue": "80,443", "Type": "Array"},
+        # String Type also accepted for bool (PS enum serialization)
+        {"Value": True, "StringValue": "True", "Type": "String"},
+        # String Type also accepted for int (PS enum serialization)
+        {"Value": 42, "StringValue": "42", "Type": "String"},
+        # String Type also accepted for arrays (PS serialization)
+        {"Value": ["Any"], "StringValue": "Any", "Type": "String"},
+    ]
+    for case in consistent_cases:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            **case,
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.VALID, f"Expected VALID for {case}, got {rec.state}: {rec.string_value}"
+
+
+def test_cim_record_rejects_nested_unsupported_in_array():
+    """Arrays containing dicts, lists, sets, or None elements must be MALFORMED."""
+    nested_cases = [
+        [{"nested": "dict"}],
+        [None],
+        [[1, 2]],
+        ["valid", {"nested": True}],
+        ["valid", [1]],
+    ]
+    for bad_array in nested_cases:
+        # Build a matching StringValue so the contradiction check doesn't fire first
+        str_val = ",".join(str(x) for x in bad_array)
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": bad_array,
+            "StringValue": str_val,
+            "Type": "Array",
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.MALFORMED, f"Expected MALFORMED for array {bad_array}"
+        assert "Unsupported element type" in (rec.string_value or ""), f"Wrong message for array {bad_array}"
+
+
+def test_cim_record_accepts_legitimate_unrestricted_values():
+    """Legitimate unrestricted values must continue to pass as VALID."""
+    good_cases = [
+        {"Value": "Any", "StringValue": "Any", "Type": "String"},
+        {"Value": "*", "StringValue": "*", "Type": "String"},
+        {"Value": "", "StringValue": "", "Type": "String"},
+        {"Value": False, "StringValue": "False", "Type": "Boolean"},
+        {"Value": True, "StringValue": "True", "Type": "Boolean"},
+        {"Value": 0, "StringValue": "0", "Type": "Integer"},
+        {"Value": 256, "StringValue": "256", "Type": "Integer"},
+        {"Value": ["Any"], "StringValue": "Any", "Type": "Array"},
+        {"Value": ["192.168.1.1", "10.0.0.1"], "StringValue": "192.168.1.1,10.0.0.1", "Type": "Array"},
+    ]
+    for case in good_cases:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            **case,
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.VALID, f"Expected VALID for {case}, got {rec.state}: {rec.string_value}"
+
+
+def test_validate_firewall_filters_rejects_dict_value_on_all_filter_properties(temp_dir):
+    """Dict Value with StringValue='Any' must be rejected on every filter property checked by check_field_unrestricted."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    # Build a CimFieldRecord with dict value that passed from_raw because it's
+    # constructed directly (simulating a hypothetical future deserialization bug).
+    # The from_raw gate would already reject this, but check_field_unrestricted
+    # must also reject it as a second barrier.
+    dict_field = CimFieldRecord(
+        state=CimFieldState.VALID,
+        exists=True,
+        is_null=False,
+        value={},
+        string_value="Any",
+        type_name="String",
+    )
+
+    field_attrs = [
+        "local_address_field",
+        "remote_address_field",
+        "protocol_field",
+        "local_port_field",
+        "remote_port_field",
+        "service_field",
+        "interface_alias_field",
+        "interface_type_field",
+    ]
+    for attr in field_attrs:
+        r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+        setattr(r, attr, dict_field)
+        ok, err = validate_firewall_filters(r, dedicated)
+        assert ok is False, f"Expected rejection for dict Value on {attr}"
+        assert "unsupported" in err.lower() or "type" in err.lower(), f"Wrong error for {attr}: {err}"
+
+
+def test_validate_firewall_filters_rejects_program_dict_value(temp_dir):
+    """Program filter with Value={} and StringValue matching expected path must still be rejected."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    # Program itself is handled via rule.program (string), not check_field_unrestricted.
+    # But if program_field.value is a dict, from_raw would catch it.  Here we verify
+    # from_raw rejects it.
+    bad_raw = {
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": {},
+        "StringValue": str(dedicated),
+        "Type": "String",
+    }
+    rec = CimFieldRecord.from_raw(bad_raw)
+    assert rec.state == CimFieldState.MALFORMED
+
+
+def test_validate_firewall_filters_rejects_package_dict_value(temp_dir):
+    """Package={} with StringValue='' must be rejected — not coerced to empty string via str()."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    r.package_field = CimFieldRecord(
+        state=CimFieldState.VALID,
+        exists=True,
+        is_null=False,
+        value={},
+        string_value="",
+        type_name="String",
+    )
+    ok, err = validate_firewall_filters(r, dedicated)
+    assert ok is False, f"Expected rejection for dict Package Value"
+    assert "unsupported" in err.lower() or "type" in err.lower(), f"Wrong error: {err}"

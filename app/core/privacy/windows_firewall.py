@@ -170,6 +170,54 @@ class CimFieldRecord(BaseModel):
                     return cls.malformed(val, f"Contradictory VALID state: exists={exists}, is_null={is_null}, value={val!r}")
                 if str_val is None or not isinstance(str_val, str):
                     return cls.malformed(val, f"Missing, null, or non-string StringValue for VALID state: {str_val!r}")
+
+                # ── Strict Value type validation ──────────────────────
+                # Only str, bool, int, float, and list-of-supported-scalars
+                # are accepted.  Dicts, sets, tuples, custom objects, and
+                # nested structures inside arrays are MALFORMED.
+                if isinstance(val, bool):
+                    pass  # bool before int (bool is subclass of int)
+                elif isinstance(val, (str, int, float)):
+                    pass
+                elif isinstance(val, list):
+                    for idx, elem in enumerate(val):
+                        if not isinstance(elem, (str, bool, int, float)):
+                            return cls.malformed(
+                                val,
+                                f"Unsupported element type at index {idx} in Array Value: "
+                                f"{type(elem).__name__}",
+                            )
+                else:
+                    return cls.malformed(
+                        val,
+                        f"Unsupported Value type for VALID state: {type(val).__name__}",
+                    )
+
+                # ── Type metadata consistency ─────────────────────────
+                # The PS CIM serializer emits broad categories: Boolean,
+                # Integer, String, Array, Null, None.  Reject records
+                # whose Type contradicts the actual Python value type.
+                _type_ok = True
+                if isinstance(val, bool):
+                    if t_name not in ("Boolean", "String"):
+                        _type_ok = False
+                elif isinstance(val, int):
+                    if t_name not in ("Integer", "String"):
+                        _type_ok = False
+                elif isinstance(val, float):
+                    if t_name not in ("Integer", "String"):
+                        _type_ok = False
+                elif isinstance(val, list):
+                    if t_name not in ("Array", "String"):
+                        _type_ok = False
+                # str values accept any Type – PS may serialize enums as String
+                if not _type_ok:
+                    return cls.malformed(
+                        val,
+                        f"Inconsistent Type '{t_name}' for {type(val).__name__} Value",
+                    )
+
+                # ── Value / StringValue contradiction checks ──────────
                 if isinstance(val, str):
                     if val.strip().lower() != str_val.strip().lower():
                         return cls.malformed(val, f"Contradictory Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
@@ -844,7 +892,10 @@ def validate_firewall_filters(
     if rule.package_field.state == CimFieldState.MALFORMED:
         return False, "Application filter has malformed Package property."
     if rule.package_field.state != CimFieldState.NULL:
-        pkg_val = str(rule.package_field.value or "").strip().lower()
+        pkg_raw = rule.package_field.value
+        if pkg_raw is not None and not isinstance(pkg_raw, (str, int, float, bool)):
+            return False, f"Application filter has unsupported Package Value type: {type(pkg_raw).__name__}."
+        pkg_val = str(pkg_raw or "").strip().lower()
         if pkg_val not in ("", "any", "*"):
             return False, f"Application filter restricts package: '{rule.package_field.string_value}'."
 
@@ -899,6 +950,8 @@ def validate_firewall_filters(
                 return False, f"{prop_label} filter Value is restricted: '{field.value}' (must be Any or unrestricted)."
             if val_str != str_clean:
                 return False, f"{prop_label} filter has contradictory Numeric Value ({field.value!r}) and StringValue ({field.string_value!r})."
+        else:
+            return False, f"{prop_label} filter has unsupported Value type: {type(field.value).__name__}."
 
         return True, ""
 

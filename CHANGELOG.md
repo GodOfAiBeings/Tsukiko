@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.8] - Final CIM Value Validation Correction - 2026-11-17
+
+### Fixed
+- **Strict CIM Value Type Validation (`app/core/privacy/windows_firewall.py`)**:
+  - In `CimFieldRecord.from_raw()`, strictly validates the `Value` type for records in the `PROPERTY_PRESENT_WITH_VALID_VALUE` state.
+  - Accepts only explicitly supported representations: `bool`, `str`, `int`, `float`, and `list` of supported scalar elements.
+  - Strictly rejects dictionaries, nested objects, unsupported Python object types, and nested structures inside arrays, marking them `MALFORMED`.
+  - Enforces `Type` metadata consistency against the actual serialized Python value type (e.g. rejecting boolean values declared as `Array` or integer values declared as `Boolean`), marking contradictory records as `MALFORMED`.
+- **Exhaustive Filter Value Type Enforcement (`app/core/privacy/windows_firewall.py`)**:
+  - In `check_field_unrestricted()`, added an explicit rejection branch for any unsupported `Value` type, ensuring unsupported types cannot pass through to allowed tokens.
+  - In `validate_firewall_filters()`, added a strict type guard on `rule.package_field.value` before string evaluation, preventing unsupported objects or dictionaries from being coerced via `str()` into accepted unrestricted values.
+- **Verification Smoke Test Enhancements (`scripts/verify_windows_firewall_inspection.py`)**:
+  - Added synthetic rejection checks in Stage 5 for unsupported dict `Value` in `VALID` state and inconsistent `Type` metadata.
+- **Test Suite Expansion (`tests/test_windows_firewall.py`)**:
+  - Added 10 new regression tests verifying rejection of dictionaries, nested objects inside arrays, unsupported objects (sets, tuples, custom objects), inconsistent `Type` metadata, and filter property rejections for dict values on `Program`, `Package`, and all generic filter properties.
+  - Elevated `tests/test_windows_firewall.py` to 234 tests.
+  - Total automated test suite expanded to 289 collected items (285 passed, 4 skipped on Windows; all 289 passing on Linux).
+
 ## [0.1.7] - Final Phase 1 Blocker Correction - 2026-11-17
 
 ### Fixed

@@ -495,6 +495,48 @@ try {
             return 1
         print("  --> Confirmed: Empty string Protocol without explicit Any token is rejected.")
 
+        # 15. Unsupported dict Value in VALID state
+        corrupt_15 = dict(synthetic_base)
+        corrupt_15["Protocol"] = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": {},
+            "StringValue": "Any",
+            "Type": "String",
+        }
+        rule_15 = parse_powershell_rules_json([corrupt_15])[0]
+        ok_15, msg_15 = validate_firewall_filters(rule_15, target_exe)
+        if ok_15 or "malformed" not in msg_15.lower():
+            print(f"ERROR: Expected rejection for dict Value in VALID state, got ok={ok_15}, msg={msg_15}")
+            return 1
+        print("  --> Confirmed: Unsupported dict Value in VALID state is strictly rejected as malformed.")
+
+        # 16. Inconsistent Type metadata in VALID state
+        corrupt_16 = dict(synthetic_base)
+        corrupt_16["Protocol"] = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": "Any",
+            "StringValue": "Any",
+            "Type": "Boolean",
+        }
+        # In CimFieldRecord, for str values with Boolean type or Boolean value with Array type:
+        # Let's test Boolean value with Array Type:
+        corrupt_16_rec = CimFieldRecord.from_raw({
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": True,
+            "StringValue": "True",
+            "Type": "Array",
+        })
+        if corrupt_16_rec.state != CimFieldState.MALFORMED or "Inconsistent Type" not in (corrupt_16_rec.string_value or ""):
+            print(f"ERROR: Expected rejection for inconsistent Type metadata, got state={corrupt_16_rec.state}")
+            return 1
+        print("  --> Confirmed: Inconsistent Type metadata in VALID state is strictly rejected as malformed.")
+
         # Envelope Rejection Tests
         env_1 = dict(data)
         del env_1["BypassRules"]
