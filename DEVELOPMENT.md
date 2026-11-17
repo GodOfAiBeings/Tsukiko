@@ -139,7 +139,7 @@ A dual-platform CI workflow is established at [`.github/workflows/ci.yml`](.gith
   * Ubuntu Linux (`ubuntu-latest`, Python 3.11 x64).
 * **Pipeline**:
   1. Installs base and developer dependencies.
-  2. Runs full 289-item pytest suite (285 passed, 4 skipped on Windows; all 289 passing on Linux).
+  2. Runs full 293-item pytest suite (289 passed, 4 skipped on Windows; 291 passed, 2 skipped on Linux).
   3. Builds distribution wheel (`tsukiko-*.whl`).
   4. Installs wheel in clean environment and executes `tsukiko --check-hardware` outside source tree.
   5. Windows runner executes read-only ActiveStore inspection verification (`scripts/verify_windows_firewall_inspection.py`).

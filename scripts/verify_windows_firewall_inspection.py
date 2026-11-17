@@ -512,7 +512,7 @@ try {
             return 1
         print("  --> Confirmed: Unsupported dict Value in VALID state is strictly rejected as malformed.")
 
-        # 16. Inconsistent Type metadata in VALID state
+        # 16. Inconsistent Type metadata in VALID state (String Value with Boolean Type)
         corrupt_16 = dict(synthetic_base)
         corrupt_16["Protocol"] = {
             "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
@@ -522,20 +522,44 @@ try {
             "StringValue": "Any",
             "Type": "Boolean",
         }
-        # In CimFieldRecord, for str values with Boolean type or Boolean value with Array type:
-        # Let's test Boolean value with Array Type:
-        corrupt_16_rec = CimFieldRecord.from_raw({
-            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
-            "Exists": True,
-            "IsNull": False,
-            "Value": True,
-            "StringValue": "True",
-            "Type": "Array",
-        })
-        if corrupt_16_rec.state != CimFieldState.MALFORMED or "Inconsistent Type" not in (corrupt_16_rec.string_value or ""):
-            print(f"ERROR: Expected rejection for inconsistent Type metadata, got state={corrupt_16_rec.state}")
+        rule_16 = parse_powershell_rules_json([corrupt_16])[0]
+        ok_16, msg_16 = validate_firewall_filters(rule_16, target_exe)
+        if ok_16 or "malformed" not in msg_16.lower():
+            print(f"ERROR: Expected rejection for String Value with Boolean Type, got ok={ok_16}, msg={msg_16}")
             return 1
-        print("  --> Confirmed: Inconsistent Type metadata in VALID state is strictly rejected as malformed.")
+        print("  --> Confirmed: Inconsistent Type metadata (String with Boolean Type) is strictly rejected as malformed.")
+
+        # 17. Program record with unsupported Value type (dict)
+        r_prog_bad = FirewallRuleInfo.create_unrestricted(str(target_exe))
+        r_prog_bad.program_field = CimFieldRecord(
+            state=CimFieldState.VALID,
+            exists=True,
+            is_null=False,
+            value={},
+            string_value=str(target_exe),
+            type_name="String",
+        )
+        ok_prog, msg_prog = validate_firewall_filters(r_prog_bad, target_exe)
+        if ok_prog or "unsupported" not in msg_prog.lower():
+            print(f"ERROR: Expected rejection for dict Program Value: ok={ok_prog}, msg={msg_prog}")
+            return 1
+        print("  --> Confirmed: Program record with unsupported Value type is strictly rejected.")
+
+        # 18. Package record with boolean False without truthiness coercion
+        r_pkg_bad = FirewallRuleInfo.create_unrestricted(str(target_exe))
+        r_pkg_bad.package_field = CimFieldRecord(
+            state=CimFieldState.VALID,
+            exists=True,
+            is_null=False,
+            value=False,
+            string_value="",
+            type_name="String",
+        )
+        ok_pkg, msg_pkg = validate_firewall_filters(r_pkg_bad, target_exe)
+        if ok_pkg or "unsupported" not in msg_pkg.lower():
+            print(f"ERROR: Expected rejection for Package record with False: ok={ok_pkg}, msg={msg_pkg}")
+            return 1
+        print("  --> Confirmed: Package record with boolean False is strictly rejected without truthiness coercion.")
 
         # Envelope Rejection Tests
         env_1 = dict(data)

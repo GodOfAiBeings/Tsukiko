@@ -155,10 +155,17 @@ Tsukiko enforces a unique, documented rule ownership and query mechanism:
   * Pre-creation inspection requires complete, successful inspection before allowing rule creation; post-deletion verification requires complete, successful re-inspection to confirm rule elimination.
 * **Strict Missing-Value Semantics & Invariant Field-State Validation:**
   * The parser never manufactures unrestricted defaults (`"Any"`, `"NotRequired"`, `False`) when properties are missing or null.
-  * `CimFieldRecord.from_raw()` strictly validates the `Value` type for records in the `VALID` state, accepting only `bool`, `str`, `int`, `float`, and `list` of supported scalar elements. Dictionaries, nested objects, and nested structures inside arrays are strictly marked `MALFORMED`.
-  * Enforces consistency between declared `Type` metadata and the actual serialized Python value type.
+  * `CimFieldRecord.from_raw()` strictly enforces exact 1:1 `Type` metadata consistency using `PS_CIM_SERIALIZER_SNIPPET` as the authoritative contract:
+    - Boolean Value -> strictly Boolean Type.
+    - Integer Value -> strictly Integer Type.
+    - Array Value   -> strictly Array Type.
+    - String Value  -> strictly String Type.
+    - Contradictory combinations (e.g. Boolean declared as String, or String declared as Boolean/Array/Integer) are marked `MALFORMED`.
+  * Dictionaries, nested objects, and nested structures inside arrays are strictly marked `MALFORMED`.
   * Requires non-null string `StringValue` matching `Value` for `VALID` state, rejects contradictory values (e.g. `Value="TCP"` with `StringValue="Any"` or `Value="192.168.1.1"` with `StringValue=null`), rejects non-boolean `Exists` / `IsNull` values, and validates state consistency.
-  * `validate_firewall_filters` enforces property-specific semantics: disallows empty strings for `LocalAddress`, `RemoteAddress`, `Protocol`, `LocalPort`, `RemotePort`, `InterfaceAlias` (`allow_empty=False`), allowing empty strings only where documented for `Service` and `InterfaceType` (`allow_empty=True`). Rejects unsupported `Value` types across all filter properties without letting `str(value or "")` coerce unsupported values into unrestricted tokens.
+  * `validate_firewall_filters` enforces property-specific semantics: disallows empty strings for `LocalAddress`, `RemoteAddress`, `Protocol`, `LocalPort`, `RemotePort`, `InterfaceAlias` (`allow_empty=False`), allowing empty strings only where documented for `Service` and `InterfaceType` (`allow_empty=True`). Rejects unsupported `Value` types across all filter properties without letting `str(value or "")` coerce unsupported values (`False`, `0`, dicts) into unrestricted tokens.
+  * Validates the `Program` property directly: requires `VALID` state, supported string `Value`, non-null consistent `StringValue`, and non-wildcard dedicated binary matching.
+  * Validates the `Package` property directly: genuinely `NULL` state supported for unpackaged Win32 binaries; for `VALID` state, requires supported string `Value` consistent with `StringValue`, rejecting non-string types without truthiness coercion.
   * All 18 required filter properties across all 7 categories are deserialized into typed `CimFieldRecord` models and validated with fail-closed semantics.
 * **No Incomplete Fallbacks:**
   * `netsh advfirewall` is strictly prohibited from declaring complete inspection or evaluating security status. If PowerShell NetSecurity cmdlets are unavailable, queries fail closed (`success=False`), mapping directly to `os_policy_unverified`.

@@ -10,20 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.8] - Final CIM Value Validation Correction - 2026-11-17
 
 ### Fixed
-- **Strict CIM Value Type Validation (`app/core/privacy/windows_firewall.py`)**:
-  - In `CimFieldRecord.from_raw()`, strictly validates the `Value` type for records in the `PROPERTY_PRESENT_WITH_VALID_VALUE` state.
-  - Accepts only explicitly supported representations: `bool`, `str`, `int`, `float`, and `list` of supported scalar elements.
-  - Strictly rejects dictionaries, nested objects, unsupported Python object types, and nested structures inside arrays, marking them `MALFORMED`.
-  - Enforces `Type` metadata consistency against the actual serialized Python value type (e.g. rejecting boolean values declared as `Array` or integer values declared as `Boolean`), marking contradictory records as `MALFORMED`.
-- **Exhaustive Filter Value Type Enforcement (`app/core/privacy/windows_firewall.py`)**:
-  - In `check_field_unrestricted()`, added an explicit rejection branch for any unsupported `Value` type, ensuring unsupported types cannot pass through to allowed tokens.
-  - In `validate_firewall_filters()`, added a strict type guard on `rule.package_field.value` before string evaluation, preventing unsupported objects or dictionaries from being coerced via `str()` into accepted unrestricted values.
+- **Exact CIM Type Metadata Consistency (`app/core/privacy/windows_firewall.py`)**:
+  - Enforced exact 1:1 `Type` metadata consistency in `CimFieldRecord.from_raw()` using `PS_CIM_SERIALIZER_SNIPPET` as the authoritative contract:
+    - Boolean Value -> strictly Boolean Type (rejects Boolean with String, Integer, Array, or unknown Type).
+    - Integer Value -> strictly Integer Type (rejects Integer with Boolean, String, Array, or unknown Type).
+    - Array Value   -> strictly Array Type (rejects Array with Boolean, Integer, String, or unknown Type).
+    - String Value  -> strictly String Type (rejects String with Boolean, Integer, Array, or unknown Type).
+  - Eliminated invented type mappings: numeric floats are not serialized as raw numeric JSON by PowerShell and are strictly rejected from VALID state when supplied as non-string representations.
+  - Removed exceptions that previously accepted Boolean, Integer, or Array values under String Type.
+- **Strict Program Value Validation in `validate_firewall_filters` (`app/core/privacy/windows_firewall.py`)**:
+  - Requires the `Program` property to be in `CimFieldState.VALID` state, contain a supported string `Value`, and have a matching, non-contradictory `StringValue`.
+  - Rejects directly constructed model records with dictionaries, arrays, numeric integers, booleans, or contradictory executable paths.
+  - Continues normalizing and matching the executable path against the expected dedicated binary.
+- **Truthiness Coercion Elimination for Package Value (`app/core/privacy/windows_firewall.py`)**:
+  - Eliminated `str(value or "")` truthiness coercion which previously allowed `False` or `0` to silently coerce to empty strings.
+  - Requires a `VALID` Package field to have a supported string `Value` matching `StringValue`.
+  - Genuinely `NULL` Package fields remain supported for unpackaged Win32 executables.
+  - Legitimate empty or unrestricted string tokens (`""`, `"any"`, `"*"`) remain fully supported.
 - **Verification Smoke Test Enhancements (`scripts/verify_windows_firewall_inspection.py`)**:
-  - Added synthetic rejection checks in Stage 5 for unsupported dict `Value` in `VALID` state and inconsistent `Type` metadata.
+  - Stage 5 checks extended to verify:
+    - Inconsistent Type metadata (String with Boolean Type) is strictly rejected as malformed.
+    - Program record with unsupported Value type (dict) is strictly rejected.
+    - Package record with boolean False is strictly rejected without truthiness coercion.
 - **Test Suite Expansion (`tests/test_windows_firewall.py`)**:
-  - Added 10 new regression tests verifying rejection of dictionaries, nested objects inside arrays, unsupported objects (sets, tuples, custom objects), inconsistent `Type` metadata, and filter property rejections for dict values on `Program`, `Package`, and all generic filter properties.
-  - Elevated `tests/test_windows_firewall.py` to 234 tests.
-  - Total automated test suite expanded to 289 collected items (285 passed, 4 skipped on Windows; all 289 passing on Linux).
+  - Expanded firewall test suite to 238 tests covering:
+    - String Value with Boolean, Integer, Array, or Unknown Type rejection.
+    - Boolean, Integer, and Array Values declared as String rejection.
+    - Directly constructed Program records with unsupported Value types (`dict`, `list`, `int`, `bool`, contradictory paths).
+    - Directly constructed Package records with `False`, `0`, dictionaries, and contradictory `StringValue`.
+    - Legitimate serializer-produced values and existing unrestricted firewall rules.
+  - Total test suite expanded to 293 collected items (289 passed, 4 skipped on Windows; 291 passed, 2 skipped on Linux). Corrected previous documentation that claimed all 289 passed on Linux to reflect actual CI evidence of 2 skipped (due to native PowerShell absence on Ubuntu).
 
 ## [0.1.7] - Final Phase 1 Blocker Correction - 2026-11-17
 

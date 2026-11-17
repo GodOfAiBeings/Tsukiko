@@ -3206,18 +3206,27 @@ def test_cim_record_broad_type_category_preservation():
     Categories: Boolean, Integer, String, Array, Null, None.
     CimFieldRecord preserves these broad type categories faithfully.
     """
-    categories = ["Boolean", "Integer", "String", "Array", "Null", "None"]
-    for cat in categories:
+    category_cases = [
+        ("Boolean", True, "True"),
+        ("Integer", 42, "42"),
+        ("String", "Any", "Any"),
+        ("Array", ["Any"], "Any"),
+        ("Null", None, None),
+        ("None", None, None),
+    ]
+    for cat, val, str_val in category_cases:
         raw = {
             "State": "PROPERTY_PRESENT_WITH_VALID_VALUE" if cat not in ("Null", "None") else ("PROPERTY_PRESENT_WITH_NULL" if cat == "Null" else "PROPERTY_MISSING"),
             "Exists": cat != "None",
             "IsNull": cat in ("Null", "None"),
-            "Value": "Any" if cat not in ("Null", "None") else None,
-            "StringValue": "Any" if cat not in ("Null", "None") else None,
+            "Value": val,
+            "StringValue": str_val,
             "Type": cat,
         }
         rec = CimFieldRecord.from_raw(raw)
         assert rec.type_name == cat
+        if cat in ("Boolean", "Integer", "String", "Array"):
+            assert rec.state == CimFieldState.VALID
 
 
 def test_cim_record_roundtrip_serialization_powershell():
@@ -3356,22 +3365,40 @@ def test_cim_record_rejects_unsupported_object_types():
 
 
 def test_cim_record_rejects_inconsistent_type_metadata():
-    """Value type must be consistent with declared Type metadata."""
+    """Value type must be strictly consistent with declared Type metadata per PS_CIM_SERIALIZER_SNIPPET.
+
+    Contract:
+    - Boolean Value -> strictly Boolean Type
+    - Integer Value -> strictly Integer Type
+    - Array Value   -> strictly Array Type
+    - String Value  -> strictly String Type
+    Any deviation or unknown Type is MALFORMED.
+    """
     inconsistent_cases = [
-        # Boolean value declared as Array type
+        # String value declared as non-String type
+        {"Value": "Any", "StringValue": "Any", "Type": "Boolean"},
+        {"Value": "Any", "StringValue": "Any", "Type": "Integer"},
+        {"Value": "Any", "StringValue": "Any", "Type": "Array"},
+        {"Value": "Any", "StringValue": "Any", "Type": "Unknown"},
+        # Boolean value declared as non-Boolean type
+        {"Value": True, "StringValue": "True", "Type": "String"},
         {"Value": True, "StringValue": "True", "Type": "Array"},
-        # Boolean value declared as Integer type
         {"Value": False, "StringValue": "False", "Type": "Integer"},
-        # Integer value declared as Array type
+        {"Value": False, "StringValue": "False", "Type": "Unknown"},
+        # Integer value declared as non-Integer type
+        {"Value": 42, "StringValue": "42", "Type": "String"},
         {"Value": 42, "StringValue": "42", "Type": "Array"},
-        # Integer value declared as Boolean type
         {"Value": 8080, "StringValue": "8080", "Type": "Boolean"},
-        # Array value declared as Boolean type
+        {"Value": 8080, "StringValue": "8080", "Type": "Unknown"},
+        # Array value declared as non-Array type
+        {"Value": ["Any"], "StringValue": "Any", "Type": "String"},
         {"Value": ["Any"], "StringValue": "Any", "Type": "Boolean"},
-        # Array value declared as Integer type
         {"Value": ["80", "443"], "StringValue": "80,443", "Type": "Integer"},
-        # Float value declared as Array type
-        {"Value": 3.14, "StringValue": "3.14", "Type": "Array"},
+        {"Value": ["Any"], "StringValue": "Any", "Type": "Unknown"},
+        # Float value declared as any type (serializer contract never produces numeric float)
+        {"Value": 3.14, "StringValue": "3.14", "Type": "String"},
+        {"Value": 3.14, "StringValue": "3.14", "Type": "Integer"},
+        {"Value": 3.14, "StringValue": "3.14", "Type": "Float"},
     ]
     for case in inconsistent_cases:
         raw = {
@@ -3382,26 +3409,23 @@ def test_cim_record_rejects_inconsistent_type_metadata():
         }
         rec = CimFieldRecord.from_raw(raw)
         assert rec.state == CimFieldState.MALFORMED, f"Expected MALFORMED for {case}"
-        assert "Inconsistent Type" in (rec.string_value or ""), f"Wrong message for {case}"
+        err_msg = rec.string_value or ""
+        assert "Inconsistent Type" in err_msg or "Unsupported Value type" in err_msg, f"Wrong message for {case}: {err_msg}"
 
 
 def test_cim_record_accepts_consistent_type_metadata():
-    """Legitimate type metadata combinations must still be accepted as VALID."""
+    """Legitimate serializer-produced type metadata combinations must be accepted as VALID."""
     consistent_cases = [
         {"Value": True, "StringValue": "True", "Type": "Boolean"},
         {"Value": False, "StringValue": "False", "Type": "Boolean"},
         {"Value": 42, "StringValue": "42", "Type": "Integer"},
         {"Value": 0, "StringValue": "0", "Type": "Integer"},
+        {"Value": 256, "StringValue": "256", "Type": "Integer"},
         {"Value": "Any", "StringValue": "Any", "Type": "String"},
         {"Value": "TCP", "StringValue": "TCP", "Type": "String"},
+        {"Value": "", "StringValue": "", "Type": "String"},
         {"Value": ["Any"], "StringValue": "Any", "Type": "Array"},
         {"Value": ["80", "443"], "StringValue": "80,443", "Type": "Array"},
-        # String Type also accepted for bool (PS enum serialization)
-        {"Value": True, "StringValue": "True", "Type": "String"},
-        # String Type also accepted for int (PS enum serialization)
-        {"Value": 42, "StringValue": "42", "Type": "String"},
-        # String Type also accepted for arrays (PS serialization)
-        {"Value": ["Any"], "StringValue": "Any", "Type": "String"},
     ]
     for case in consistent_cases:
         raw = {
@@ -3468,10 +3492,6 @@ def test_validate_firewall_filters_rejects_dict_value_on_all_filter_properties(t
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    # Build a CimFieldRecord with dict value that passed from_raw because it's
-    # constructed directly (simulating a hypothetical future deserialization bug).
-    # The from_raw gate would already reject this, but check_field_unrestricted
-    # must also reject it as a second barrier.
     dict_field = CimFieldRecord(
         state=CimFieldState.VALID,
         exists=True,
@@ -3499,15 +3519,57 @@ def test_validate_firewall_filters_rejects_dict_value_on_all_filter_properties(t
         assert "unsupported" in err.lower() or "type" in err.lower(), f"Wrong error for {attr}: {err}"
 
 
-def test_validate_firewall_filters_rejects_program_dict_value(temp_dir):
-    """Program filter with Value={} and StringValue matching expected path must still be rejected."""
+def test_validate_firewall_filters_rejects_program_with_unsupported_value_types(temp_dir):
+    """Directly constructed Program records with unsupported Value types (dict, array, int, bool) are rejected."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    unsupported_values = [
+        ({}, "dict"),
+        ([str(dedicated)], "list"),
+        (123, "int"),
+        (True, "bool"),
+        (False, "bool"),
+    ]
+    for bad_val, val_type_name in unsupported_values:
+        r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+        r.program_field = CimFieldRecord(
+            state=CimFieldState.VALID,
+            exists=True,
+            is_null=False,
+            value=bad_val,
+            string_value=str(dedicated),
+            type_name="String",
+        )
+        ok, err = validate_firewall_filters(r, dedicated)
+        assert ok is False, f"Expected rejection for {val_type_name} Program Value"
+        assert "unsupported" in err.lower() or "type" in err.lower() or "program" in err.lower(), f"Wrong error: {err}"
+
+
+def test_validate_firewall_filters_rejects_program_contradictory_string_value(temp_dir):
+    """Directly constructed Program records with contradictory Value and StringValue are rejected."""
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
     r = FirewallRuleInfo.create_unrestricted(str(dedicated))
-    # Program itself is handled via rule.program (string), not check_field_unrestricted.
-    # But if program_field.value is a dict, from_raw would catch it.  Here we verify
-    # from_raw rejects it.
+    r.program_field = CimFieldRecord(
+        state=CimFieldState.VALID,
+        exists=True,
+        is_null=False,
+        value="C:\\other\\app.exe",
+        string_value=str(dedicated),
+        type_name="String",
+    )
+    ok, err = validate_firewall_filters(r, dedicated)
+    assert ok is False
+    assert "contradictory" in err.lower()
+
+
+def test_validate_firewall_filters_program_parser_rejection(temp_dir):
+    """Program field with dict Value in raw JSON is rejected by parser as MALFORMED."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
     bad_raw = {
         "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
         "Exists": True,
@@ -3520,20 +3582,105 @@ def test_validate_firewall_filters_rejects_program_dict_value(temp_dir):
     assert rec.state == CimFieldState.MALFORMED
 
 
-def test_validate_firewall_filters_rejects_package_dict_value(temp_dir):
-    """Package={} with StringValue='' must be rejected — not coerced to empty string via str()."""
+def test_validate_firewall_filters_rejects_package_unsupported_values_and_truthiness_coercion(temp_dir):
+    """Package records with False, 0, dict, and array are strictly rejected without truthiness coercion."""
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    r = FirewallRuleInfo.create_unrestricted(str(dedicated))
-    r.package_field = CimFieldRecord(
+    unsupported_package_values = [
+        (False, "bool False (must not coerce via str(value or ''))"),
+        (0, "int 0 (must not coerce via str(value or ''))"),
+        ({}, "empty dict"),
+        ([], "empty list"),
+        (42, "non-zero int"),
+    ]
+    for bad_pkg_val, desc in unsupported_package_values:
+        r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+        r.package_field = CimFieldRecord(
+            state=CimFieldState.VALID,
+            exists=True,
+            is_null=False,
+            value=bad_pkg_val,
+            string_value="",
+            type_name="String",
+        )
+        ok, err = validate_firewall_filters(r, dedicated)
+        assert ok is False, f"Expected rejection for Package with {desc}"
+        assert "unsupported" in err.lower() or "package" in err.lower(), f"Wrong error for {desc}: {err}"
+
+
+def test_validate_firewall_filters_rejects_package_contradictory_string_value(temp_dir):
+    """Package records with contradictory Value and StringValue are strictly rejected."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    contradictory_pairs = [
+        ("Any", ""),
+        ("", "Any"),
+        ("*", "Any"),
+        ("CustomSID", "Any"),
+    ]
+    for val, str_val in contradictory_pairs:
+        r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+        r.package_field = CimFieldRecord(
+            state=CimFieldState.VALID,
+            exists=True,
+            is_null=False,
+            value=val,
+            string_value=str_val,
+            type_name="String",
+        )
+        ok, err = validate_firewall_filters(r, dedicated)
+        assert ok is False, f"Expected rejection for contradictory Package Value={val!r}, StringValue={str_val!r}"
+        assert "contradictory" in err.lower() or "restricts" in err.lower()
+
+
+def test_validate_firewall_filters_accepts_legitimate_package_values(temp_dir):
+    """Genuinely NULL Package fields and legitimate unrestricted string Package fields are accepted."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    # 1. Genuinely NULL Package field (standard unpackaged Win32 binary)
+    r_null = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    r_null.package_field = CimFieldRecord.null()
+    ok, err = validate_firewall_filters(r_null, dedicated)
+    assert ok is True, f"Expected NULL Package to be accepted: {err}"
+
+    # 2. Empty string Package field
+    r_empty = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    r_empty.package_field = CimFieldRecord(
         state=CimFieldState.VALID,
         exists=True,
         is_null=False,
-        value={},
+        value="",
         string_value="",
         type_name="String",
     )
-    ok, err = validate_firewall_filters(r, dedicated)
-    assert ok is False, f"Expected rejection for dict Package Value"
-    assert "unsupported" in err.lower() or "type" in err.lower(), f"Wrong error: {err}"
+    ok, err = validate_firewall_filters(r_empty, dedicated)
+    assert ok is True, f"Expected empty string Package to be accepted: {err}"
+
+    # 3. 'Any' Package field
+    r_any = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    r_any.package_field = CimFieldRecord(
+        state=CimFieldState.VALID,
+        exists=True,
+        is_null=False,
+        value="Any",
+        string_value="Any",
+        type_name="String",
+    )
+    ok, err = validate_firewall_filters(r_any, dedicated)
+    assert ok is True, f"Expected 'Any' Package to be accepted: {err}"
+
+    # 4. '*' Package field
+    r_star = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    r_star.package_field = CimFieldRecord(
+        state=CimFieldState.VALID,
+        exists=True,
+        is_null=False,
+        value="*",
+        string_value="*",
+        type_name="String",
+    )
+    ok, err = validate_firewall_filters(r_star, dedicated)
+    assert ok is True, f"Expected '*' Package to be accepted: {err}"

@@ -171,17 +171,39 @@ class CimFieldRecord(BaseModel):
                 if str_val is None or not isinstance(str_val, str):
                     return cls.malformed(val, f"Missing, null, or non-string StringValue for VALID state: {str_val!r}")
 
-                # ── Strict Value type validation ──────────────────────
-                # Only str, bool, int, float, and list-of-supported-scalars
-                # are accepted.  Dicts, sets, tuples, custom objects, and
-                # nested structures inside arrays are MALFORMED.
+                # ── Exact Type metadata consistency & Value type validation ──
+                # Authoritative contract from PS_CIM_SERIALIZER_SNIPPET:
+                # - Boolean Value -> strictly Boolean Type
+                # - Integer Value -> strictly Integer Type
+                # - Array Value   -> strictly Array Type
+                # - String Value  -> strictly String Type
+                # All other combinations or unsupported Value types are MALFORMED.
                 if isinstance(val, bool):
-                    pass  # bool before int (bool is subclass of int)
-                elif isinstance(val, (str, int, float)):
-                    pass
+                    if t_name != "Boolean":
+                        return cls.malformed(
+                            val,
+                            f"Inconsistent Type '{t_name}' for boolean Value (expected 'Boolean')",
+                        )
+                elif isinstance(val, int):
+                    if t_name != "Integer":
+                        return cls.malformed(
+                            val,
+                            f"Inconsistent Type '{t_name}' for integer Value (expected 'Integer')",
+                        )
+                elif isinstance(val, str):
+                    if t_name != "String":
+                        return cls.malformed(
+                            val,
+                            f"Inconsistent Type '{t_name}' for string Value (expected 'String')",
+                        )
                 elif isinstance(val, list):
+                    if t_name != "Array":
+                        return cls.malformed(
+                            val,
+                            f"Inconsistent Type '{t_name}' for array Value (expected 'Array')",
+                        )
                     for idx, elem in enumerate(val):
-                        if not isinstance(elem, (str, bool, int, float)):
+                        if not isinstance(elem, (str, bool, int)):
                             return cls.malformed(
                                 val,
                                 f"Unsupported element type at index {idx} in Array Value: "
@@ -191,30 +213,6 @@ class CimFieldRecord(BaseModel):
                     return cls.malformed(
                         val,
                         f"Unsupported Value type for VALID state: {type(val).__name__}",
-                    )
-
-                # ── Type metadata consistency ─────────────────────────
-                # The PS CIM serializer emits broad categories: Boolean,
-                # Integer, String, Array, Null, None.  Reject records
-                # whose Type contradicts the actual Python value type.
-                _type_ok = True
-                if isinstance(val, bool):
-                    if t_name not in ("Boolean", "String"):
-                        _type_ok = False
-                elif isinstance(val, int):
-                    if t_name not in ("Integer", "String"):
-                        _type_ok = False
-                elif isinstance(val, float):
-                    if t_name not in ("Integer", "String"):
-                        _type_ok = False
-                elif isinstance(val, list):
-                    if t_name not in ("Array", "String"):
-                        _type_ok = False
-                # str values accept any Type – PS may serialize enums as String
-                if not _type_ok:
-                    return cls.malformed(
-                        val,
-                        f"Inconsistent Type '{t_name}' for {type(val).__name__} Value",
                     )
 
                 # ── Value / StringValue contradiction checks ──────────
@@ -229,7 +227,7 @@ class CimFieldRecord(BaseModel):
                     expected_str = "true" if val else "false"
                     if str_val.strip().lower() != expected_str:
                         return cls.malformed(val, f"Contradictory Boolean Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
-                elif isinstance(val, (int, float)):
+                elif isinstance(val, int):
                     if str(val).strip().lower() != str_val.strip().lower():
                         return cls.malformed(val, f"Contradictory Numeric Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
             elif state_enum == CimFieldState.NULL:
@@ -872,15 +870,30 @@ def validate_firewall_filters(
     # -------------------------------------------------------------
     # Category 1: Application filter
     # -------------------------------------------------------------
-    if rule.program_field.state == CimFieldState.MISSING or rule.program_field.is_null:
-        return False, "Application filter is missing or null. A dedicated executable path is required."
-    if rule.program_field.state == CimFieldState.MALFORMED:
-        return False, "Application filter has malformed Program property."
-    if rule.program is None or rule.program.strip() in ("*", "Any", ""):
+    # Program: dedicated executable path
+    if rule.program_field.state != CimFieldState.VALID:
+        if rule.program_field.state == CimFieldState.MISSING or rule.program_field.is_null:
+            return False, "Application filter is missing or null. A dedicated executable path is required."
+        if rule.program_field.state == CimFieldState.MALFORMED:
+            return False, "Application filter has malformed Program property."
+        return False, f"Application filter has invalid Program state: {rule.program_field.state}."
+
+    if not isinstance(rule.program_field.value, str):
+        return False, f"Application filter has unsupported Program Value type: {type(rule.program_field.value).__name__}."
+
+    if rule.program_field.string_value is None or not isinstance(rule.program_field.string_value, str):
+        return False, "Application filter has missing, null, or non-string Program StringValue."
+
+    if rule.program_field.value.strip() != rule.program_field.string_value.strip():
+        return False, f"Application filter has contradictory Program Value ({rule.program_field.value!r}) and StringValue ({rule.program_field.string_value!r})."
+
+    prog_clean = rule.program_field.value.strip()
+    if not prog_clean or prog_clean in ("*", "Any"):
         return False, "Application filter is empty or wildcard. A dedicated executable path is required."
+
     try:
         expected_norm = Path(expected_exe).resolve()
-        rule_norm = Path(rule.program).resolve()
+        rule_norm = Path(prog_clean).resolve()
         if expected_norm != rule_norm:
             return False, f"Application filter mismatch: rule targets '{rule_norm}', expected '{expected_norm}'."
     except Exception as e:
@@ -891,13 +904,21 @@ def validate_firewall_filters(
         return False, "Application filter missing Package property."
     if rule.package_field.state == CimFieldState.MALFORMED:
         return False, "Application filter has malformed Package property."
-    if rule.package_field.state != CimFieldState.NULL:
-        pkg_raw = rule.package_field.value
-        if pkg_raw is not None and not isinstance(pkg_raw, (str, int, float, bool)):
-            return False, f"Application filter has unsupported Package Value type: {type(pkg_raw).__name__}."
-        pkg_val = str(pkg_raw or "").strip().lower()
+    if rule.package_field.state == CimFieldState.NULL:
+        # Genuinely NULL Package field is supported for unpackaged Win32 binaries
+        pass
+    elif rule.package_field.state == CimFieldState.VALID:
+        if not isinstance(rule.package_field.value, str):
+            return False, f"Application filter has unsupported Package Value type: {type(rule.package_field.value).__name__}."
+        if rule.package_field.string_value is None or not isinstance(rule.package_field.string_value, str):
+            return False, "Application filter has missing, null, or non-string Package StringValue."
+        if rule.package_field.value.strip().lower() != rule.package_field.string_value.strip().lower():
+            return False, f"Application filter has contradictory Package Value ({rule.package_field.value!r}) and StringValue ({rule.package_field.string_value!r})."
+        pkg_val = rule.package_field.value.strip().lower()
         if pkg_val not in ("", "any", "*"):
             return False, f"Application filter restricts package: '{rule.package_field.string_value}'."
+    else:
+        return False, f"Application filter has invalid Package state: {rule.package_field.state}."
 
     # -------------------------------------------------------------
     # Helper for generic unrestricted field checks
@@ -928,7 +949,9 @@ def validate_firewall_filters(
         # Validate Value matches StringValue and is not restricted
         if field.value is None:
             return False, f"Filter property '{prop_label}' has null Value."
-        if isinstance(field.value, str):
+        if isinstance(field.value, bool):
+            return False, f"{prop_label} filter has unsupported Boolean Value type."
+        elif isinstance(field.value, str):
             val_clean = field.value.strip().lower()
             if val_clean not in allowed:
                 return False, f"{prop_label} filter Value is restricted: '{field.value}' (must be Any or unrestricted)."
@@ -944,7 +967,7 @@ def validate_firewall_filters(
             joined = ",".join(str(x) for x in field.value).strip().lower()
             if joined != str_clean:
                 return False, f"{prop_label} filter has contradictory Array Value ({field.value!r}) and StringValue ({field.string_value!r})."
-        elif isinstance(field.value, (int, float)):
+        elif isinstance(field.value, int):
             val_str = str(field.value).strip().lower()
             if val_str not in allowed:
                 return False, f"{prop_label} filter Value is restricted: '{field.value}' (must be Any or unrestricted)."
@@ -1035,6 +1058,10 @@ def validate_firewall_filters(
     if auth_val not in ("notrequired", "no", "0"):
         return False, f"Security filter requires authentication: '{rule.authentication}' (must be NotRequired)."
     if rule.authentication_field.value is not None:
+        if isinstance(rule.authentication_field.value, bool):
+            return False, "Security filter has unsupported Boolean Value type for Authentication."
+        if not isinstance(rule.authentication_field.value, (str, int)):
+            return False, f"Security filter has unsupported Authentication Value type: {type(rule.authentication_field.value).__name__}."
         raw_auth = str(rule.authentication_field.value).strip().lower()
         if raw_auth not in ("notrequired", "no", "0"):
             return False, f"Security filter requires authentication: '{rule.authentication_field.value}' (must be NotRequired)."
@@ -1050,6 +1077,10 @@ def validate_firewall_filters(
     if enc_val not in ("notrequired", "no", "0"):
         return False, f"Security filter requires encryption: '{rule.encryption}' (must be NotRequired)."
     if rule.encryption_field.value is not None:
+        if isinstance(rule.encryption_field.value, bool):
+            return False, "Security filter has unsupported Boolean Value type for Encryption."
+        if not isinstance(rule.encryption_field.value, (str, int)):
+            return False, f"Security filter has unsupported Encryption Value type: {type(rule.encryption_field.value).__name__}."
         raw_enc = str(rule.encryption_field.value).strip().lower()
         if raw_enc not in ("notrequired", "no", "0"):
             return False, f"Security filter requires encryption: '{rule.encryption_field.value}' (must be NotRequired)."
