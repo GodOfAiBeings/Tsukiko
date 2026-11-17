@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.6] - Final Phase 1 Acceptance Fixes - 2026-11-17
+
+### Added
+- **Unmanufactured ActiveStore Outbound Allow Bypass Discovery (`app/core/privacy/windows_firewall.py`)**:
+  - Removed all error suppression (`-ErrorAction SilentlyContinue`) from NetSecurity bypass inspection.
+  - Enumerates security filters with `OverrideBlockRules=True` (`Get-NetFirewallSecurityFilter -PolicyStore ActiveStore -OverrideBlockRules $true`). Handles expected CIM `CmdletizationQuery_NotFound` gracefully while propagating any real cmdlet failure.
+  - Enforces 1-to-1 association cardinality (`Count -eq 1`) for candidate rules, security filters, and application filters.
+  - Evaluates scope applicability: identifies exact executable matches (`Program == targetExe`) and unrestricted all-programs rules (`Program` is Any/empty/`*` without an AppContainer `Package`). Unrelated application rules do not invalidate Tsukiko.
+  - Ambiguous wildcard patterns (`?` or embedded `*`) fail closed.
+  - Any applicable bypass rule prevents `os_policy_active`.
+- **Strict Response Envelope Schema (`validate_response_envelope`)**:
+  - Strictly validates all 8 canonical fields: `SchemaVersion` (strictly int 1), `Success` (strict bool), `InspectionComplete` (strict bool), `PolicyStore` (string matching expected store), `Profiles` (list), `Rules` (list), `BypassRules` (list), and `Errors` (list).
+  - Enforces non-contradictory states: `Success` must equal `InspectionComplete`; non-empty `Errors` is forbidden when `Success=True`.
+  - Applied uniformly to `query_matching_firewall_rules`, `verify_effective_firewall_policy`, and `parse_powershell_rules_json`.
+- **Strict Invariant Validation on `CimFieldRecord.from_raw()`**:
+  - Audited `CimFieldRecord.from_raw()`: eliminated weak `bool()` coercion on arbitrary strings; strictly requires boolean types for `Exists` and `IsNull`.
+  - Validates state consistency across `VALID`, `NULL`, `MISSING`, and `MALFORMED`.
+  - Rejects contradictory combinations (e.g. `VALID` with `exists=False`, `NULL` with non-null value) and marks them `MALFORMED`.
+  - Preserves exact underlying CIM types (`$prop.CimType`).
+- **Enhanced 6-Stage Read-Only Smoke Test (`scripts/verify_windows_firewall_inspection.py`)**:
+  - Removed duplicate PowerShell serializer and eliminated hardcoded `BypassRules = @()`.
+  - Imports and exercises production serializer and unmanufactured ActiveStore bypass discovery.
+  - Tests 6 distinct stages: profile verification, unmanufactured ActiveStore bypass discovery, real associated filter objects across 10 sample rules, CIM field-state consistency invariants, boolean fidelity (`OverrideBlockRules`, `Enabled`), 11 synthetic filter rejections, 4 envelope rejections, and fail-closed command failure behavior (exit code 1 with failure envelope).
+- **Expanded Test Suite (`tests/test_windows_firewall.py`)**:
+  - Added 25 regression tests covering bypass discovery, envelope validation, and CIM field invariants, raising `tests/test_windows_firewall.py` to 211 tests. Total suite expanded to 266 collected items (262 passed, 4 skipped on Windows; all 266 passed on Linux).
+
 ## [0.1.5] - Definitive Phase 1 Security Closure - 2026-11-17
 
 ### Added

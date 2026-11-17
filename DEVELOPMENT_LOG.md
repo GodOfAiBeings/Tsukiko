@@ -211,6 +211,37 @@ A comprehensive architectural audit closed all remaining edge cases in the Windo
 
 ---
 
+### Final Phase 1 Acceptance Fixes (2026-11-17)
+
+The final acceptance pass resolved all remaining concrete defects identified in the independent source review, elevating the automated test suite to 266 tests (262 passed, 4 skipped on Windows; all 266 passing on Linux):
+
+1. **ActiveStore Bypass Discovery Without Error Suppression (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: The bypass inspection script previously used `-ErrorAction SilentlyContinue` across `Get-NetFirewallApplicationFilter`, `Get-NetFirewallRule`, and `Get-NetFirewallSecurityFilter`, masking cmdlet failures, and only looked for exact executable path matches without evaluating unrestricted all-programs rules.
+   - **Fix**: Removed all error suppression. Implemented canonical ActiveStore bypass discovery using `Get-NetFirewallSecurityFilter -PolicyStore ActiveStore -OverrideBlockRules $true -ErrorAction Stop`. Catches expected CIM `CmdletizationQuery_NotFound` when 0 rules have override, while propagating any real cmdlet failure. Verifies 1-to-1 association cardinality (`Count -eq 1`).
+   - **Scope Applicability**: Evaluates applicability: identifies both exact executable matches (`Program == targetExe`) and unrestricted all-programs rules (`Program` is Any/empty/`*` with no AppContainer `Package`). Confirms that unrelated application rules do not invalidate Tsukiko. Any ambiguous wildcard pattern (`?` or embedded `*`) throws and fails closed.
+   - **Tests**: `tests/test_windows_firewall.py` (9 bypass regression tests covering exact match, all-programs, unrelated app, cmdlet failures, association count mismatches, and malformed responses).
+
+2. **Strict Response Envelope Schema (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: Envelope parsing permitted default fallbacks for missing fields and did not strictly validate all 8 keys, types, or contradictory states.
+   - **Fix**: Implemented `validate_response_envelope()` enforcing all 8 canonical fields: `SchemaVersion` (strictly int 1), `Success` (strict bool), `InspectionComplete` (strict bool), `PolicyStore` (string matching expected store), `Profiles` (list), `Rules` (list), `BypassRules` (list), and `Errors` (list).
+   - **Consistency**: Rejects contradictory states (`Success != InspectionComplete`, `Success=True` with non-empty `Errors`). Applied uniformly to `query_matching_firewall_rules`, `verify_effective_firewall_policy`, and `parse_powershell_rules_json`.
+   - **Tests**: `tests/test_windows_firewall.py` (9 envelope regression tests covering missing keys, unsupported versions, policy store mismatches, null/wrong types, and inconsistent states).
+
+3. **Strict CIM Field-State Invariants (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: `CimFieldRecord.from_raw()` performed `bool()` coercion on arbitrary strings for `Exists` / `IsNull`, potentially converting invalid strings to `True`, and did not validate internal state consistency.
+   - **Fix**: Audited `CimFieldRecord.from_raw()`. Disallowed `bool()` coercion on arbitrary strings; strictly requires boolean types. Enforces state consistency across `VALID`, `NULL`, `MISSING`, and `MALFORMED`. Contradictory combinations (e.g. `VALID` with `exists=False`, `NULL` with non-null value) are rejected as `MALFORMED`. Preserves exact underlying CIM types (`$prop.CimType`).
+   - **Tests**: `tests/test_windows_firewall.py` (7 CIM record regression tests covering valid states, missing/null, non-bool `Exists`/`IsNull`, contradictory combinations, type preservation, and PowerShell roundtrip serialization).
+
+4. **Enhanced 6-Stage Real Windows Read-Only Smoke Test (`scripts/verify_windows_firewall_inspection.py`):**
+   - **Defect**: Previous script duplicated the PowerShell serializer and hardcoded `BypassRules = @()`.
+   - **Fix**: Completely refactored to import and execute the production serializer and ActiveStore bypass inspection (`build_activestore_inspection_powershell_script`, `PS_CIM_SERIALIZER_SNIPPET`, `validate_response_envelope`, `parse_powershell_rules_json`, `validate_firewall_filters`).
+   - **Coverage**: Tests real ActiveStore profiles, unmanufactured ActiveStore bypass discovery, real associated filter objects across 10 sample rules, all 18 CIM filter properties, field-state consistency invariants, boolean fidelity (`OverrideBlockRules`, `Enabled`), 11 synthetic filter rejections, 4 envelope rejections, and command failure fail-closed behavior (exit code 1 with failure envelope). Strictly read-only on live Windows host.
+
+5. **Expanded Test Suite (`tests/test_windows_firewall.py`):**
+   - Added 25 new regression tests, raising `tests/test_windows_firewall.py` to 211 tests. Total test suite expanded to 266 collected items (262 passed, 4 skipped on Windows; all 266 passed on Linux).
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -219,12 +250,12 @@ A comprehensive architectural audit closed all remaining edge cases in the Windo
 | Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
 | Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
-| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization, filter association integrity (`Count -eq 1`), ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`), exact stable-name creation/deletion via PowerShell, fail-closed versioned JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization with strict invariant checking, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) across exact executable and all-programs scopes without error suppression, exact stable-name creation/deletion via PowerShell, fail-closed strict 8-key JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 241 unit, regression, packaging, and integration tests (237 passed, 4 skipped on Windows; all 241 passed on Linux). |
-| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 5-stage read-only ActiveStore inspection). |
+| Automated Pytest Test Suite | **Implemented & Tested** | 266 unit, regression, packaging, and integration tests (262 passed, 4 skipped on Windows; all 266 passed on Linux). |
+| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 6-stage read-only ActiveStore inspection). |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |

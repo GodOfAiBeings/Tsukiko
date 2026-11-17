@@ -76,7 +76,7 @@ class CimFieldState(str, Enum):
 
 
 class CimFieldRecord(BaseModel):
-    """Lossless structured field record representing a Microsoft NetSecurity CIM property."""
+    """Structured field record representing a Microsoft NetSecurity CIM property."""
     state: CimFieldState
     exists: bool
     is_null: bool
@@ -140,29 +140,60 @@ class CimFieldRecord(BaseModel):
         if isinstance(raw, CimFieldRecord):
             return raw
         if isinstance(raw, dict):
-            state_val = raw.get("State") or raw.get("state")
-            if state_val:
-                try:
-                    state_enum = CimFieldState(state_val)
-                except ValueError:
-                    return cls.malformed(raw, str(raw))
-                exists = bool(raw.get("Exists", raw.get("exists", True)))
-                is_null = bool(raw.get("IsNull", raw.get("is_null", False)))
-                val = raw.get("Value", raw.get("value"))
-                str_val = raw.get("StringValue", raw.get("string_value"))
-                t_name = str(raw.get("Type", raw.get("type_name", "String")))
-                return cls(
-                    state=state_enum,
-                    exists=exists,
-                    is_null=is_null,
-                    value=val,
-                    string_value=str_val,
-                    type_name=t_name,
-                )
-            return cls.malformed(raw, str(raw))
+            state_val = raw.get("State")
+            if state_val is None:
+                state_val = raw.get("state")
+            if state_val is None:
+                return cls.malformed(raw, str(raw))
+            try:
+                state_enum = CimFieldState(state_val)
+            except ValueError:
+                return cls.malformed(raw, str(raw))
+
+            exists_raw = raw.get("Exists") if "Exists" in raw else raw.get("exists")
+            if type(exists_raw) is not bool:
+                return cls.malformed(raw, f"Non-boolean Exists field: {exists_raw!r}")
+            exists = exists_raw
+
+            is_null_raw = raw.get("IsNull") if "IsNull" in raw else raw.get("is_null")
+            if type(is_null_raw) is not bool:
+                return cls.malformed(raw, f"Non-boolean IsNull field: {is_null_raw!r}")
+            is_null = is_null_raw
+
+            val = raw.get("Value") if "Value" in raw else raw.get("value")
+            str_val = raw.get("StringValue") if "StringValue" in raw else raw.get("string_value")
+            t_name = str(raw.get("Type") or raw.get("type_name") or "None")
+
+            # Validate consistency between State, Exists, IsNull, Value, StringValue
+            if state_enum == CimFieldState.VALID:
+                if exists is not True or is_null is not False or val is None:
+                    return cls.malformed(val, f"Contradictory VALID state: exists={exists}, is_null={is_null}, value={val!r}")
+                if str_val is not None and not isinstance(str_val, str):
+                    return cls.malformed(val, f"Non-string StringValue for VALID state: {str_val!r}")
+            elif state_enum == CimFieldState.NULL:
+                if exists is not True or is_null is not True or val is not None:
+                    return cls.malformed(val, f"Contradictory NULL state: exists={exists}, is_null={is_null}, value={val!r}")
+                if str_val is not None and str_val != "":
+                    return cls.malformed(val, f"Contradictory NULL state: non-empty string_value={str_val!r}")
+            elif state_enum == CimFieldState.MISSING:
+                if exists is not False or is_null is not True or val is not None:
+                    return cls.malformed(val, f"Contradictory MISSING state: exists={exists}, is_null={is_null}, value={val!r}")
+                if str_val is not None and str_val != "":
+                    return cls.malformed(val, f"Contradictory MISSING state: non-empty string_value={str_val!r}")
+            elif state_enum == CimFieldState.MALFORMED:
+                pass
+
+            return cls(
+                state=state_enum,
+                exists=exists,
+                is_null=is_null,
+                value=val,
+                string_value=str_val,
+                type_name=t_name,
+            )
         if raw is None:
             return cls.null()
-        if isinstance(raw, bool):
+        if type(raw) is bool:
             return cls.valid(raw, "True" if raw else "False", "Boolean")
         if isinstance(raw, (int, float)):
             return cls.valid(raw, str(raw), "Integer" if isinstance(raw, int) else "Float")
@@ -171,6 +202,103 @@ class CimFieldRecord(BaseModel):
         if isinstance(raw, str):
             return cls.valid(raw, raw, "String")
         return cls.valid(raw, str(raw), type(raw).__name__)
+
+
+REQUIRED_ENVELOPE_KEYS = (
+    "SchemaVersion",
+    "Success",
+    "InspectionComplete",
+    "PolicyStore",
+    "Profiles",
+    "Rules",
+    "BypassRules",
+    "Errors",
+)
+
+
+def validate_response_envelope(
+    data: Any,
+    expected_policy_store: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Strictly validates that a response envelope conforms to the versioned NetSecurity schema.
+
+    Requirements:
+    - data is a dict
+    - SchemaVersion: exactly integer 1 (type(SchemaVersion) is int)
+    - Success: actual Boolean (type(Success) is bool)
+    - InspectionComplete: actual Boolean (type(InspectionComplete) is bool)
+    - PolicyStore: string matching expected_policy_store if provided
+    - Profiles: list
+    - Rules: list
+    - BypassRules: list
+    - Errors: list
+    - No required field is null
+    - No contradictory states (Success != InspectionComplete, Success=True with non-empty Errors)
+    """
+    if not isinstance(data, dict):
+        return False, f"Expected response envelope JSON object, got {type(data).__name__}."
+
+    # 1. Missing fields check
+    missing = [k for k in REQUIRED_ENVELOPE_KEYS if k not in data]
+    if missing:
+        return False, f"Incomplete response envelope: missing required fields {missing}."
+
+    # 2. Null values check
+    null_keys = [k for k in REQUIRED_ENVELOPE_KEYS if data[k] is None]
+    if null_keys:
+        return False, f"Response envelope contains null for required fields: {null_keys}."
+
+    # 3. SchemaVersion validation
+    schema_ver = data["SchemaVersion"]
+    if type(schema_ver) is not int:
+        return False, f"SchemaVersion must be an integer, got {type(schema_ver).__name__}."
+    if schema_ver != 1:
+        return False, f"Unsupported SchemaVersion: {schema_ver} (expected 1)."
+
+    # 4. Success and InspectionComplete boolean validation
+    success = data["Success"]
+    if type(success) is not bool:
+        return False, f"Success must be a boolean, got {type(success).__name__}."
+
+    inspection_complete = data["InspectionComplete"]
+    if type(inspection_complete) is not bool:
+        return False, f"InspectionComplete must be a boolean, got {type(inspection_complete).__name__}."
+
+    # Contradictory success states
+    if success is True and inspection_complete is not True:
+        return False, "Contradictory envelope state: Success is True but InspectionComplete is False."
+    if success is False and inspection_complete is not False:
+        return False, "Contradictory envelope state: Success is False but InspectionComplete is True."
+
+    # 5. PolicyStore validation
+    p_store = data["PolicyStore"]
+    if not isinstance(p_store, str):
+        return False, f"PolicyStore must be a string, got {type(p_store).__name__}."
+    if expected_policy_store:
+        if p_store.strip().lower() != expected_policy_store.strip().lower():
+            return False, f"PolicyStore mismatch: got '{p_store}', expected '{expected_policy_store}'."
+
+    # 6. List fields validation
+    profiles = data["Profiles"]
+    if not isinstance(profiles, list):
+        return False, f"Profiles must be a list, got {type(profiles).__name__}."
+
+    rules = data["Rules"]
+    if not isinstance(rules, list):
+        return False, f"Rules must be a list, got {type(rules).__name__}."
+
+    bypass_rules = data["BypassRules"]
+    if not isinstance(bypass_rules, list):
+        return False, f"BypassRules must be a list, got {type(bypass_rules).__name__}."
+
+    errors = data["Errors"]
+    if not isinstance(errors, list):
+        return False, f"Errors must be a list, got {type(errors).__name__}."
+
+    if success is True and len(errors) > 0:
+        return False, f"Contradictory envelope state: Success is True but Errors is non-empty: {errors}."
+
+    return True, "Response envelope is valid."
 
 
 class SecurityStatus(BaseModel):
@@ -898,32 +1026,36 @@ def parse_netsh_rule_blocks(output: str) -> list[FirewallRuleInfo]:
     return rules
 
 
-def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
+def parse_powershell_rules_json(
+    data: Any,
+    expected_policy_store: Optional[str] = None,
+) -> list[FirewallRuleInfo]:
     """Parses JSON rule objects from PowerShell into FirewallRuleInfo list.
 
     Enforces:
-    - SchemaVersion check when response envelope is present (must equal 1).
-    - Rejects null or non-list Rules property in envelope.
+    - Complete response envelope validation when an envelope dictionary is provided.
+    - SchemaVersion check (must equal integer 1).
+    - Requires all 8 envelope fields: SchemaVersion, Success, InspectionComplete, PolicyStore,
+      Profiles, Rules, BypassRules, Errors.
+    - Rejects null, non-list, or missing Rules property in envelope.
+    - Rejects policy store mismatches when expected_policy_store is given.
     - Lossless deserialization of structured CimFieldRecord representations.
     - Strict singular NetSecurity property names (LocalUser, RemoteUser, RemoteMachine).
       Deprecated plural property names in incoming payloads do NOT map to singular fields and fail closed.
     - Preserves field-state distinctions: VALID, NULL, MISSING, MALFORMED.
     """
-    if not data:
+    if data is None:
         return []
 
     if isinstance(data, dict):
-        if "SchemaVersion" in data and data["SchemaVersion"] != 1:
-            raise FirewallParseError(f"Unsupported schema version: {data['SchemaVersion']} (expected 1).")
-
-        if "Rules" in data:
+        if any(k in data for k in ("SchemaVersion", "Success", "InspectionComplete", "PolicyStore", "Profiles", "Rules", "BypassRules", "Errors")):
+            ok, err = validate_response_envelope(data, expected_policy_store=expected_policy_store)
+            if not ok:
+                raise FirewallParseError(err)
+            if data.get("Success") is not True or data.get("InspectionComplete") is not True:
+                errs = data.get("Errors", [])
+                raise FirewallParseError(f"PowerShell inspection reported failure envelope: {errs}")
             raw_list = data["Rules"]
-            if raw_list is None:
-                raise FirewallParseError("Rules property is missing or null in response envelope.")
-            if not isinstance(raw_list, list):
-                raise FirewallParseError(f"Rules property must be a list, got {type(raw_list).__name__}.")
-        elif "Success" in data and "InspectionComplete" in data:
-            raise FirewallParseError("Incomplete response envelope: Rules property is missing.")
         else:
             raw_list = [data]
     elif isinstance(data, list):
@@ -1214,6 +1346,7 @@ try {
         Success = $true
         InspectionComplete = $true
         PolicyStore = $store
+        Profiles = @()
         Rules = $rules
         BypassRules = @()
         Errors = @()
@@ -1224,6 +1357,7 @@ try {
         Success = $false
         InspectionComplete = $false
         PolicyStore = $store
+        Profiles = @()
         Rules = @()
         BypassRules = @()
         Errors = @($_.Exception.Message)
@@ -1294,28 +1428,21 @@ try {
                 policy_store=policy_store,
             )
 
-        if not isinstance(data, dict):
+        ok, err = validate_response_envelope(data, expected_policy_store=policy_store)
+        if not ok:
+            s_ver = data.get("SchemaVersion") if isinstance(data, dict) and type(data.get("SchemaVersion")) is int else 1
             return FirewallQueryResult(
-                schema_version=1,
+                schema_version=s_ver,
                 success=False,
                 inspection_complete=False,
                 rules=[],
-                error="PowerShell response envelope is missing (expected JSON object).",
-                policy_store=policy_store,
-            )
-
-        if "Success" not in data or "InspectionComplete" not in data or "Rules" not in data:
-            return FirewallQueryResult(
-                schema_version=1,
-                success=False,
-                inspection_complete=False,
-                rules=[],
-                error="Incomplete PowerShell response envelope: missing required fields.",
+                error=f"PowerShell response envelope validation failed: {err}",
+                errors=[err],
                 policy_store=policy_store,
             )
 
         if data.get("Success") is not True or data.get("InspectionComplete") is not True:
-            err_detail = "; ".join(data.get("Errors", [])) or data.get("Error") or "Inspection not marked complete by PowerShell."
+            err_detail = "; ".join(data.get("Errors", [])) or "Inspection not marked complete by PowerShell."
             return FirewallQueryResult(
                 schema_version=data.get("SchemaVersion", 1),
                 success=False,
@@ -1327,7 +1454,7 @@ try {
             )
 
         try:
-            parsed_rules = parse_powershell_rules_json(data)
+            parsed_rules = parse_powershell_rules_json(data, expected_policy_store=policy_store)
         except FirewallParseError as parse_err:
             return FirewallQueryResult(
                 schema_version=data.get("SchemaVersion", 1),
@@ -1367,6 +1494,143 @@ try {
         )
 
 
+def build_activestore_inspection_powershell_script() -> str:
+    """Builds the canonical ActiveStore PowerShell inspection script.
+
+    Inspects:
+    1. ActiveStore Firewall Profiles (Name, Enabled, AllowLocalFirewallRules).
+    2. ActiveStore rules matching Tsukiko rule name, stable ID, or group using Get-RuleCimRecord.
+    3. ActiveStore Outbound Allow Bypass Discovery using NetSecurity security-filter query
+       capabilities to enumerate rules with OverrideBlockRules=True, then establishing applicability
+       to the Tsukiko executable or unrestricted AllPrograms scope.
+    4. Serializes complete versioned response envelope (SchemaVersion: 1).
+    """
+    return PS_CIM_SERIALIZER_SNIPPET + """
+$targetRuleName = $env:TSUKIKO_TARGET_RULE_NAME
+$targetGroup = $env:TSUKIKO_TARGET_GROUP
+$stableId = $env:TSUKIKO_STABLE_RULE_ID
+$targetExe = $env:TSUKIKO_TARGET_EXE
+$ErrorActionPreference = 'Stop'
+
+try {
+    $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Select-Object Name, Enabled, AllowLocalFirewallRules)
+
+    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {
+        $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $targetGroup
+    } | ForEach-Object {
+        Get-RuleCimRecord $_
+    })
+
+    # ActiveStore Outbound Allow Bypass Discovery:
+    # Query all security filters in ActiveStore with OverrideBlockRules=True without error suppression
+    $bypassRules = @()
+    $secFilterCandidates = @()
+    try {
+        $secFilterCandidates = @(Get-NetFirewallSecurityFilter -PolicyStore ActiveStore -OverrideBlockRules $true -ErrorAction Stop)
+    } catch [Microsoft.PowerShell.Cmdletization.Cim.CimJobException] {
+        if ($_.FullyQualifiedErrorId -like "CmdletizationQuery_NotFound*") {
+            $secFilterCandidates = @()
+        } else {
+            throw
+        }
+    }
+
+    foreach ($sec in $secFilterCandidates) {
+        $assocRules = @(Get-NetFirewallRule -AssociatedNetFirewallSecurityFilter $sec -PolicyStore ActiveStore -ErrorAction Stop)
+        if ($assocRules.Count -ne 1) {
+            throw "Association integrity violation: Security filter '$($sec.InstanceID)' has $($assocRules.Count) associated rules (expected exactly 1)"
+        }
+        $cr = $assocRules[0]
+
+        $isEnabled = ($cr.Enabled -eq 1 -or $cr.Enabled -eq $true -or $cr.Enabled -eq 'True')
+        $isOutbound = ($cr.Direction -eq 2 -or $cr.Direction -eq 'Outbound' -or $cr.Direction -eq 'Out')
+        $isAllow = ($cr.Action -eq 2 -or $cr.Action -eq 'Allow')
+
+        if (-not ($isEnabled -and $isOutbound -and $isAllow)) {
+            continue
+        }
+
+        $secCheck = @($cr | Get-NetFirewallSecurityFilter -ErrorAction Stop)
+        if ($secCheck.Count -ne 1) {
+            throw "Association integrity violation: Bypass candidate rule '$($cr.Name)' has $($secCheck.Count) security filters (expected exactly 1)"
+        }
+        if ($secCheck[0].OverrideBlockRules -ne $true -and $secCheck[0].OverrideBlockRules -ne 1) {
+            throw "Security filter OverrideBlockRules mismatch for candidate rule '$($cr.Name)'"
+        }
+
+        $appFilters = @($cr | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+        if ($appFilters.Count -ne 1) {
+            throw "Association integrity violation: Bypass candidate rule '$($cr.Name)' has $($appFilters.Count) application filters (expected exactly 1)"
+        }
+        $app = $appFilters[0]
+
+        $prog = [string]$app.Program
+        $pkg = [string]$app.Package
+
+        if ($prog -like "*?*" -or ($prog.Contains("*") -and $prog -ne "*")) {
+            throw "Ambiguous application filter pattern in bypass candidate rule '$($cr.Name)': '$prog'"
+        }
+
+        $applies = $false
+        $scope = ""
+
+        $normTargetExe = if ($targetExe) { $targetExe.Trim().ToLower() } else { "" }
+        $normProg = $prog.Trim().ToLower()
+
+        if ($normProg -ne "" -and $normProg -ne "any" -and $normProg -ne "*") {
+            if ($normTargetExe -ne "" -and $normProg -eq $normTargetExe) {
+                $applies = $true
+                $scope = "ExactExecutable"
+            } else {
+                $applies = $false
+            }
+        } else {
+            if ($pkg.Trim() -ne "") {
+                $applies = $false
+            } else {
+                $applies = $true
+                $scope = "AllPrograms"
+            }
+        }
+
+        if ($applies) {
+            $bypassRules += [PSCustomObject]@{
+                Name = [string]$cr.Name
+                DisplayName = [string]$cr.DisplayName
+                Program = if ($prog) { [string]$prog } else { "Any" }
+                Package = if ($pkg) { [string]$pkg } else { $null }
+                Scope = $scope
+                OverrideBlockRules = $true
+            }
+        }
+    }
+
+    [PSCustomObject]@{
+        SchemaVersion = 1
+        Success = $true
+        InspectionComplete = $true
+        PolicyStore = "ActiveStore"
+        Profiles = $profiles
+        Rules = $rules
+        BypassRules = $bypassRules
+        Errors = @()
+    } | ConvertTo-Json -Depth 6
+} catch {
+    [PSCustomObject]@{
+        SchemaVersion = 1
+        Success = $false
+        InspectionComplete = $false
+        PolicyStore = "ActiveStore"
+        Profiles = @()
+        Rules = @()
+        BypassRules = @()
+        Errors = @($_.Exception.Message)
+    } | ConvertTo-Json -Depth 3
+    exit 1
+}
+"""
+
+
 def verify_effective_firewall_policy(
     executable_path: Path | str,
     rule_name: str = DEFAULT_RULE_NAME,
@@ -1402,71 +1666,7 @@ def verify_effective_firewall_policy(
     except Exception as e:
         return False, f"Invalid target executable path: {e}"
 
-    ps_script = PS_CIM_SERIALIZER_SNIPPET + """
-$targetRuleName = $env:TSUKIKO_TARGET_RULE_NAME
-$targetGroup = $env:TSUKIKO_TARGET_GROUP
-$stableId = $env:TSUKIKO_STABLE_RULE_ID
-$targetExe = $env:TSUKIKO_TARGET_EXE
-$ErrorActionPreference = 'Stop'
-
-try {
-    $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Select-Object Name, Enabled, AllowLocalFirewallRules)
-
-    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {
-        $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $targetGroup
-    } | ForEach-Object {
-        Get-RuleCimRecord $_
-    })
-
-    # ActiveStore Outbound Allow Bypass evaluation:
-    # Query any active Outbound Allow rules targeting the dedicated executable with OverrideBlockRules == $true
-    $bypassRules = @()
-    if ($targetExe) {
-        $matchingApps = @(Get-NetFirewallApplicationFilter -PolicyStore ActiveStore -Program $targetExe -ErrorAction SilentlyContinue)
-        if ($matchingApps.Count -gt 0) {
-            $candidateRules = @($matchingApps | Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
-            foreach ($cr in $candidateRules) {
-                if (($cr.Enabled -eq $true -or $cr.Enabled -eq 1) -and
-                    ($cr.Direction -eq 'Outbound' -or $cr.Direction -eq 2 -or $cr.Direction -eq 'Out') -and
-                    ($cr.Action -eq 'Allow' -or $cr.Action -eq 2)) {
-                    $secFilters = @(Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $cr -ErrorAction SilentlyContinue)
-                    if ($secFilters.Count -gt 0 -and ($secFilters[0].OverrideBlockRules -eq $true -or $secFilters[0].OverrideBlockRules -eq 1)) {
-                        $bypassRules += [PSCustomObject]@{
-                            Name = [string]$cr.Name
-                            DisplayName = [string]$cr.DisplayName
-                            Program = $targetExe
-                            OverrideBlockRules = $true
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    [PSCustomObject]@{
-        SchemaVersion = 1
-        Success = $true
-        InspectionComplete = $true
-        PolicyStore = "ActiveStore"
-        Profiles = $profiles
-        Rules = $rules
-        BypassRules = $bypassRules
-        Errors = @()
-    } | ConvertTo-Json -Depth 6
-} catch {
-    [PSCustomObject]@{
-        SchemaVersion = 1
-        Success = $false
-        InspectionComplete = $false
-        PolicyStore = "ActiveStore"
-        Profiles = @()
-        Rules = @()
-        BypassRules = @()
-        Errors = @($_.Exception.Message)
-    } | ConvertTo-Json -Depth 3
-    exit 1
-}
-"""
+    ps_script = build_activestore_inspection_powershell_script()
     env = os.environ.copy()
     env["TSUKIKO_TARGET_RULE_NAME"] = rule_name
     env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
@@ -1507,23 +1707,16 @@ try {
         except json.JSONDecodeError as e:
             return False, f"Malformed PowerShell output: unable to parse JSON: {e}"
 
-        if not isinstance(data, dict):
-            return False, "ActiveStore response envelope is missing (expected JSON object)."
-
-        if "Success" not in data or "InspectionComplete" not in data:
-            return False, "Incomplete ActiveStore response envelope: missing Success/InspectionComplete."
+        ok, err = validate_response_envelope(data, expected_policy_store="ActiveStore")
+        if not ok:
+            return False, f"PowerShell ActiveStore response envelope validation failed: {err}"
 
         if data.get("Success") is not True or data.get("InspectionComplete") is not True:
-            err_detail = "; ".join(data.get("Errors", [])) or data.get("Error") or "ActiveStore inspection failed."
+            err_detail = "; ".join(data.get("Errors", [])) or "ActiveStore inspection failed."
             return False, f"ActiveStore inspection failed: {err_detail}"
-
-        if data.get("SchemaVersion", 1) != 1:
-            return False, f"Unsupported ActiveStore schema version: {data.get('SchemaVersion')}"
 
         # 1. Verify Profiles in ActiveStore
         profiles_raw = data.get("Profiles", [])
-        if isinstance(profiles_raw, dict):
-            profiles_raw = [profiles_raw]
         if not profiles_raw:
             return False, "No profile information returned from ActiveStore query."
 
@@ -1550,17 +1743,24 @@ try {
         # 2. Check Outbound Allow Bypass Rules
         bypass_rules = data.get("BypassRules", [])
         if bypass_rules:
-            first_bypass = bypass_rules[0]
-            bp_name = first_bypass.get("DisplayName") or first_bypass.get("Name") or "Unknown Rule"
+            bypass_descriptions = []
+            for b in bypass_rules:
+                if isinstance(b, dict):
+                    b_name = b.get("DisplayName") or b.get("Name") or "Unknown"
+                    b_scope = b.get("Scope") or "Unknown"
+                    b_prog = b.get("Program") or "Any"
+                    bypass_descriptions.append(f"'{b_name}' (Scope: {b_scope}, Program: {b_prog})")
+                else:
+                    bypass_descriptions.append(str(b))
             return (
                 False,
-                f"Conflicting outbound bypass Allow rule '{bp_name}' with OverrideBlockRules=True "
+                f"Conflicting outbound bypass Allow rule(s) {', '.join(bypass_descriptions)} with OverrideBlockRules=True "
                 f"detected in ActiveStore for target executable '{resolved_exe}'. Outbound block is overridden."
             )
 
         # 3. Verify Rules in ActiveStore
         try:
-            rules = parse_powershell_rules_json(data)
+            rules = parse_powershell_rules_json(data, expected_policy_store="ActiveStore")
         except FirewallParseError as parse_err:
             return False, f"ActiveStore rule parsing failed: {parse_err}"
 

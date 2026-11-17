@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -24,6 +26,7 @@ from app.core.privacy.windows_firewall import (
     RULE_GROUPING,
     RULE_OWNERSHIP_MARKER,
     STABLE_RULE_ID,
+    PS_CIM_SERIALIZER_SNIPPET,
     CimFieldRecord,
     CimFieldState,
     FirewallParseError,
@@ -45,16 +48,28 @@ from app.core.privacy.windows_firewall import (
     validate_firewall_filters,
     validate_firewall_profiles,
     validate_pe_structure,
+    validate_response_envelope,
     verify_effective_firewall_policy,
     verify_firewall_rule,
 )
 
 
+_REAL_SHUTIL_WHICH = shutil.which
+
+
 @pytest.fixture(autouse=True)
 def mock_windows_env():
     """Ensure Windows Firewall unit tests run consistently across all platforms."""
+    def _custom_which(cmd: str):
+        real = _REAL_SHUTIL_WHICH(cmd)
+        if real:
+            return real
+        if "powershell" in cmd.lower():
+            return "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        return f"C:\\Windows\\System32\\{cmd}.exe"
+
     with patch("platform.system", return_value="Windows"), \
-         patch("shutil.which", side_effect=lambda cmd: f"C:\\Windows\\System32\\{cmd}.exe"):
+         patch("shutil.which", side_effect=_custom_which):
         yield
 
 
@@ -456,6 +471,7 @@ def _make_powershell_query_json(
         "Success": success,
         "InspectionComplete": inspection_complete,
         "PolicyStore": policy_store,
+        "Profiles": [],
         "Rules": full_rules,
         "BypassRules": bypass_rules or [],
         "Errors": errors if errors is not None else ([error] if error else []),
@@ -1499,27 +1515,31 @@ def test_query_matching_firewall_rules_missing_envelope_fails_closed():
         res = query_matching_firewall_rules(DEFAULT_RULE_NAME)
         assert res.success is False
         assert res.inspection_complete is False
-        assert "missing" in res.error
+        assert "response envelope" in res.error.lower() or "missing" in res.error.lower()
 
 
 def test_query_matching_firewall_rules_incomplete_envelope_fails_closed():
     """Incomplete envelope missing required fields fails closed."""
-    bad_env = json.dumps({"Rules": []})  # missing Success and InspectionComplete
+    bad_env = json.dumps({"Rules": []})  # missing required fields
     mock_proc = subprocess.CompletedProcess(args=["powershell"], returncode=0, stdout=bad_env)
     with patch("subprocess.run", return_value=mock_proc):
         res = query_matching_firewall_rules(DEFAULT_RULE_NAME)
         assert res.success is False
         assert res.inspection_complete is False
-        assert "Incomplete PowerShell response envelope" in res.error
+        assert "incomplete" in res.error.lower() or "missing required fields" in res.error.lower()
 
 
 def test_query_matching_firewall_rules_envelope_failure_fails_closed():
     """Envelope explicitly reporting failure fails closed."""
     fail_env = json.dumps({
+        "SchemaVersion": 1,
         "Success": False,
         "InspectionComplete": False,
+        "PolicyStore": "PersistentStore",
+        "Profiles": [],
         "Rules": [],
-        "Error": "NetSecurity CIM provider crashed",
+        "BypassRules": [],
+        "Errors": ["NetSecurity CIM provider crashed"],
     })
     mock_proc = subprocess.CompletedProcess(args=["powershell"], returncode=0, stdout=fail_env)
     with patch("subprocess.run", return_value=mock_proc):
@@ -2074,7 +2094,7 @@ def test_defect_c_activestore_incomplete_envelope(temp_dir):
     with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=incomplete_json)):
         ok, reason = verify_effective_firewall_policy(dedicated)
         assert ok is False
-        assert "Incomplete ActiveStore response envelope" in reason
+        assert "response envelope" in reason.lower() or "missing required fields" in reason.lower()
 
 
 def test_defect_c_create_firewall_rule_refuses_when_pre_creation_incomplete(temp_dir):
@@ -2143,14 +2163,16 @@ def test_activestore_bypass_outbound_allow_override_block_rules_rejects(temp_dir
             "Name": "Admin_Bypass_Allow",
             "DisplayName": "Admin Bypass Allow",
             "Program": str(dedicated.resolve()),
+            "Scope": "ExactExecutable",
             "OverrideBlockRules": True,
         }],
     )
     with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
         ok, reason = verify_effective_firewall_policy(dedicated)
         assert ok is False
-        assert "Conflicting outbound bypass Allow rule 'Admin Bypass Allow'" in reason
-        assert "OverrideBlockRules=True detected in ActiveStore" in reason
+        assert "Conflicting outbound bypass Allow rule" in reason
+        assert "Admin Bypass Allow" in reason
+        assert "OverrideBlockRules=True" in reason
 
 
 def test_filter_association_count_mismatch_fails_closed():
@@ -2162,6 +2184,8 @@ def test_filter_association_count_mismatch_fails_closed():
             "SchemaVersion": 1,
             "Success": False,
             "InspectionComplete": False,
+            "PolicyStore": "PersistentStore",
+            "Profiles": [],
             "Rules": [],
             "BypassRules": [],
             "Errors": ["Application filter association integrity failure for rule 'TestRule': expected 1 filter object, got 2"],
@@ -2181,18 +2205,22 @@ def test_envelope_unsupported_schema_version_fails_closed():
         "SchemaVersion": 2,
         "Success": True,
         "InspectionComplete": True,
+        "PolicyStore": "PersistentStore",
+        "Profiles": [],
         "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
     })
     with pytest.raises(FirewallParseError) as exc:
         parse_powershell_rules_json(json.loads(bad_schema_json))
-    assert "Unsupported schema version: 2" in str(exc.value)
+    assert "Unsupported SchemaVersion: 2" in str(exc.value)
 
     mock_proc = subprocess.CompletedProcess(args=["powershell"], returncode=0, stdout=bad_schema_json)
     with patch("subprocess.run", return_value=mock_proc):
         res = query_matching_firewall_rules(DEFAULT_RULE_NAME)
         assert res.success is False
         assert res.inspection_complete is False
-        assert "Unsupported schema version" in res.error
+        assert "Unsupported SchemaVersion" in res.error
 
 
 def test_envelope_missing_or_null_rules_fails_closed():
@@ -2201,21 +2229,29 @@ def test_envelope_missing_or_null_rules_fails_closed():
         "SchemaVersion": 1,
         "Success": True,
         "InspectionComplete": True,
+        "PolicyStore": "PersistentStore",
+        "Profiles": [],
         "Rules": None,
+        "BypassRules": [],
+        "Errors": [],
     })
     with pytest.raises(FirewallParseError) as exc:
         parse_powershell_rules_json(json.loads(null_rules))
-    assert "Rules property is missing or null" in str(exc.value)
+    assert "contains null for required fields" in str(exc.value)
 
     invalid_type_rules = json.dumps({
         "SchemaVersion": 1,
         "Success": True,
         "InspectionComplete": True,
+        "PolicyStore": "PersistentStore",
+        "Profiles": [],
         "Rules": "invalid_not_a_list",
+        "BypassRules": [],
+        "Errors": [],
     })
     with pytest.raises(FirewallParseError) as exc:
         parse_powershell_rules_json(json.loads(invalid_type_rules))
-    assert "Rules property must be a list" in str(exc.value)
+    assert "Rules must be a list" in str(exc.value)
 
 
 def test_query_matching_firewall_rules_without_powershell_fails_closed():
@@ -2265,5 +2301,606 @@ def test_validate_firewall_filters_rejects_restricted_icmp_and_dynamic_target(te
     ok, msg = validate_firewall_filters(r2, dedicated)
     assert ok is False
     assert "restricts dynamic target" in msg
+
+
+# =====================================================================
+# 16. Comprehensive Acceptance Regression Tests (Bypass, Envelope, CIM)
+# =====================================================================
+
+def test_bypass_exact_executable_outbound_allow_rejects(temp_dir):
+    """Exact executable-specific outbound Allow bypass rule in ActiveStore rejects os_policy_active."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[{
+            "Name": "Bypass_Exact_Tsukiko",
+            "DisplayName": "Bypass Exact Tsukiko",
+            "Program": str(dedicated.resolve()),
+            "Scope": "ExactExecutable",
+            "OverrideBlockRules": True,
+        }],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Bypass Exact Tsukiko" in reason
+        assert "OverrideBlockRules=True" in reason
+
+
+def test_bypass_all_programs_outbound_allow_rejects(temp_dir):
+    """Unrestricted All-Programs outbound Allow bypass rule in ActiveStore rejects os_policy_active."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[{
+            "Name": "Global_Allow_Bypass",
+            "DisplayName": "Global Allow Bypass",
+            "Program": "Any",
+            "Scope": "AllPrograms",
+            "OverrideBlockRules": True,
+        }],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Global Allow Bypass" in reason
+        assert "AllPrograms" in reason
+
+
+def test_bypass_unrelated_executable_allowed_tsukiko_accepted(temp_dir):
+    """Unrelated executable-specific bypass does NOT invalidate Tsukiko's outbound policy."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    # When unrelated bypass rule exists on the system (e.g. for svchost.exe),
+    # the PowerShell bypass discovery identifies that it does not apply to Tsukiko,
+    # so bypass_rules is empty for Tsukiko.
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is True
+        assert "Effective Windows Firewall policy verified" in reason
+
+
+def test_bypass_application_filter_cmdlet_failure_fails_closed(temp_dir):
+    """Application-filter cmdlet failure during bypass discovery propagates to failure envelope."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    fail_json = json.dumps({
+        "SchemaVersion": 1,
+        "Success": False,
+        "InspectionComplete": False,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": ["Get-NetFirewallApplicationFilter : Access is denied"],
+    })
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=fail_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Access is denied" in reason or "ActiveStore inspection failed" in reason
+
+
+def test_bypass_rule_query_failure_fails_closed(temp_dir):
+    """Rule query failure during bypass discovery propagates to failure envelope."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    fail_json = json.dumps({
+        "SchemaVersion": 1,
+        "Success": False,
+        "InspectionComplete": False,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": ["Get-NetFirewallRule : RPC server unavailable"],
+    })
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=fail_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "RPC server unavailable" in reason or "ActiveStore inspection failed" in reason
+
+
+def test_bypass_security_filter_cmdlet_failure_fails_closed(temp_dir):
+    """Security-filter cmdlet failure during bypass discovery propagates to failure envelope."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    fail_json = json.dumps({
+        "SchemaVersion": 1,
+        "Success": False,
+        "InspectionComplete": False,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": ["Get-NetFirewallSecurityFilter : Cannot query ActiveStore"],
+    })
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=fail_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Cannot query ActiveStore" in reason or "ActiveStore inspection failed" in reason
+
+
+def test_bypass_zero_associated_security_filters_fails_closed(temp_dir):
+    """Zero associated security filters for a candidate rule causes association integrity failure."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    fail_json = json.dumps({
+        "SchemaVersion": 1,
+        "Success": False,
+        "InspectionComplete": False,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": ["Association integrity violation: Bypass candidate rule 'RuleX' has 0 security filters (expected exactly 1)"],
+    })
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=fail_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Association integrity violation" in reason
+
+
+def test_bypass_multiple_associated_security_filters_fails_closed(temp_dir):
+    """Multiple associated security filters for a candidate rule causes association integrity failure."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    fail_json = json.dumps({
+        "SchemaVersion": 1,
+        "Success": False,
+        "InspectionComplete": False,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": ["Association integrity violation: Bypass candidate rule 'RuleY' has 2 security filters (expected exactly 1)"],
+    })
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=fail_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Association integrity violation" in reason
+
+
+def test_bypass_malformed_response_fails_closed(temp_dir):
+    """Malformed or non-list BypassRules in response envelope fails validation."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    malformed_json = json.dumps({
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [
+            {"Name": "Domain", "Enabled": 1, "AllowLocalFirewallRules": 1},
+            {"Name": "Private", "Enabled": 1, "AllowLocalFirewallRules": 1},
+            {"Name": "Public", "Enabled": 1, "AllowLocalFirewallRules": 1},
+        ],
+        "Rules": [],
+        "BypassRules": "not_a_list",
+        "Errors": [],
+    })
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=malformed_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "BypassRules must be a list" in reason
+
+
+# --- Response Envelope Schema Tests ---
+
+def test_envelope_missing_schema_version_fails_closed():
+    """Missing SchemaVersion key in response envelope is strictly rejected."""
+    env = {
+        "Success": True,
+        "InspectionComplete": True,
+        "PolicyStore": "PersistentStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env, expected_policy_store="PersistentStore")
+    assert ok is False
+    assert "missing required fields" in err
+    assert "SchemaVersion" in err
+
+    with pytest.raises(FirewallParseError) as exc:
+        parse_powershell_rules_json(env, expected_policy_store="PersistentStore")
+    assert "missing required fields" in str(exc.value)
+
+
+def test_envelope_missing_policy_store_fails_closed():
+    """Missing PolicyStore key in response envelope is strictly rejected."""
+    env = {
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env)
+    assert ok is False
+    assert "missing required fields" in err
+    assert "PolicyStore" in err
+
+
+def test_envelope_policy_store_mismatch_fails_closed():
+    """PolicyStore mismatch between envelope and expected store is strictly rejected."""
+    env = {
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "PolicyStore": "PersistentStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env, expected_policy_store="ActiveStore")
+    assert ok is False
+    assert "PolicyStore mismatch" in err
+    assert "PersistentStore" in err
+    assert "ActiveStore" in err
+
+
+def test_envelope_missing_bypass_rules_fails_closed():
+    """Missing BypassRules key in response envelope is strictly rejected."""
+    env = {
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env, expected_policy_store="ActiveStore")
+    assert ok is False
+    assert "missing required fields" in err
+    assert "BypassRules" in err
+
+
+def test_envelope_missing_profiles_fails_closed():
+    """Missing Profiles key in response envelope is strictly rejected."""
+    env = {
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "PolicyStore": "ActiveStore",
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env, expected_policy_store="ActiveStore")
+    assert ok is False
+    assert "missing required fields" in err
+    assert "Profiles" in err
+
+
+def test_envelope_null_field_fails_closed():
+    """Null values for any required envelope fields are strictly rejected."""
+    for field in ["SchemaVersion", "Success", "InspectionComplete", "PolicyStore", "Profiles", "Rules", "BypassRules", "Errors"]:
+        env = {
+            "SchemaVersion": 1,
+            "Success": True,
+            "InspectionComplete": True,
+            "PolicyStore": "ActiveStore",
+            "Profiles": [],
+            "Rules": [],
+            "BypassRules": [],
+            "Errors": [],
+        }
+        env[field] = None
+        ok, err = validate_response_envelope(env, expected_policy_store="ActiveStore")
+        assert ok is False
+        assert f"contains null for required fields: ['{field}']" in err
+
+
+def test_envelope_incorrect_type_fails_closed():
+    """Incorrect types for envelope fields (e.g. non-bool Success, non-int SchemaVersion) are rejected."""
+    bad_types = [
+        ("SchemaVersion", "1", "must be an integer"),
+        ("SchemaVersion", True, "must be an integer"),
+        ("Success", 1, "must be a boolean"),
+        ("Success", "True", "must be a boolean"),
+        ("InspectionComplete", 0, "must be a boolean"),
+        ("PolicyStore", 123, "must be a string"),
+        ("Profiles", "not_a_list", "must be a list"),
+        ("Rules", "not_a_list", "must be a list"),
+        ("BypassRules", "not_a_list", "must be a list"),
+        ("Errors", "not_a_list", "must be a list"),
+    ]
+    for field, bad_val, exp_msg in bad_types:
+        env = {
+            "SchemaVersion": 1,
+            "Success": True,
+            "InspectionComplete": True,
+            "PolicyStore": "ActiveStore",
+            "Profiles": [],
+            "Rules": [],
+            "BypassRules": [],
+            "Errors": [],
+        }
+        env[field] = bad_val
+        ok, err = validate_response_envelope(env, expected_policy_store="ActiveStore")
+        assert ok is False
+        assert exp_msg in err
+
+
+def test_envelope_inconsistent_success_inspection_complete_fails_closed():
+    """Inconsistent combinations of Success and InspectionComplete are rejected."""
+    env1 = {
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": False,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env1)
+    assert ok is False
+    assert "Contradictory envelope state" in err
+
+    env2 = {
+        "SchemaVersion": 1,
+        "Success": False,
+        "InspectionComplete": True,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": [],
+    }
+    ok, err = validate_response_envelope(env2)
+    assert ok is False
+    assert "Contradictory envelope state" in err
+
+
+def test_envelope_inconsistent_success_errors_fails_closed():
+    """Success=True with a non-empty Errors list is contradictory and rejected."""
+    env = {
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "PolicyStore": "ActiveStore",
+        "Profiles": [],
+        "Rules": [],
+        "BypassRules": [],
+        "Errors": ["Some unexpected error occurred"],
+    }
+    ok, err = validate_response_envelope(env)
+    assert ok is False
+    assert "Success is True but Errors is non-empty" in err
+
+
+# --- CIM Field-State Record Tests ---
+
+def test_cim_record_every_valid_field_state():
+    """CimFieldRecord accurately classifies and represents all valid field states."""
+    rec_val = CimFieldRecord.from_raw({
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": "Any",
+        "StringValue": "Any",
+        "Type": "String",
+    })
+    assert rec_val.state == CimFieldState.VALID
+    assert rec_val.exists is True
+    assert rec_val.is_null is False
+    assert rec_val.value == "Any"
+    assert rec_val.type_name == "String"
+
+    rec_null = CimFieldRecord.from_raw({
+        "State": "PROPERTY_PRESENT_WITH_NULL",
+        "Exists": True,
+        "IsNull": True,
+        "Value": None,
+        "StringValue": None,
+        "Type": "Null",
+    })
+    assert rec_null.state == CimFieldState.NULL
+    assert rec_null.exists is True
+    assert rec_null.is_null is True
+    assert rec_null.value is None
+
+    rec_miss = CimFieldRecord.from_raw({
+        "State": "PROPERTY_MISSING",
+        "Exists": False,
+        "IsNull": True,
+        "Value": None,
+        "StringValue": None,
+        "Type": "None",
+    })
+    assert rec_miss.state == CimFieldState.MISSING
+    assert rec_miss.exists is False
+    assert rec_miss.is_null is True
+
+    rec_mal = CimFieldRecord.from_raw({
+        "State": "PROPERTY_PRESENT_WITH_MALFORMED_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": "invalid",
+        "StringValue": "invalid",
+        "Type": "Malformed",
+    })
+    assert rec_mal.state == CimFieldState.MALFORMED
+
+
+def test_cim_record_missing_and_null_states():
+    """Null and Missing helper factory methods produce correct invariants."""
+    null_rec = CimFieldRecord.null("String")
+    assert null_rec.state == CimFieldState.NULL
+    assert null_rec.exists is True
+    assert null_rec.is_null is True
+    assert null_rec.value is None
+    assert null_rec.type_name == "String"
+
+    miss_rec = CimFieldRecord.missing()
+    assert miss_rec.state == CimFieldState.MISSING
+    assert miss_rec.exists is False
+    assert miss_rec.is_null is True
+    assert miss_rec.value is None
+
+
+def test_cim_record_rejects_non_boolean_exists():
+    """Non-boolean Exists values (e.g. strings, integers) are rejected as malformed without coercion."""
+    for bad_exists in ["True", "False", 1, 0, None, [True]]:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": bad_exists,
+            "IsNull": False,
+            "Value": "Any",
+            "StringValue": "Any",
+            "Type": "String",
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.MALFORMED
+        assert "Non-boolean Exists" in (rec.string_value or "")
+
+
+def test_cim_record_rejects_non_boolean_is_null():
+    """Non-boolean IsNull values are rejected as malformed without coercion."""
+    for bad_null in ["True", "False", 1, 0, None, [False]]:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": bad_null,
+            "Value": "Any",
+            "StringValue": "Any",
+            "Type": "String",
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.MALFORMED
+        assert "Non-boolean IsNull" in (rec.string_value or "")
+
+
+def test_cim_record_rejects_contradictory_combinations():
+    """Contradictory field state combinations are strictly rejected as malformed."""
+    contradictory_cases = [
+        # VALID but exists is False
+        {"State": "PROPERTY_PRESENT_WITH_VALID_VALUE", "Exists": False, "IsNull": False, "Value": "Any"},
+        # VALID but is_null is True
+        {"State": "PROPERTY_PRESENT_WITH_VALID_VALUE", "Exists": True, "IsNull": True, "Value": "Any"},
+        # VALID but value is None
+        {"State": "PROPERTY_PRESENT_WITH_VALID_VALUE", "Exists": True, "IsNull": False, "Value": None},
+        # NULL but is_null is False
+        {"State": "PROPERTY_PRESENT_WITH_NULL", "Exists": True, "IsNull": False, "Value": None},
+        # NULL but value is not None
+        {"State": "PROPERTY_PRESENT_WITH_NULL", "Exists": True, "IsNull": True, "Value": "not_null"},
+        # NULL but string_value is non-empty
+        {"State": "PROPERTY_PRESENT_WITH_NULL", "Exists": True, "IsNull": True, "Value": None, "StringValue": "unexpected"},
+        # MISSING but exists is True
+        {"State": "PROPERTY_MISSING", "Exists": True, "IsNull": True, "Value": None},
+        # MISSING but value is not None
+        {"State": "PROPERTY_MISSING", "Exists": False, "IsNull": True, "Value": "not_null"},
+    ]
+    for case in contradictory_cases:
+        rec = CimFieldRecord.from_raw(case)
+        assert rec.state == CimFieldState.MALFORMED
+        assert "Contradictory" in (rec.string_value or "")
+
+
+def test_cim_record_exact_type_preservation():
+    """Exact CIM types (Boolean, String, UInt16, UInt32, Array, etc.) are preserved in type_name."""
+    types_to_test = ["Boolean", "String", "UInt16", "UInt32", "Integer", "Array", "StringArray"]
+    for t in types_to_test:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": "Any",
+            "StringValue": "Any",
+            "Type": t,
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.VALID
+        assert rec.type_name == t
+
+
+def test_cim_record_roundtrip_serialization_powershell():
+    """When PowerShell is available, verify Get-CimFieldRecord roundtrips genuine booleans, numbers, strings, and nulls."""
+    ps_path = shutil.which("powershell") or shutil.which("powershell.exe")
+    if not ps_path:
+        pytest.skip("PowerShell is not available on PATH")
+
+    test_script = PS_CIM_SERIALIZER_SNIPPET + """
+$testObj = [PSCustomObject]@{
+    TestBool = $true
+    TestInt = 42
+    TestStr = "LoopbackOnly"
+    TestNull = $null
+}
+
+$results = [PSCustomObject]@{
+    BoolRec = Get-CimFieldRecord $testObj "TestBool"
+    IntRec = Get-CimFieldRecord $testObj "TestInt"
+    StrRec = Get-CimFieldRecord $testObj "TestStr"
+    NullRec = Get-CimFieldRecord $testObj "TestNull"
+    MissingRec = Get-CimFieldRecord $testObj "NonExistentProp"
+}
+
+$results | ConvertTo-Json -Depth 3
+"""
+    res = subprocess.run(
+        [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", test_script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout.strip())
+
+    rec_bool = CimFieldRecord.from_raw(data["BoolRec"])
+    assert rec_bool.state == CimFieldState.VALID
+    assert rec_bool.value is True
+    assert type(rec_bool.value) is bool
+
+    rec_int = CimFieldRecord.from_raw(data["IntRec"])
+    assert rec_int.state == CimFieldState.VALID
+    assert rec_int.value == 42
+    assert isinstance(rec_int.value, int)
+
+    rec_str = CimFieldRecord.from_raw(data["StrRec"])
+    assert rec_str.state == CimFieldState.VALID
+    assert rec_str.value == "LoopbackOnly"
+
+    rec_null = CimFieldRecord.from_raw(data["NullRec"])
+    assert rec_null.state == CimFieldState.NULL
+    assert rec_null.value is None
+
+    rec_miss = CimFieldRecord.from_raw(data["MissingRec"])
+    assert rec_miss.state == CimFieldState.MISSING
+    assert rec_miss.exists is False
+
 
 

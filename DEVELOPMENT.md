@@ -53,13 +53,13 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (241 test items: 237 passed, 4 Unix-specific skipped on Windows; all 241 passing on Linux):
+Execute the complete automated test suite (266 test items: 262 passed, 4 Unix-specific skipped on Windows; all 266 passing on Linux):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, filter association integrity (`Count -eq 1`), ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`), precise rule ownership identity, safe deletion by stable internal Name, and structured query result parsing (186 tests).
+* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, strict CIM field-state invariants, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) across exact executable and all-programs scopes without error suppression, precise rule ownership identity, safe deletion by stable internal Name, strict 8-key response envelope validation, and structured query result parsing (211 tests).
 * [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
 * [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
 * [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping (8 tests).
@@ -72,12 +72,12 @@ pytest -v
 ## 5. Dual-Platform CI Matrix
 
 Continuous Integration runs on GitHub Actions across two distinct environments:
-1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (237 passed, 4 Unix-specific skipped).
-2. **Linux (`ubuntu-latest`)**: Validates full 241-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (262 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 266-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
 
 ---
 
-## 5. Wheel Building and Clean Virtual Environment Verification
+## 6. Wheel Building and Clean Virtual Environment Verification
 
 To verify that the application installs and runs correctly outside the source tree:
 
