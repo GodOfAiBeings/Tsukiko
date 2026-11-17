@@ -1,0 +1,411 @@
+"""Tsukiko Local AI Brain — Model Manager.
+
+Coordinates model validation, memory and VRAM budget verification,
+safe GPU offloading, lazy loading, inactivity timeouts, and lifecycle states.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+import threading
+import time
+from typing import Any, Dict, Iterator, List, Optional, Union
+
+from app.core.config.settings import AIConfig, TsukikoConfig, get_config
+from app.core.logging.logger import get_logger
+from app.core.model_manager.engine import (
+    BaseInferenceEngine,
+    DeterministicFakeEngine,
+    LlamaCppInferenceEngine,
+    filter_reasoning_tokens,
+)
+from app.core.model_manager.gguf_parser import (
+    GGUFMetadata,
+    GGUFValidationError,
+    inspect_gguf_file,
+)
+from app.core.model_manager.lifecycle import ModelInfo, ModelLifecycleState
+from app.core.resource_manager.hardware import (
+    HardwareInspector,
+    HardwareProfile,
+    ModelMemoryEstimate,
+)
+
+logger = get_logger("MODEL_MGR")
+
+
+class InsufficientMemoryError(RuntimeError):
+    """Raised when available system RAM or VRAM cannot safely fit the model."""
+    pass
+
+
+class ModelManager:
+    """Manages local LLM lifecycle, validation, hardware budgeting, and inference."""
+
+    def __init__(
+        self,
+        config: Optional[TsukikoConfig] = None,
+        engine: Optional[BaseInferenceEngine] = None,
+    ) -> None:
+        self._config = config or get_config()
+        self._ai_config: AIConfig = self._config.ai
+        self._engine = engine or LlamaCppInferenceEngine(preferred_backend=self._ai_config.backend)
+        self._lock = threading.RLock()
+        self._inactivity_timer: Optional[threading.Timer] = None
+        self._last_activity = time.time()
+        self._metadata: Optional[GGUFMetadata] = None
+
+        self._info = ModelInfo(
+            state=ModelLifecycleState.NOT_CONFIGURED,
+            context_window=self._ai_config.context_window,
+        )
+
+        # Initial inspection of configured model path
+        self.inspect_configured_model()
+
+    @property
+    def info(self) -> ModelInfo:
+        with self._lock:
+            return self._info.model_copy()
+
+    @property
+    def state(self) -> ModelLifecycleState:
+        with self._lock:
+            return self._info.state
+
+    @property
+    def engine(self) -> BaseInferenceEngine:
+        return self._engine
+
+    def set_engine(self, engine: BaseInferenceEngine) -> None:
+        """Injects custom inference engine (e.g. for testing)."""
+        with self._lock:
+            if self._info.is_loaded:
+                self.unload_model()
+            self._engine = engine
+            self._info.backend = engine.backend_name
+
+    def inspect_configured_model(self) -> ModelInfo:
+        """Inspects and validates the currently configured model path."""
+        with self._lock:
+            model_path_str = self._ai_config.model_path
+            if not model_path_str or not str(model_path_str).strip():
+                self._info.state = ModelLifecycleState.NOT_CONFIGURED
+                self._info.error_message = None
+                self._info.model_name = "None"
+                self._info.path = None
+                return self.info
+
+            path = Path(model_path_str).resolve()
+            self._info.path = path
+
+            if not path.exists():
+                self._info.state = ModelLifecycleState.NOT_INSTALLED
+                self._info.error_message = f"Model file not found: {path.name}"
+                self._info.model_name = path.stem
+                return self.info
+
+            self._info.state = ModelLifecycleState.VALIDATING
+            try:
+                metadata = inspect_gguf_file(path)
+                self._metadata = metadata
+                self._info.model_name = metadata.model_name
+                self._info.architecture = metadata.architecture
+                self._info.quantization = metadata.quantization
+                self._info.file_size_mb = metadata.file_size_mb
+                self._info.context_window = min(self._ai_config.context_window, metadata.context_length)
+                self._info.block_count = metadata.block_count
+                self._info.state = ModelLifecycleState.READY
+                self._info.error_message = None
+                self._info.runtime_version = self._engine.get_runtime_version()
+                logger.info(
+                    f"Model validated successfully: {metadata.model_name} "
+                    f"({metadata.quantization}, {metadata.file_size_mb} MB, {metadata.block_count} layers)"
+                )
+            except (GGUFValidationError, Exception) as e:
+                self._info.state = ModelLifecycleState.ERROR
+                self._info.error_message = f"GGUF validation failed: {e}"
+                logger.warning(f"GGUF validation failed for {path.name}: {e}")
+
+            return self.info
+
+    def calculate_offload_strategy(
+        self,
+        hardware: Optional[HardwareProfile] = None,
+    ) -> Dict[str, Any]:
+        """Calculates safe GPU offload layers and memory allocations."""
+        profile = hardware or HardwareInspector.inspect()
+        file_size_mb = self._info.file_size_mb
+        ctx = self._info.context_window
+        total_layers = self._info.block_count or 28
+
+        # 1. RAM Safety Check
+        available_ram = profile.memory.available_ram_mb
+        max_ram_limit = min(self._ai_config.max_ram_mb, available_ram)
+        # Required RAM: weights (if on CPU) + runtime overhead (~500MB)
+        if available_ram < file_size_mb + 400:
+            return {
+                "safe_to_load": False,
+                "reason": (
+                    f"Insufficient system RAM: Available {available_ram} MB is less than "
+                    f"model size ({file_size_mb} MB) + safety headroom (400 MB)."
+                ),
+                "gpu_layers": 0,
+                "backend": "cpu",
+            }
+
+        # 2. VRAM Safety & GPU Offload Check
+        safe_vram_budget = min(self._ai_config.max_vram_mb, profile.recommended_max_vram_mb)
+        cuda_supported = (
+            profile.frameworks.llama_cpp_cuda_supported or isinstance(self._engine, DeterministicFakeEngine)
+        )
+
+        # Force CPU if requested, no CUDA, or budget is zero
+        if self._ai_config.backend == "cpu" or not cuda_supported or safe_vram_budget <= 0:
+            return {
+                "safe_to_load": True,
+                "gpu_layers": 0,
+                "backend": "cpu",
+                "safe_vram_budget_mb": 0,
+                "estimated_vram_mb": 0,
+                "estimated_ram_mb": file_size_mb + 400,
+                "reason": "CPU inference selected or GPU VRAM safe budget is 0 MB.",
+            }
+
+        # Calculate memory footprint
+        footprint: ModelMemoryEstimate = HardwareInspector.estimate_model_vram_footprint(
+            file_size_mb=file_size_mb,
+            context_window=ctx,
+            model_name=self._info.model_name,
+            available_vram_mb=safe_vram_budget,
+        )
+
+        # Configured layers override
+        if self._ai_config.gpu_layers > 0:
+            gpu_layers = min(self._ai_config.gpu_layers, total_layers)
+        elif self._ai_config.gpu_layers == -1:
+            gpu_layers = total_layers if footprint.fits_in_vram else 0
+        else:
+            # Auto-calculate based on safe VRAM budget
+            if footprint.fits_in_vram:
+                gpu_layers = total_layers
+            elif footprint.recommended_offload_strategy == "hybrid_cpu_gpu":
+                mb_per_layer = max(1, file_size_mb / max(1, total_layers))
+                usable_vram = max(0, safe_vram_budget - footprint.runtime_overhead_mb - footprint.estimated_kv_cache_mb)
+                gpu_layers = int(usable_vram / mb_per_layer)
+                gpu_layers = max(0, min(gpu_layers, total_layers))
+            else:
+                gpu_layers = 0
+
+        backend = "cuda" if gpu_layers > 0 else "cpu"
+        estimated_vram = (
+            int((gpu_layers / max(1, total_layers)) * file_size_mb) + footprint.estimated_kv_cache_mb + 400
+            if gpu_layers > 0
+            else 0
+        )
+
+        return {
+            "safe_to_load": True,
+            "gpu_layers": gpu_layers,
+            "backend": backend,
+            "safe_vram_budget_mb": safe_vram_budget,
+            "estimated_vram_mb": estimated_vram,
+            "estimated_ram_mb": file_size_mb + 400 if gpu_layers == 0 else 800,
+            "reason": footprint.details,
+        }
+
+    def load_model(self, force: bool = False) -> bool:
+        """Loads the model into memory/VRAM according to safe hardware constraints."""
+        with self._lock:
+            if self._info.is_loaded and not force:
+                logger.debug("Model is already loaded.")
+                return True
+
+            if self._info.state in (ModelLifecycleState.NOT_CONFIGURED, ModelLifecycleState.NOT_INSTALLED):
+                logger.warning(f"Cannot load model: state is {self._info.state}")
+                return False
+
+            if not self._info.path:
+                return False
+
+            # Inspect if not validated yet
+            if self._info.state != ModelLifecycleState.READY:
+                self.inspect_configured_model()
+                if self._info.state != ModelLifecycleState.READY:
+                    logger.warning(f"Model validation failed before load: {self._info.error_message}")
+                    return False
+
+            offload = self.calculate_offload_strategy()
+            if not offload.get("safe_to_load", False):
+                self._info.state = ModelLifecycleState.ERROR
+                self._info.error_message = offload.get("reason", "Insufficient memory to load model.")
+                logger.error(f"Model load rejected: {self._info.error_message}")
+                return False
+
+            self._info.state = ModelLifecycleState.LOADING
+            gpu_layers = offload["gpu_layers"]
+            backend = offload["backend"]
+            self._info.gpu_layers_offloaded = gpu_layers
+            self._info.backend = backend
+            self._info.estimated_vram_mb = offload.get("estimated_vram_mb", 0)
+            self._info.estimated_ram_mb = offload.get("estimated_ram_mb", 0)
+
+            logger.info(
+                f"Initiating model load for {self._info.model_name}: "
+                f"layers={gpu_layers}, backend={backend}, threads={self._ai_config.threads}"
+            )
+
+            try:
+                self._engine.load(
+                    model_path=self._info.path,
+                    context_window=self._info.context_window,
+                    gpu_layers=gpu_layers,
+                    threads=self._ai_config.threads,
+                )
+                self._info.state = ModelLifecycleState.LOADED
+                self._info.error_message = None
+                self._touch_activity()
+                self._schedule_inactivity_timer()
+                logger.info(f"Model {self._info.model_name} loaded successfully into memory.")
+                return True
+            except Exception as e:
+                self._info.state = ModelLifecycleState.ERROR
+                self._info.error_message = f"Model load failed: {e}"
+                logger.error(f"Failed to load model {self._info.model_name}: {e}")
+                return False
+
+    def unload_model(self) -> bool:
+        """Unloads model weights from memory/VRAM cleanly."""
+        with self._lock:
+            if not self._info.is_loaded:
+                return True
+
+            if self._info.state == ModelLifecycleState.GENERATING:
+                logger.warning("Cannot unload model while generation is active.")
+                return False
+
+            self._info.state = ModelLifecycleState.UNLOADING
+            self._cancel_inactivity_timer()
+
+            try:
+                self._engine.unload()
+                self._info.state = ModelLifecycleState.READY if self._info.path and self._info.path.exists() else ModelLifecycleState.NOT_CONFIGURED
+                self._info.gpu_layers_offloaded = 0
+                self._info.estimated_vram_mb = 0
+                self._info.estimated_ram_mb = 0
+                logger.info("Model unloaded successfully.")
+                return True
+            except Exception as e:
+                self._info.state = ModelLifecycleState.ERROR
+                self._info.error_message = f"Unload failed: {e}"
+                logger.error(f"Error during model unload: {e}")
+                return False
+
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 1024,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        repeat_penalty: Optional[float] = None,
+    ) -> str:
+        """Generates a complete response synchronously with lazy-load support."""
+        tokens: List[str] = []
+        for chunk in self.stream(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repeat_penalty=repeat_penalty,
+        ):
+            tokens.append(chunk)
+        return "".join(tokens)
+
+    def stream(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 1024,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        repeat_penalty: Optional[float] = None,
+    ) -> Iterator[str]:
+        """Streams response tokens with lazy-loading and concurrency protection."""
+        with self._lock:
+            if not self._info.is_loaded:
+                if self._ai_config.lazy_load and self._info.is_ready_or_loaded:
+                    loaded = self.load_model()
+                    if not loaded:
+                        raise RuntimeError(f"Lazy model load failed: {self._info.error_message}")
+                else:
+                    raise RuntimeError("Model is not loaded. Call load_model() first.")
+
+            if self._info.state == ModelLifecycleState.GENERATING:
+                raise RuntimeError("Concurrent generation requests are prohibited.")
+
+            self._info.state = ModelLifecycleState.GENERATING
+            self._touch_activity()
+            self._cancel_inactivity_timer()
+
+        temp = temperature if temperature is not None else self._ai_config.temperature
+        p = top_p if top_p is not None else self._ai_config.top_p
+        rep = repeat_penalty if repeat_penalty is not None else self._ai_config.repeat_penalty
+
+        try:
+            for chunk in self._engine.stream_chat(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temp,
+                top_p=p,
+                repeat_penalty=rep,
+            ):
+                self._touch_activity()
+                yield chunk
+        finally:
+            with self._lock:
+                if self._info.state == ModelLifecycleState.GENERATING:
+                    self._info.state = ModelLifecycleState.LOADED
+                self._schedule_inactivity_timer()
+
+    def cancel_generation(self) -> None:
+        """Cancels any actively running generation."""
+        logger.info("Cancelling active model generation...")
+        self._engine.cancel()
+
+    def shutdown(self) -> None:
+        """Releases all resources, halts timers, and shuts down."""
+        with self._lock:
+            self._cancel_inactivity_timer()
+            self.cancel_generation()
+            self.unload_model()
+
+    def _touch_activity(self) -> None:
+        self._last_activity = time.time()
+        self._info.last_activity_timestamp = self._last_activity
+
+    def _schedule_inactivity_timer(self) -> None:
+        self._cancel_inactivity_timer()
+        timeout = self._ai_config.unload_timeout_seconds
+        if timeout <= 0 or not self._info.is_loaded:
+            return
+
+        def _on_timeout() -> None:
+            with self._lock:
+                if not self._info.is_loaded or self._info.state == ModelLifecycleState.GENERATING:
+                    return
+                elapsed = time.time() - self._last_activity
+                if elapsed >= timeout:
+                    logger.info(f"Model inactive for {int(elapsed)}s (timeout={timeout}s). Auto-unloading...")
+                    self.unload_model()
+                else:
+                    # Reschedule for remaining time
+                    self._schedule_inactivity_timer()
+
+        self._inactivity_timer = threading.Timer(timeout, _on_timeout)
+        self._inactivity_timer.daemon = True
+        self._inactivity_timer.start()
+
+    def _cancel_inactivity_timer(self) -> None:
+        if self._inactivity_timer is not None:
+            self._inactivity_timer.cancel()
+            self._inactivity_timer = None

@@ -37,9 +37,9 @@ Tsukiko is engineered from first principles for:
 | **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
 | **Packaging & Distribution** | **Implemented & Tested** | Genuine wheel build, isolated venv installation, out-of-tree CLI execution, and resource isolation verified. Verified in `tests/test_packaging.py` (3 tests). |
 | **Continuous Integration (CI)** | **Implemented & Tested** | Windows 11 / Python 3.11 GitHub Actions workflow in `.github/workflows/ci.yml`. |
-| **Automated Test Suite** | **Implemented & Tested** | 342 unit, regression, packaging, and integration tests (338 passing, 4 skipped on Windows; 340 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
+| **Automated Test Suite** | **Implemented & Tested** | 373 unit, regression, packaging, and integration tests (369 passing, 4 skipped on Windows; 371 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
 | **Desktop Companion UI** | **Implemented & Tested** | PySide6-Essentials floating companion widget, procedural moonlight avatar, compact vertical left menu, main window, and 5 views. Verified in `tests/test_desktop_companion.py` (49 tests). |
-| **Local AI Brain (llama.cpp)** | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No model weights downloaded. |
+| **Local AI Brain (llama.cpp)** | **Implemented & Tested** | Offline GGUF binary inspection, ModelManager with 9 lifecycle states, safe RAM/VRAM offload budgeting, non-thinking prompt engine, streaming chat via QThread, cancellation, auto-scroll, retry on error, and temporary in-memory history pruning. Verified in `tests/test_local_brain.py` (31 tests). |
 | **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
 | **Desktop Perception Pipeline** | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Screen capture OFF by default. |
 | **Offline Voice Subsystem** | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Microphone OFF by default. |
@@ -86,7 +86,7 @@ tsukiko --headless
 ```
 
 ### 5. Execute Test Suite
-Run automated unit and integration tests (335 tests):
+Run automated unit and integration tests (373 tests):
 ```powershell
 pytest -v
 ```
@@ -110,8 +110,34 @@ pytest -v
   6. `Game Mode` — hides widget and suspends visual animations.
   7. `Hide Widget` — hides floating widget without exiting Tsukiko.
   8. `Exit` — cleanly terminates the application and orchestrator.
-* **Main Companion Window**: Sidebar navigation featuring Chat (Phase 3 disclaimer), System & Hardware Status (genuine metrics), Privacy & Security (locked sensors and zero-trust verification), Memory (Phase 4 placeholder), and Settings (UI customization).
+* **Main Companion Window**: Sidebar navigation featuring Chat (active streaming conversation with local GGUF models), System & Hardware Status (genuine metrics), Privacy & Security (locked sensors and zero-trust verification), Memory (Phase 4 placeholder), and Settings (appearance & local AI model configuration).
 * **Independent Operation**: Closing the main window hides it to the background while the floating widget continues to function independently.
+
+---
+
+## Local AI Brain & Inference (Phase 3)
+
+* **Pure-Python GGUF Inspection (`app/core/model_manager/gguf_parser.py`)**:
+  Inspects binary GGUF v2/v3 file headers, validates tensor/metadata counts, architecture, quantization, context length, block count, and file size without loading weights into RAM or requiring heavy ML packages.
+* **Model Lifecycle Management (`app/core/model_manager/manager.py`)**:
+  Coordinates 9 formal states: `NOT_CONFIGURED`, `NOT_INSTALLED`, `VALIDATING`, `READY`, `LOADING`, `LOADED`, `GENERATING`, `UNLOADING`, `ERROR`.
+* **Hardware-Aware Memory Budgeting**:
+  Enforces safe hardware limits for the RTX 3050 Laptop GPU (4 GB VRAM) and 16 GB system RAM:
+  - Caps VRAM allocation at `max_vram_mb: 2800` while preserving at least 400 MB headroom beyond calculated offload.
+  - Automatically calculates GPU offload layers or falls back safely to CPU if free VRAM is depleted or CUDA is unavailable.
+  - Refuses loading gracefully via `InsufficientMemoryError` when available system RAM is below the required footprint (`max_ram_mb: 3500`).
+* **Non-Thinking Personality Engine (`app/core/personality/`)**:
+  Enforces Tsukiko's adult woman persona (calm, observant, thoughtful, candid about current Phase 3 capabilities) and suppresses `<think>...</think>` internal reasoning tags from streamed tokens and message history.
+* **Streaming Chat Interface (`app/desktop/companion/views/chat.py`)**:
+  - Non-blocking `ChatWorker(QThread)` with auto-scroll and responsive UI.
+  - Real-time chunk streaming with typing/thinking indicator.
+  - "Stop" button for instantaneous user generation cancellation.
+  - Error bubbles with "Retry" action.
+  - "Clear Chat" action wiping temporary in-memory session history.
+* **Model Configuration & Telemetry**:
+  - Settings UI card: GGUF file picker (`QFileDialog`), model validation, load/unload actions, context window, threads, max VRAM, max RAM, and backend selector.
+  - System Status telemetry card: model name, path, quantization, runtime version, backend, state, context size, generation status, process RSS RAM, and measured GPU VRAM.
+* For complete hardware formulas, quantization matrices, and local model installation instructions, see [Hardware & Model Compatibility](MODEL_COMPATIBILITY.md).
 
 ---
 

@@ -82,10 +82,39 @@ flowchart TD
   $$\text{Safe VRAM} = \text{Total VRAM} - 1200\text{ MB (OS Headroom)}$$
 * Evaluates framework readiness (detects whether CUDA is actually operational before launching GPU workloads).
 
-### 3.3 Local Brain & Model Manager (`app/core/brain/`, `app/core/model_manager/`)
-* Target: 3B–4B parameter quantized models (Q4_K_M).
-* Employs lazy loading on first query.
-* Auto-unloads models after prolonged inactivity to free VRAM for system responsiveness or vision processing.
+### 3.3 Local Brain & Model Manager (`app/core/brain/`, `app/core/model_manager/`, `app/core/personality/`)
+* **Binary GGUF Parser (`app/core/model_manager/gguf_parser.py`)**:
+  * Pure-Python, zero-dependency parser for GGUF v2 and v3 container formats.
+  * Reads magic bytes (`b"GGUF"`), version, tensor counts, metadata KV pairs, architecture names, block/layer counts, context lengths, and quantization types.
+  * Validates file size, integrity, and compatibility before attempting memory allocation.
+* **Model Lifecycle State Machine (`app/core/model_manager/lifecycle.py`)**:
+  * Formal 9-state machine: `NOT_CONFIGURED`, `NOT_INSTALLED`, `VALIDATING`, `READY`, `LOADING`, `LOADED`, `GENERATING`, `UNLOADING`, `ERROR`.
+  * Real-time metadata tracking: model path, name, quantization, parameters, architecture, active context size, load timestamps, and last-used timestamps.
+* **Hardware-Aware Memory & VRAM Offload Budgeting (`app/core/model_manager/manager.py`)**:
+  * Designed for target workstation (AMD Ryzen 5 5600H, RTX 3050 Laptop 4GB, 16GB RAM).
+  * Safe LLM RAM budget: `max_ram_mb: 3500` (defaults to 3500 MB).
+  * Safe GPU VRAM budget: `max_vram_mb: 2800` (defaults to 2800 MB).
+  * **Headroom Invariant**: Ensures at least 400 MB of VRAM headroom remains untouched on the GPU beyond any calculated allocation:
+    $$\text{Safe VRAM} = \min(\text{Configured Max}, \text{Total VRAM} - 1200\text{ MB}, \text{Free VRAM} - 400\text{ MB})$$
+  * Layer offload calculation:
+    $$N_{\text{gpu\_layers}} = \min\left(\text{Total Blocks}, \left\lfloor\frac{\text{Safe VRAM Bytes}}{\text{Bytes per Layer}}\right\rfloor\right)$$
+  * Graceful memory refusal: If available system RAM is below the required footprint, raises `InsufficientMemoryError` rather than risking an operating system OOM crash.
+  * Safe CPU fallback: If GPU free VRAM is 0 MB, `nvidia-smi` is unavailable, or CUDA is absent, `n_gpu_layers` is set to 0.
+* **Inference Engine Abstraction (`app/core/model_manager/engine.py`)**:
+  * `BaseInferenceEngine`: Abstract base defining `load()`, `generate_stream()`, `cancel()`, `unload()`, and `is_loaded`.
+  * `LlamaCppInferenceEngine`: Production engine wrapping `llama-cpp-python` with lazy imports, CUDA capability checks, thread-safe cancellation checking between tokens, and non-thinking reasoning filtering.
+  * `DeterministicFakeEngine`: Pure Python test double for reproducible unit/integration tests and CI environments without model weights or GPU drivers.
+* **Concurrency Lockout & Inactivity Auto-Unload**:
+  * Reentrant locks prevent simultaneous loading or overlapping generation requests.
+  * Inactivity timer (configurable, default 300s): automatically unloads model weights from RAM/VRAM after idle duration without interrupting active generation.
+* **Personality & Non-Thinking Engine (`app/core/personality/`)**:
+  * `TSUKIKO_DEFAULT_SYSTEM_PROMPT`: Directs Tsukiko as an adult woman companion—calm, observant, thoughtful, candid, zero corporate filler.
+  * Strictly honest about active Phase 3 capabilities and disabled Phase 4-7 sensors (no screen watching, no microphone listening, no persistent memory, no desktop automation).
+  * Non-thinking mode: Suppresses `<think>...</think>` internal reasoning tags from streamed chunks and in-memory history.
+* **In-Memory Context Window Management (`app/core/brain/brain.py`)**:
+  * Temporary in-memory session history only (zero SQLite database creation).
+  * Dynamic context window pruning (`_prune_history_to_fit_context`) drops oldest dialogue turns when estimated token count exceeds `max_context - max_tokens - 100`, preserving the system prompt.
+  * History is completely cleared on "Clear Chat" or application exit.
 
 ### 3.4 Persistent Long-Term Memory (`app/memory/`)
 * SQLite-backed relational schema storing:
@@ -150,9 +179,9 @@ flowchart TD
 * **Companion Main Window (`CompanionMainWindow`)**:
   * Complete application window launched via `Open` or `Settings`.
   * Silver-blue Moonlight design system (`MoonlightTheme`).
-  * 5 modular views: `ChatView` (Phase 3 disclaimer), `SystemStatusView` (genuine hardware metrics), `PrivacyView` (locked sensor indicators and zero-trust invariants), `MemoryView` (Phase 4 placeholder), `SettingsView` (appearance customization).
+  * 5 modular views: `ChatView` (streaming local chat interface with thinking indicator, cancellation, error retry, clear history), `SystemStatusView` (genuine hardware metrics & local AI brain telemetry), `PrivacyView` (locked sensor indicators and zero-trust invariants), `MemoryView` (Phase 4 placeholder), `SettingsView` (appearance customization and local AI model management).
   * Closing the main window hides it to the background while preserving independent widget execution (or minimizes in fallback mode).
 * **Testing Architecture**:
   * Full offscreen Qt test execution via `QT_QPA_PLATFORM=offscreen`.
-  * Verified in `tests/test_desktop_companion.py` (49 dedicated unit tests).
-  * Full project test suite: 342 tests passing cleanly across Windows and Linux CI.
+  * Verified in `tests/test_desktop_companion.py` (49 dedicated unit tests) and `tests/test_local_brain.py` (31 dedicated unit/integration tests).
+  * Full project test suite: 373 tests passing cleanly across Windows and Linux CI.

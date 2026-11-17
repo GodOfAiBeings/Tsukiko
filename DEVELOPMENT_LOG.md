@@ -428,6 +428,77 @@ The final CIM value validation correction addressed the malformed-CIM-value acce
 
 ---
 
+## 2026-11-17 - Phase 2: Desktop Companion UI Implementation & Final Acceptance
+
+### Completed Objectives
+1. **PySide6 Desktop Companion Architecture (`app/desktop/companion/`)**:
+   - `FloatingCompanionWidget`: Independent frameless transparent Qt window with procedural vector moonlight emblem (`TsukikoAvatarWidget`). Clamped to screen work areas, draggable, with zero external assets, VRM, Live2D, 3D character, or GPU engine.
+   - `CompactCompanionMenu`: 8-option compact menu opening to the left of the avatar: `Open`, `Microphone` (locked), `Speaker` (locked), `Screen Sharing` (locked), `Settings`, `Game Mode`, `Hide Widget`, `Exit`.
+   - `FullscreenDetector`: Safe foreground fullscreen policy via read-only Windows User32 APIs (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`). Explicit ctypes signatures (`argtypes`/`restype`) across all 10 Win32 APIs, eliminating 64-bit pointer truncation. Fails safe by disabling always-on-top. Zero anti-cheat footprint (no process scanning, memory reading, DLL injection, input simulation, or hooks).
+   - `TsukikoTrayManager`: Context menu supporting `Show Widget`, `Open Tsukiko`, `Resume from Game Mode`, and `Exit`. Reversible `Hide Widget` vs `Game Mode` states.
+   - Accessible Tray Fallback: If `isSystemTrayAvailable()` returns False, launches main window at startup with `fallback_frame` controls (`Show Widget`, `Resume from Game Mode`, `Exit Tsukiko`). Minimizes to taskbar rather than hiding on close.
+   - Static Idle Default: Configured `idle_animation: false` by default across config files and `UIConfig`. Shimmer animation timer runs only during active dialogue or explicit configuration.
+   - Dynamic Settings Persistence: Real-time UI updates with truthful disk persistence error reporting via `save_config()`, preserving custom `--config` path.
+   - `CompanionMainWindow`: 5 modular views (`ChatView`, `SystemStatusView`, `PrivacyView`, `MemoryView`, `SettingsView`).
+2. **Verification & Tests (`tests/test_desktop_companion.py`)**:
+   - 49 dedicated tests covering theme styling, avatar rendering, menu ordering, locked sensor controls, boundary clamping, safe fullscreen detection, tray recovery, and headless CLI.
+   - Total test suite expanded to 342 tests (338 passed, 4 skipped on Windows; 340 passed, 2 skipped on Linux).
+   - Accepted commit: `de4a661ed5636c1e5c4b7a87ace20226d53f29db`.
+
+---
+
+## 2026-11-18 - Phase 3: Local AI Brain Implementation
+
+### Completed Objectives
+1. **Binary GGUF Inspection (`app/core/model_manager/gguf_parser.py`)**:
+   - Pure-Python, zero-dependency reader for GGUF v2 and v3 container formats.
+   - Safely parses header magic (`b"GGUF"`), version, tensor count, and metadata KV count.
+   - Extracts architecture name, block count, context length, quantization type, and file size without loading weights into RAM or requiring third-party libraries.
+   - Validates file bounds, structural integrity, and version compatibility.
+2. **Model Lifecycle Management (`app/core/model_manager/lifecycle.py`, `app/core/model_manager/manager.py`)**:
+   - Implemented 9-state formal lifecycle state machine:
+     `NOT_CONFIGURED` -> `VALIDATING` -> `READY` -> `LOADING` -> `LOADED` -> `GENERATING` -> `UNLOADING` / `ERROR`.
+   - Real-time `ModelInfo` tracking model path, format, quantization, block count, context size, load timestamp, and last-used timestamp.
+   - Concurrency protection: Reentrant locks prevent simultaneous loads or overlapping generation requests.
+   - Inactivity auto-unload: 300s inactivity timer automatically releases RAM/VRAM without interrupting active generation.
+3. **Hardware-Aware Memory & VRAM Offloading**:
+   - Strict budgeting for target workstation (AMD Ryzen 5 5600H, RTX 3050 Laptop 4GB, 16GB RAM).
+   - Safe LLM RAM budget: `max_ram_mb: 3500`.
+   - Safe GPU VRAM budget: `max_vram_mb: 2800`.
+   - Headroom guarantee: Preserves at least 400 MB of free VRAM beyond calculated allocation:
+     $$\text{Safe VRAM} = \min(\text{Configured Max}, \text{Total VRAM} - 1200\text{ MB}, \text{Free VRAM} - 400\text{ MB})$$
+   - Layer offload calculation:
+     $$N_{\text{gpu\_layers}} = \min\left(\text{Total Blocks}, \left\lfloor\frac{\text{Safe VRAM Bytes}}{\text{Bytes per Layer}}\right\rfloor\right)$$
+   - Graceful memory refusal: Raises `InsufficientMemoryError` when system RAM is insufficient, avoiding OOM crashes.
+   - Safe CPU fallback: Automatically selects 0 GPU layers if free VRAM is 0 MB, `nvidia-smi` is unavailable, or CUDA is absent.
+4. **Inference Engine Abstraction (`app/core/model_manager/engine.py`)**:
+   - `BaseInferenceEngine`: Abstract base defining lifecycle and streaming contracts.
+   - `LlamaCppInferenceEngine`: Production engine wrapping `llama-cpp-python` with lazy imports, CUDA capability checks, thread-safe cancellation checking between tokens, and non-thinking reasoning filtering.
+   - `DeterministicFakeEngine`: Pure-Python deterministic test double for reproducible unit and integration tests without model weights or GPU drivers.
+5. **Personality & Non-Thinking Engine (`app/core/personality/`)**:
+   - `TSUKIKO_DEFAULT_SYSTEM_PROMPT`: Directs Tsukiko as an adult woman companion—calm, observant, thoughtful, candid, zero corporate filler.
+   - Invariant honesty: Acknowledges active Phase 1-3 capabilities and truthfully states that Phase 4-7 sensors (screen sharing, microphone, memory, desktop automation) are disabled.
+   - Non-thinking mode: Suppresses `<think>...</think>` internal reasoning tags from streamed chunks and message history.
+6. **Streaming Chat Interface (`app/desktop/companion/views/chat.py`)**:
+   - Non-blocking `ChatWorker(QThread)` with auto-scroll and responsive UI.
+   - Real-time chunk streaming with typing/thinking indicator.
+   - "Stop" button for instantaneous user generation cancellation.
+   - Error bubbles with "Retry" action.
+   - "Clear Chat" action wiping temporary in-memory session history.
+   - Model status banner showing active model name, quantization, backend, and lifecycle state.
+7. **Settings & System Status Telemetry Integration**:
+   - `SettingsView`: Added Section 3 card for model file selection (`QFileDialog`), validation, load, unload, context window, threads, max VRAM, max RAM, and backend selector.
+   - `SystemStatusView`: Added Section 4 telemetry card displaying model metadata, active backend, state, context window, generation status, process RSS RAM, and measured GPU memory.
+8. **Preservation of Invariant Privacy & Security Guarantees**:
+   - Zero outbound network traffic: Low-level family-aware socket interception and deterministic fail-closed DNS guard remain 100% active.
+   - Zero cloud fallback: No remote LLM APIs or telemetry endpoints exist in the codebase.
+   - Zero Phase 4-7 scope creep: No SQLite database created, no screen capture thread started, no microphone listening, no desktop automation permissions granted.
+9. **Comprehensive Verification & Tests (`tests/test_local_brain.py`)**:
+   - 31 dedicated tests covering GGUF parsing, lifecycle transitions, hardware budgeting, layer offloading, insufficient memory refusal, streaming, cancellation, concurrency lockout, prompt formatting, reasoning token stripping, in-memory history pruning, ChatWorker QThread streaming, Settings UI, System Status telemetry, and privacy assertions.
+   - Total test suite expanded to 373 tests (369 passed, 4 skipped on Windows; 371 passed, 2 skipped on Linux) with 0 failures and 0 errors.
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -440,10 +511,10 @@ The final CIM value validation correction addressed the malformed-CIM-value acce
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 293 unit, regression, packaging, and integration tests (289 passed, 4 skipped on Windows; 291 passed, 2 skipped on Linux). |
-| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 6-stage read-only ActiveStore inspection). |
-| PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
-| llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |
+| Automated Pytest Test Suite | **Implemented & Tested** | 373 unit, regression, packaging, and integration tests (369 passed, 4 skipped on Windows; 371 passed, 2 skipped on Linux). |
+| Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with offscreen PySide6 and 6-stage read-only ActiveStore inspection). |
+| PySide6 Desktop Companion UI | **Implemented & Tested** | Procedural vector moonlight emblem, compact left menu, safe foreground fullscreen detection with Win32 ctypes signatures, reversible Game Mode, tray manager with accessible fallback panel, dynamic settings persistence, and main window. |
+| llama.cpp Local Brain Engine | **Implemented & Tested** | Pure-Python GGUF inspection, 9-state ModelManager lifecycle, hardware-aware RAM/VRAM offloading with 400MB headroom, non-thinking personality engine, streaming ChatWorker, cancellation, retry on error, temporary in-memory history pruning, and Settings/Status telemetry cards. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
 | Desktop Perception Pipeline | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Capture OFF by default. |
 | Offline Voice Subsystem (STT/TTS) | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Voice OFF by default. |

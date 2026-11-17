@@ -1,5 +1,11 @@
 -r base.txt
-# Inference engine candidates evaluated during Model Selection phase
-# CPU / CUDA acceleration options:
-# - llama-cpp-python (with cu12x prebuilt wheel or CPU wheel)
-# - onnxruntime / onnxruntime-genai
+# Tsukiko Phase 3: Local Neural Inference Dependencies
+# Note: Keep runtime imports lazy. Core application starts cleanly without this package.
+#
+# CPU-only installation:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#
+# CUDA 12.x GPU-accelerated installation (for RTX 3050 Laptop GPU):
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+#
+llama-cpp-python>=0.3.0

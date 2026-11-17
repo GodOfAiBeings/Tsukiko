@@ -33,6 +33,12 @@ python -m venv .venv
 pip install -r requirements/base.txt
 pip install -r requirements/ui.txt
 pip install -e ".[dev]"
+
+# Optional: Install local inference engine (llama-cpp-python)
+# CPU-only:
+pip install -r requirements/ai.txt
+# Or CUDA 12.4 accelerated (see MODEL_COMPATIBILITY.md):
+# pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 ```
 
 ---
@@ -54,13 +60,14 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (335 test items: 331 passed, 4 Unix-specific skipped on Windows; 333 passed, 2 skipped on Linux):
+Execute the complete automated test suite (373 test items: 369 passed, 4 Unix-specific skipped on Windows; 371 passed, 2 skipped on Linux):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_desktop_companion.py`](tests/test_desktop_companion.py): Verifies complete Phase 2 PySide6 desktop companion UI: Moonlight theme styling, procedural vector avatar rendering, floating companion widget, compact left menu ordering and locked states, Game Mode animation suspension without game hooking, ChatView disabled submission pending Phase 3, SystemStatusView real hardware telemetry, PrivacyView locked sensors, MemoryView zero-database placeholder, SettingsView validation, and CLI/headless execution (24 tests).
+* [`tests/test_local_brain.py`](tests/test_local_brain.py): Comprehensive verification of the Phase 3 local AI brain subsystem: pure-Python binary GGUF parser and metadata validation, ModelManager 9-state lifecycle machine, safe RAM/VRAM offload calculations, headroom preservation, insufficient memory rejection, engine abstraction, non-thinking personality prompts and reasoning token stripping, temporary in-memory history pruning, ChatWorker QThread streaming, cancellation, error bubbles with retry, clear chat, Settings card model loading/unloading, SystemStatus telemetry, and zero-telemetry offline invariants (31 tests).
+* [`tests/test_desktop_companion.py`](tests/test_desktop_companion.py): Verifies complete Phase 2 PySide6 desktop companion UI: Moonlight theme styling, procedural vector avatar rendering, floating companion widget, compact left menu ordering and locked states, safe fullscreen detection with Win32 ctypes signatures, Game Mode animation suspension without game hooking, system tray recovery and fallback mode, dynamic settings application and YAML persistence, SystemStatusView real hardware telemetry, PrivacyView locked sensors, MemoryView zero-database placeholder, SettingsView validation, and CLI/headless execution (49 tests).
 * [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, strict CIM field-state invariants, non-null StringValue consistency checks, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, precise rule ownership identity, safe deletion by stable internal Name, strict 8-key response envelope validation, and structured query result parsing (224 tests).
 * [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
 * [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
@@ -74,8 +81,8 @@ pytest -v
 ## 5. Dual-Platform CI Matrix
 
 Continuous Integration runs on GitHub Actions across two distinct environments:
-1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (275 passed, 4 Unix-specific skipped).
-2. **Linux (`ubuntu-latest`)**: Validates full 279-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, full desktop companion UI with offscreen Qt platform, local AI brain verification, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (369 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 373-test suite including genuine native `sendmsg` (TCP/UDP) communication, real `AF_UNIX` domain socket IPC, offscreen PySide6 UI, and local AI brain inference abstractions (371 passed, 2 skipped).
 
 ---
 

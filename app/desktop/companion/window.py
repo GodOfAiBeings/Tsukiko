@@ -293,11 +293,11 @@ class CompanionMainWindow(QMainWindow):
         self.stack.setObjectName("content_stack")
 
         # Instantiate views
-        self.chat_view = ChatView()
+        self.chat_view = ChatView(orchestrator=self._orchestrator)
         self.status_view = SystemStatusView(orchestrator=self._orchestrator)
         self.privacy_view = PrivacyView()
         self.memory_view = MemoryView()
-        self.settings_view = SettingsView(config=self._config)
+        self.settings_view = SettingsView(config=self._config, orchestrator=self._orchestrator)
 
         self.stack.addWidget(self.chat_view)     # index 0: chat
         self.stack.addWidget(self.status_view)   # index 1: status
@@ -339,9 +339,11 @@ class CompanionMainWindow(QMainWindow):
         for k, btn in self._nav_buttons.items():
             btn.setChecked(k == key)
 
-        # Refresh status if navigating to status view
+        # Refresh view state if navigating
         if key == "status":
             self.status_view.refresh_metrics()
+        elif key == "chat":
+            self.chat_view.update_model_status()
 
     def show_chat(self) -> None:
         self.show_view("chat")

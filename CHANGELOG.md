@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - Phase 3: Local AI Brain Implementation - 2026-11-18
+
+### Added
+- **Binary GGUF Inspection (`app/core/model_manager/gguf_parser.py`)**:
+  - Implemented pure-Python reader for GGUF v2 and v3 container formats.
+  - Zero-dependency extraction of magic header, version, tensor counts, metadata KV pairs, architecture names, block counts, context lengths, and quantization types without loading weights or requiring machine learning libraries.
+  - Validates file bounds, structural integrity, and version compatibility.
+- **Model Lifecycle State Machine (`app/core/model_manager/lifecycle.py`, `app/core/model_manager/manager.py`)**:
+  - Formal 9-state lifecycle machine: `NOT_CONFIGURED`, `NOT_INSTALLED`, `VALIDATING`, `READY`, `LOADING`, `LOADED`, `GENERATING`, `UNLOADING`, `ERROR`.
+  - Concurrency lockout preventing duplicate loads or overlapping generation requests.
+  - Inactivity auto-unload: 300-second timer releases RAM/VRAM after idle duration without interrupting active generation.
+  - Safe RAM (`max_ram_mb: 3500`) and VRAM (`max_vram_mb: 2800`) budgeting tailored for AMD Ryzen 5 5600H and NVIDIA RTX 3050 Laptop GPU (4 GB VRAM).
+  - Preserves $\ge 400$ MB free VRAM headroom beyond any calculated allocation; gracefully falls back to CPU if free VRAM is depleted; raises `InsufficientMemoryError` when system RAM is insufficient.
+- **Inference Engine Abstraction (`app/core/model_manager/engine.py`)**:
+  - `BaseInferenceEngine`: Abstract base defining load, streaming generation, cancellation, and unload contracts.
+  - `LlamaCppInferenceEngine`: Production engine wrapping `llama-cpp-python` with lazy imports, CUDA capability checks, thread-safe cancellation checking between tokens, and non-thinking reasoning filtering.
+  - `DeterministicFakeEngine`: Pure-Python deterministic test double for reproducible testing and CI execution without weights or GPU drivers.
+- **Personality & Non-Thinking Engine (`app/core/personality/prompts.py`, `app/core/personality/engine.py`)**:
+  - `TSUKIKO_DEFAULT_SYSTEM_PROMPT`: Directs Tsukiko as an adult woman companion—calm, observant, thoughtful, candid, zero corporate filler.
+  - Invariant honesty: Acknowledges active Phase 1-3 capabilities and truthfully states that Phase 4-7 sensors (screen watching, microphone listening, persistent memory, desktop automation) are disabled.
+  - Non-thinking mode: Suppresses `<think>...</think>` internal reasoning tags from streamed chunks and in-memory history.
+- **Dynamic Context Window Management (`app/core/brain/brain.py`)**:
+  - Temporary in-memory session history only (zero SQLite database creation).
+  - Dynamic context pruning (`_prune_history_to_fit_context`) drops oldest dialogue turns when estimated token count exceeds context limits while preserving the system prompt.
+  - Session history wiped cleanly on "Clear Chat" or application exit.
+- **Active Streaming Desktop Chat Interface (`app/desktop/companion/views/chat.py`)**:
+  - Non-blocking `ChatWorker(QThread)` with auto-scroll and responsive UI.
+  - Real-time chunk streaming with typing/thinking indicator.
+  - "Stop" button for instantaneous user generation cancellation.
+  - Error bubbles with "Retry" action.
+  - "Clear Chat" action wiping temporary in-memory session history.
+  - Model status banner showing active model name, quantization, backend, and lifecycle state.
+- **Settings & System Status Telemetry Cards (`app/desktop/companion/views/settings_view.py`, `app/desktop/companion/views/system_status.py`)**:
+  - Settings: GGUF file picker (`QFileDialog`), model validation, load/unload actions, context window, threads, max VRAM, max RAM, and backend selector.
+  - System Status: Model metadata, active backend, state, context window, generation status, process RSS RAM, and measured GPU memory.
+- **Hardware & Model Compatibility Guide (`MODEL_COMPATIBILITY.md`)**:
+  - Comprehensive documentation for Qwen3.5-2B (Q4_K_M) primary recommendation, VRAM/RAM formulas, quantization sizing matrix, CPU vs CUDA installation, model acquisition instructions, and test evidence classification.
+- **Comprehensive Unit & Integration Test Suite (`tests/test_local_brain.py`)**:
+  - 31 dedicated tests covering GGUF parsing, lifecycle transitions, hardware budgeting, layer offloading, insufficient memory refusal, streaming, cancellation, concurrency lockout, prompt formatting, reasoning token stripping, in-memory history pruning, ChatWorker QThread streaming, Settings UI, System Status telemetry, and privacy assertions.
+  - Packaging assertions updated in `tests/test_packaging.py`.
+
+### Changed
+- Total automated test suite expanded to 373 tests (369 passed, 4 skipped on Windows; 371 passed, 2 skipped on Linux) with 0 failures and 0 errors.
+
+---
+
 ## [0.2.1] - Phase 2 Acceptance Corrections & Hardening - 2026-11-17
 
 ### Added

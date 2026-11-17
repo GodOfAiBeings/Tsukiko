@@ -69,10 +69,14 @@ class AIConfig(BaseModel):
     temperature: float = 0.7
     top_p: float = 0.9
     repeat_penalty: float = 1.1
-    gpu_layers: int = 0
-    max_vram_mb: int = 2800  # Conservative limit for 4GB RTX 3050 Laptop
+    threads: int = Field(default=6, ge=1, le=64, description="CPU thread count for inference")
+    gpu_layers: int = Field(default=0, ge=-1, description="GPU layers to offload (-1 for auto/all)")
+    max_vram_mb: int = Field(default=2800, ge=0, description="Conservative ceiling for RTX 3050 4GB VRAM")
+    max_ram_mb: int = Field(default=3500, ge=1024, description="Conservative ceiling for safe RAM allocation")
+    backend: str = Field(default="auto", description="Inference backend: 'auto', 'cuda', 'cpu'")
     lazy_load: bool = True
     unload_timeout_seconds: int = 300
+    system_prompt: Optional[str] = None
 
 
 class MemoryConfig(BaseModel):

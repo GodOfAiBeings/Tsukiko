@@ -33,10 +33,14 @@ ai:
   temperature: 0.7
   top_p: 0.9
   repeat_penalty: 1.1
+  threads: 6 # AMD Ryzen 5 5600H (6 physical cores)
   gpu_layers: 0 # Automatically tuned by Resource Manager (max safe layers)
   max_vram_mb: 2800 # Safe ceiling on 4GB VRAM
+  max_ram_mb: 3500 # Safe ceiling on 16GB system RAM
+  backend: "auto" # "auto", "cuda", or "cpu"
   lazy_load: true
   unload_timeout_seconds: 300
+  system_prompt: null # Optional custom system prompt override
 
 memory:
   db_path: "data/memory/tsukiko_memory.sqlite"

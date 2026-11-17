@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tsukiko"
-version = "0.2.0"
+version = "0.3.0"
 description = "Tsukiko - Fully offline-first AI desktop companion for Windows 11"
 authors = [{ name = "Deepak & Tsukiko Architect" }]
 readme = "README.md"
@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ai = [
+    "llama-cpp-python>=0.3.0",
+]
 ui = [
     "PySide6>=6.6.0",
     "qasync>=0.27.1",

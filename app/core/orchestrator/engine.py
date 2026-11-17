@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, Optional
 
 from app.core.config.settings import TsukikoConfig, get_config
+from app.core.brain.brain import TsukikoBrain
 from app.core.logging.logger import get_logger
 from app.core.resource_manager.hardware import HardwareInspector, HardwareProfile
 
@@ -21,6 +22,7 @@ class TsukikoOrchestrator:
 
     def __init__(self, config: Optional[TsukikoConfig] = None):
         self.config = config or get_config()
+        self.brain = TsukikoBrain(config=self.config)
         self.hardware_profile: Optional[HardwareProfile] = None
         self._is_running = False
         self._lock = threading.RLock()
@@ -58,6 +60,10 @@ class TsukikoOrchestrator:
             from app.core.privacy.enforcement import enable_offline_guard
             enable_offline_guard()
 
+            # Initialize Local AI Brain
+            self.brain.initialize()
+            self._status["brain"] = self.brain.model_manager.state.value
+
             # Ensure screen sharing starts OFF
             self.config.perception.screen_sharing_enabled = False
             self._status["screen_sharing"] = False
@@ -83,8 +89,10 @@ class TsukikoOrchestrator:
             if not self._is_running and self._status["state"] == "stopped":
                 return
             logger.info("Stopping Tsukiko Core Orchestrator...")
+            self.brain.shutdown()
             self._is_running = False
             self._status["screen_sharing"] = False
+            self._status["brain"] = "stopped"
             self._status["state"] = "stopped"
             # Note: The in-process offline privacy guard remains active for the process lifetime.
             logger.info("Tsukiko Core Orchestrator stopped cleanly.")
@@ -98,6 +106,9 @@ class TsukikoOrchestrator:
         """Returns snapshot of current orchestrator subsystem statuses."""
         with self._lock:
             status_copy = dict(self._status)
+            if self.brain:
+                status_copy["brain"] = self.brain.model_manager.state.value
+                status_copy["brain_details"] = self.brain.get_brain_status()
             if self.hardware_profile:
                 status_copy["vram_budget_mb"] = self.hardware_profile.recommended_max_vram_mb
                 status_copy["ram_budget_mb"] = self.hardware_profile.recommended_max_ram_mb

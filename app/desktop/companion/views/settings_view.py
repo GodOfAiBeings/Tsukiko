@@ -11,7 +11,8 @@ import logging
 import re
 from typing import Callable, Optional
 
-from app.core.config.settings import TsukikoConfig, UIConfig, get_config, save_config
+from app.core.config.settings import AIConfig, TsukikoConfig, UIConfig, get_config, save_config
+from app.core.model_manager.gguf_parser import GGUFValidationError, inspect_gguf_file
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ try:
     from PySide6.QtWidgets import (
         QCheckBox,
         QComboBox,
+        QFileDialog,
         QFrame,
         QGridLayout,
         QHBoxLayout,
@@ -36,6 +38,7 @@ try:
 except ImportError:
     HAS_PYSIDE6 = False
     QWidget = object  # type: ignore[misc,assignment]
+    QFileDialog = object  # type: ignore[misc,assignment]
 
 
 HEX_COLOR_REGEX = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -51,6 +54,7 @@ class SettingsView(QWidget):
     def __init__(
         self,
         config: Optional[TsukikoConfig] = None,
+        orchestrator: Optional[Any] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         if not HAS_PYSIDE6:
@@ -59,6 +63,9 @@ class SettingsView(QWidget):
         self.setObjectName("SettingsView")
         self._config = config or get_config()
         self._ui_config: UIConfig = self._config.ui
+        self._ai_config: AIConfig = self._config.ai
+        self._orchestrator = orchestrator
+        self._brain = getattr(orchestrator, "brain", None) if orchestrator else None
         self._init_ui()
         self._load_values()
 
@@ -184,6 +191,111 @@ class SettingsView(QWidget):
 
         c_layout.addWidget(pos_card)
 
+        # Section 3: Local AI Brain Configuration (Phase 3)
+        ai_card = QFrame()
+        ai_card.setObjectName("ai_settings_card")
+        ai_card.setStyleSheet(
+            "QFrame {"
+            "  background-color: rgba(30, 41, 59, 0.7);"
+            "  border: 1px solid rgba(127, 179, 213, 0.25);"
+            "  border-radius: 10px;"
+            "  padding: 12px;"
+            "}"
+        )
+        ai_grid = QGridLayout(ai_card)
+        ai_grid.setHorizontalSpacing(16)
+        ai_grid.setVerticalSpacing(10)
+
+        ai_title = QLabel("Local AI Brain & Inference (Phase 3)")
+        ai_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #7FB3D5;")
+        ai_grid.addWidget(ai_title, 0, 0, 1, 2)
+
+        # Model File Path + File Picker
+        lbl_model_path = QLabel("Model File (GGUF)")
+        lbl_model_path.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        path_box = QHBoxLayout()
+        self.edit_model_path = QLineEdit()
+        self.edit_model_path.setPlaceholderText("Path to local .gguf model file...")
+        self.btn_browse_model = QPushButton("Browse...")
+        self.btn_browse_model.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+        self.btn_browse_model.clicked.connect(self._browse_model_file)
+        path_box.addWidget(self.edit_model_path, stretch=1)
+        path_box.addWidget(self.btn_browse_model)
+        ai_grid.addWidget(lbl_model_path, 1, 0)
+        ai_grid.addLayout(path_box, 1, 1)
+
+        # Action Buttons: Validate, Load, Unload
+        lbl_actions = QLabel("Model Actions")
+        lbl_actions.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        actions_box = QHBoxLayout()
+        self.btn_validate_model = QPushButton("Validate GGUF")
+        self.btn_validate_model.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+        self.btn_validate_model.clicked.connect(self._validate_model)
+        actions_box.addWidget(self.btn_validate_model)
+
+        self.btn_load_model = QPushButton("Load Model")
+        self.btn_load_model.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+        self.btn_load_model.clicked.connect(self._load_model)
+        actions_box.addWidget(self.btn_load_model)
+
+        self.btn_unload_model = QPushButton("Unload Model")
+        self.btn_unload_model.setStyleSheet("padding: 4px 10px; font-size: 11px;")
+        self.btn_unload_model.clicked.connect(self._unload_model)
+        actions_box.addWidget(self.btn_unload_model)
+        ai_grid.addWidget(lbl_actions, 2, 0)
+        ai_grid.addLayout(actions_box, 2, 1)
+
+        # Context Window
+        lbl_ctx = QLabel("Context Window (Tokens)")
+        lbl_ctx.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        self.spin_context_window = QSpinBox()
+        self.spin_context_window.setRange(512, 32768)
+        self.spin_context_window.setSingleStep(512)
+        ai_grid.addWidget(lbl_ctx, 3, 0)
+        ai_grid.addWidget(self.spin_context_window, 3, 1)
+
+        # CPU Thread Count
+        lbl_threads = QLabel("CPU Thread Count")
+        lbl_threads.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        self.spin_threads = QSpinBox()
+        self.spin_threads.setRange(1, 64)
+        ai_grid.addWidget(lbl_threads, 4, 0)
+        ai_grid.addWidget(self.spin_threads, 4, 1)
+
+        # Max Safe VRAM
+        lbl_vram = QLabel("Max Safe VRAM (MB)")
+        lbl_vram.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        self.spin_max_vram = QSpinBox()
+        self.spin_max_vram.setRange(0, 24000)
+        self.spin_max_vram.setSingleStep(100)
+        ai_grid.addWidget(lbl_vram, 5, 0)
+        ai_grid.addWidget(self.spin_max_vram, 5, 1)
+
+        # Max Safe RAM
+        lbl_ram = QLabel("Max Safe RAM (MB)")
+        lbl_ram.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        self.spin_max_ram = QSpinBox()
+        self.spin_max_ram.setRange(1024, 64000)
+        self.spin_max_ram.setSingleStep(256)
+        ai_grid.addWidget(lbl_ram, 6, 0)
+        ai_grid.addWidget(self.spin_max_ram, 6, 1)
+
+        # Selected Inference Backend
+        lbl_backend = QLabel("Inference Backend")
+        lbl_backend.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        self.combo_backend = QComboBox()
+        self.combo_backend.addItems(["auto", "cuda", "cpu"])
+        ai_grid.addWidget(lbl_backend, 7, 0)
+        ai_grid.addWidget(self.combo_backend, 7, 1)
+
+        # Live Model Status
+        self.lbl_model_status = QLabel("")
+        self.lbl_model_status.setStyleSheet("color: #7FB3D5; font-size: 11px;")
+        self.lbl_model_status.setWordWrap(True)
+        ai_grid.addWidget(self.lbl_model_status, 8, 0, 1, 2)
+
+        c_layout.addWidget(ai_card)
+
         # Feedback label for validation errors or success
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("font-size: 12px;")
@@ -250,12 +362,92 @@ class SettingsView(QWidget):
         self.spin_margin_x.setValue(self._ui_config.margin_x)
         self.spin_margin_y.setValue(self._ui_config.margin_y)
 
+        # AI Brain settings
+        self.edit_model_path.setText(str(self._ai_config.model_path or ""))
+        self.spin_context_window.setValue(self._ai_config.context_window)
+        self.spin_threads.setValue(self._ai_config.threads)
+        self.spin_max_vram.setValue(self._ai_config.max_vram_mb)
+        self.spin_max_ram.setValue(self._ai_config.max_ram_mb)
+        b_idx = self.combo_backend.findText(self._ai_config.backend)
+        if b_idx >= 0:
+            self.combo_backend.setCurrentIndex(b_idx)
+        self._update_model_status_label()
+
     def _reset_defaults(self) -> None:
         """Reset inputs to default configuration."""
         self._ui_config = UIConfig()
+        self._ai_config = AIConfig()
         self._load_values()
         self.status_label.setText("Reset to defaults. Click Apply to confirm.")
         self.status_label.setStyleSheet("color: #7FB3D5; font-size: 12px;")
+
+    def _browse_model_file(self) -> None:
+        if not HAS_PYSIDE6:
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select GGUF Model File",
+            "",
+            "GGUF Models (*.gguf);;All Files (*)",
+        )
+        if file_path:
+            self.edit_model_path.setText(file_path)
+            self._validate_model()
+
+    def _validate_model(self) -> None:
+        path_str = self.edit_model_path.text().strip()
+        if not path_str:
+            self.lbl_model_status.setText("Please specify a model path.")
+            self.lbl_model_status.setStyleSheet("color: #F5B041;")
+            return
+        try:
+            metadata = inspect_gguf_file(path_str)
+            self.lbl_model_status.setText(
+                f"✓ Valid GGUF: {metadata.model_name} | Arch: {metadata.architecture} | "
+                f"Quant: {metadata.quantization} | Layers: {metadata.block_count} | Size: {metadata.file_size_mb} MB"
+            )
+            self.lbl_model_status.setStyleSheet("color: #A8D5BA;")
+        except Exception as e:
+            self.lbl_model_status.setText(f"❌ Validation failed: {e}")
+            self.lbl_model_status.setStyleSheet("color: #E06C75;")
+
+    def _load_model(self) -> None:
+        if not self._brain:
+            self.lbl_model_status.setText("Local AI Brain is not available.")
+            self.lbl_model_status.setStyleSheet("color: #E06C75;")
+            return
+        self._brain.model_manager._ai_config.model_path = self.edit_model_path.text().strip() or None
+        self._brain.model_manager.inspect_configured_model()
+        ok = self._brain.load_model(force=True)
+        if ok:
+            info = self._brain.model_manager.info
+            self.lbl_model_status.setText(
+                f"✓ Model loaded: {info.model_name} ({info.backend.upper()}, {info.gpu_layers_offloaded} GPU layers)"
+            )
+            self.lbl_model_status.setStyleSheet("color: #A8D5BA;")
+        else:
+            err = self._brain.model_manager.info.error_message or "Unknown error"
+            self.lbl_model_status.setText(f"❌ Load failed: {err}")
+            self.lbl_model_status.setStyleSheet("color: #E06C75;")
+
+    def _unload_model(self) -> None:
+        if not self._brain:
+            return
+        ok = self._brain.unload_model()
+        if ok:
+            self.lbl_model_status.setText("Model unloaded from memory/VRAM.")
+            self.lbl_model_status.setStyleSheet("color: #7FB3D5;")
+        else:
+            self.lbl_model_status.setText("Cannot unload model right now (generation may be active).")
+            self.lbl_model_status.setStyleSheet("color: #F5B041;")
+
+    def _update_model_status_label(self) -> None:
+        if self._brain:
+            info = self._brain.model_manager.info
+            state = info.state.value
+            loaded_desc = " (Loaded)" if info.is_loaded else ""
+            self.lbl_model_status.setText(f"Current State: {state}{loaded_desc}")
+            self.lbl_model_status.setStyleSheet("color: #7FB3D5;")
 
     def validate_inputs(self) -> tuple[bool, str]:
         """Validate input settings."""
@@ -277,10 +469,19 @@ class SettingsView(QWidget):
         if self.spin_margin_y.value() < 0:
             return False, "Vertical margin cannot be negative."
 
+        if self.spin_context_window.value() < 512:
+            return False, "Context window must be at least 512 tokens."
+
+        if self.spin_threads.value() < 1:
+            return False, "CPU thread count must be at least 1."
+
+        if self.spin_max_ram.value() < 1024:
+            return False, "Maximum safe RAM must be at least 1024 MB."
+
         return True, ""
 
     def save_settings(self) -> bool:
-        """Validate and apply UI settings."""
+        """Validate and apply UI and AI settings."""
         is_valid, msg = self.validate_inputs()
         if not is_valid:
             self.status_label.setText(f"❌ {msg}")
@@ -296,8 +497,23 @@ class SettingsView(QWidget):
         self._ui_config.margin_x = self.spin_margin_x.value()
         self._ui_config.margin_y = self.spin_margin_y.value()
 
+        # Update AI settings
+        self._ai_config.model_path = self.edit_model_path.text().strip() or None
+        self._ai_config.context_window = self.spin_context_window.value()
+        self._ai_config.threads = self.spin_threads.value()
+        self._ai_config.max_vram_mb = self.spin_max_vram.value()
+        self._ai_config.max_ram_mb = self.spin_max_ram.value()
+        self._ai_config.backend = self.combo_backend.currentText()
+
         # Update root config and apply to current session
         self._config.ui = self._ui_config
+        self._config.ai = self._ai_config
+
+        if self._brain:
+            self._brain.model_manager._ai_config = self._ai_config
+            self._brain.model_manager.inspect_configured_model()
+            self._update_model_status_label()
+
         if HAS_PYSIDE6:
             self.settings_applied.emit(self._ui_config)
 

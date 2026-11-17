@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, Optional
+import psutil
 
 from app.core.resource_manager.hardware import HardwareInspector, HardwareProfile
 
@@ -210,7 +211,60 @@ class SystemStatusView(QWidget):
             gpu_card.add_row("Budget Status", self._profile.budget_status, badge_color="#E06C75")
         self.cards_layout.addWidget(gpu_card)
 
-        # 4. Tsukiko Subsystems Card
+        # 4. Local AI Brain & Inference Telemetry Card (Phase 3)
+        brain_card = StatusCard("Local AI Brain & Inference", icon="🧠")
+        brain_status: Dict[str, Any] = {}
+        if self._orchestrator and hasattr(self._orchestrator, "brain") and self._orchestrator.brain:
+            try:
+                brain_status = self._orchestrator.brain.get_brain_status()
+            except Exception as e:
+                logger.warning(f"Failed to query brain status: {e}")
+
+        model_name = brain_status.get("model_name", "None")
+        model_path = brain_status.get("model_path") or "Not configured"
+        quant = brain_status.get("quantization", "N/A")
+        rt_ver = brain_status.get("runtime_version", "N/A")
+        backend = brain_status.get("backend", "cpu").upper()
+        state = brain_status.get("state", "NOT_CONFIGURED")
+        ctx = brain_status.get("context_window", 4096)
+        is_gen = brain_status.get("is_generating", False)
+        gen_status = "Generating..." if is_gen else "Idle"
+
+        # Measured process RAM via psutil
+        try:
+            proc = psutil.Process()
+            proc_ram_mb = int(proc.memory_info().rss / (1024 * 1024))
+            proc_ram_str = f"{proc_ram_mb} MB"
+        except Exception:
+            proc_ram_str = "Unavailable"
+
+        # Measured GPU memory
+        if self._profile.gpus and self._profile.gpus[0].free_vram_mb is not None:
+            gpu_mem_str = (
+                f"{self._profile.gpus[0].used_vram_mb or 0} MB used / "
+                f"{self._profile.gpus[0].total_vram_mb or 0} MB total "
+                f"({self._profile.gpus[0].free_vram_mb} MB free)"
+            )
+        else:
+            gpu_mem_str = "N/A (CPU Mode / No discrete GPU)"
+
+        is_loaded = brain_status.get("is_loaded", False)
+        badge_color = "#A8D5BA" if is_loaded else ("#E5C07B" if state in ("READY", "VALIDATING") else "#94A3B8")
+        loaded_desc = "Loaded" if is_loaded else "Unloaded"
+
+        brain_card.add_row("Model Name", model_name)
+        brain_card.add_row("Model Path", model_path)
+        brain_card.add_row("Quantization", quant)
+        brain_card.add_row("Runtime Version", rt_ver)
+        brain_card.add_row("Inference Backend", backend)
+        brain_card.add_row("Lifecycle State", f"{state} ({loaded_desc})", badge_color=badge_color)
+        brain_card.add_row("Context Window", f"{ctx} tokens")
+        brain_card.add_row("Generation Status", gen_status, badge_color="#7FB3D5" if is_gen else None)
+        brain_card.add_row("Process RSS RAM", proc_ram_str)
+        brain_card.add_row("Measured GPU VRAM", gpu_mem_str)
+        self.cards_layout.addWidget(brain_card)
+
+        # 5. Tsukiko Subsystems Card
         orch_card = StatusCard("Tsukiko Subsystems", icon="⚙️")
         orch_status: Dict[str, Any] = {}
         if self._orchestrator and hasattr(self._orchestrator, "get_status"):
@@ -225,7 +279,7 @@ class SystemStatusView(QWidget):
             badge_color="#A8D5BA",
         )
         orch_card.add_row("Network Isolation", "Active (Zero-Trust Local-Only)", badge_color="#A8D5BA")
-        orch_card.add_row("Local AI Brain", "Phase 3 — Uninstalled", badge_color="#E5C07B")
+        orch_card.add_row("Local AI Brain", f"Phase 3 — {state}", badge_color=badge_color)
         orch_card.add_row("Persistent Memory", "Phase 4 — Uninstalled", badge_color="#94A3B8")
         orch_card.add_row("Perception / Vision", "Phase 5 — Disabled", badge_color="#94A3B8")
         orch_card.add_row("Voice & Audio", "Phase 6 — Disabled", badge_color="#94A3B8")
