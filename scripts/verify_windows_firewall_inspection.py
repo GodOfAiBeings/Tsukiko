@@ -447,6 +447,54 @@ try {
             return 1
         print("  --> Confirmed: Plural property name (LocalUsers) cannot substitute for singular LocalUser.")
 
+        # 12. Missing StringValue in VALID state
+        corrupt_12 = dict(synthetic_base)
+        corrupt_12["Protocol"] = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": "Any",
+            # StringValue omitted
+        }
+        rule_12 = parse_powershell_rules_json([corrupt_12])[0]
+        ok_12, msg_12 = validate_firewall_filters(rule_12, target_exe)
+        if ok_12 or "Protocol" not in msg_12:
+            print(f"ERROR: Expected rejection for missing StringValue in VALID state, got ok={ok_12}, msg={msg_12}")
+            return 1
+        print("  --> Confirmed: Missing StringValue in VALID state is rejected.")
+
+        # 13. Contradictory StringValue and Value
+        corrupt_13 = dict(synthetic_base)
+        corrupt_13["Protocol"] = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": "TCP",
+            "StringValue": "Any",
+        }
+        rule_13 = parse_powershell_rules_json([corrupt_13])[0]
+        ok_13, msg_13 = validate_firewall_filters(rule_13, target_exe)
+        if ok_13 or "Protocol" not in msg_13:
+            print(f"ERROR: Expected rejection for contradictory StringValue and Value, got ok={ok_13}, msg={msg_13}")
+            return 1
+        print("  --> Confirmed: Contradictory StringValue and Value is rejected.")
+
+        # 14. Empty string on non-allow_empty field (Protocol)
+        corrupt_14 = dict(synthetic_base)
+        corrupt_14["Protocol"] = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": "",
+            "StringValue": "",
+        }
+        rule_14 = parse_powershell_rules_json([corrupt_14])[0]
+        ok_14, msg_14 = validate_firewall_filters(rule_14, target_exe)
+        if ok_14 or "Protocol" not in msg_14:
+            print(f"ERROR: Expected rejection for empty string Protocol, got ok={ok_14}, msg={msg_14}")
+            return 1
+        print("  --> Confirmed: Empty string Protocol without explicit Any token is rejected.")
+
         # Envelope Rejection Tests
         env_1 = dict(data)
         del env_1["BypassRules"]

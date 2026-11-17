@@ -242,6 +242,39 @@ The final acceptance pass resolved all remaining concrete defects identified in 
 
 ---
 
+### Final Phase 1 Blocker Correction (2026-11-17)
+
+The final blocker correction resolved all three source-level defects identified in the independent review, elevating the automated test suite to 279 tests (275 passed, 4 skipped on Windows; all 279 passing on Linux):
+
+1. **ActiveStore Bypass Literal Wildcard Application Matching (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: The previous bypass inspection expression `$prog -like "*?*"` treated `?` as a PowerShell wildcard matching any single character, inadvertently classifying practically every non-empty application string as an ambiguous wildcard pattern.
+   - **Fix**: Replaced with explicit literal wildcard detection: `$trimmedProg.Contains("?") -or ($trimmedProg.Contains("*") -and $trimmedProg -ne "*")`.
+   - **Applicability Semantics**:
+     - Exact target executable path recognized as `ExactExecutable` (`applies = true`).
+     - `Any`, `*`, or empty string with no AppContainer package recognized as `AllPrograms` (`applies = true`).
+     - A different exact executable path is classified as unrelated (`applies = false`) and does not throw.
+     - Ambiguous wildcard application patterns (containing literal `?` or non-trivial `*`) throw an inspection exception and fail closed.
+     - Ordinary Windows executable paths (e.g. in `Program Files` or `System32`) are evaluated literally and are never classified as ambiguous.
+   - **Tests**: `tests/test_windows_firewall.py` (7 new bypass matching regression tests covering normal paths, exact match, lone star `*`, empty string, package restriction, multiple candidates, and native PowerShell literal wildcard evaluation).
+
+2. **Strict CIM StringValue Validation & Filter Semantic Integrity (`app/core/privacy/windows_firewall.py`):**
+   - **Defect**: `CimFieldRecord.from_raw()` permitted `StringValue` to be omitted or null for `VALID` states, and `validate_firewall_filters()` used `field.string_value or ""` which could silently treat a missing or null string value as an unrestricted empty string token, potentially allowing restrictive rules (`Value="TCP"`, `StringValue=null`) to pass as unrestricted.
+   - **Fix**:
+     - `CimFieldRecord.from_raw()` strictly requires non-null string `StringValue` when `state == CimFieldState.VALID`. Detects contradictions between `Value` and `StringValue` across strings, lists, booleans, and numbers, marking contradictory records as `MALFORMED`.
+     - `validate_firewall_filters()` validates both `field.string_value` and `field.value` directly against allowed tokens, and verifies that `value` matches `string_value`.
+     - Enforces property-specific empty string semantics: disallows empty string `""` for `LocalAddress`, `RemoteAddress`, `Protocol`, `LocalPort`, `RemotePort`, and `InterfaceAlias` (`allow_empty=False`). Permitted empty string is preserved only for `Service`, `InterfaceType`, `Package`, `IcmpType`, `DynamicTarget`, `LocalUser`, `RemoteUser`, and `RemoteMachine`.
+     - Validates `Authentication`, `Encryption`, and `OverrideBlockRules` values and string values strictly against `NotRequired` / `False`.
+   - **Tests**: `tests/test_windows_firewall.py` (6 new CIM StringValue integrity and filter validation regression tests; 3 new synthetic rejection checks in `scripts/verify_windows_firewall_inspection.py`).
+
+3. **Broad CIM Type Category Preservation (`app/core/privacy/windows_firewall.py`):**
+   - **Documentation & Alignment**: Clarified documentation to acknowledge that the production PowerShell serializer (`Get-CimFieldRecord`) classifies properties into broad type categories (`Boolean`, `Integer`, `String`, `Array`, `Null`, `None`) rather than WMI CIM metadata types.
+   - **Boundary Tests**: Reworked `test_cim_record_exact_type_preservation` and `test_cim_record_roundtrip_serialization_powershell` in `tests/test_windows_firewall.py` to exercise the actual PowerShell serialization boundary (`PS_CIM_SERIALIZER_SNIPPET` -> `Get-CimFieldRecord`) across all 6 broad type categories.
+
+4. **Expanded Test Suite (`tests/test_windows_firewall.py`):**
+   - Added 13 new regression tests, raising `tests/test_windows_firewall.py` to 224 tests. Total test suite expanded to 279 collected items (275 passed, 4 skipped on Windows; all 279 passing on Linux).
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -250,11 +283,11 @@ The final acceptance pass resolved all remaining concrete defects identified in 
 | Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
 | Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
-| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization with strict invariant checking, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) across exact executable and all-programs scopes without error suppression, exact stable-name creation/deletion via PowerShell, fail-closed strict 8-key JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization with strict invariant checking, strict StringValue integrity, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, exact stable-name creation/deletion via PowerShell, fail-closed strict 8-key JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 266 unit, regression, packaging, and integration tests (262 passed, 4 skipped on Windows; all 266 passed on Linux). |
+| Automated Pytest Test Suite | **Implemented & Tested** | 279 unit, regression, packaging, and integration tests (275 passed, 4 skipped on Windows; all 279 passed on Linux). |
 | Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 6-stage read-only ActiveStore inspection). |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |

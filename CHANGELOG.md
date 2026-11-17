@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.7] - Final Phase 1 Blocker Correction - 2026-11-17
+
+### Fixed
+- **ActiveStore Bypass Literal Wildcard Application Matching (`app/core/privacy/windows_firewall.py`)**:
+  - Replaced PowerShell wildcard expression `$prog -like "*?*"` with explicit literal wildcard detection: `$trimmedProg.Contains("?") -or ($trimmedProg.Contains("*") -and $trimmedProg -ne "*")`.
+  - Fixes single-character wildcard trap where `?` matched any non-empty string.
+  - Recognizes exact Tsukiko executable path as `ExactExecutable` (`applies = true`).
+  - Recognizes `Any`, `*`, or empty string (with no AppContainer package) as `AllPrograms` (`applies = true`).
+  - Classifies different exact executable paths as unrelated (`applies = false`) without throwing exceptions.
+  - Throws inspection exception on ambiguous wildcard patterns (`?` or embedded `*`), failing closed.
+  - Evaluates ordinary Windows executable paths without classifying them as ambiguous.
+- **Strict CIM StringValue Validation & Filter Semantic Integrity (`app/core/privacy/windows_firewall.py`)**:
+  - `CimFieldRecord.from_raw()` strictly requires non-null string `StringValue` for `VALID` states.
+  - Rejects contradictory combinations between `Value` and `StringValue` across strings, lists, booleans, and numeric types as `MALFORMED`.
+  - Disallows `field.string_value or ""` from treating missing/null values as unrestricted.
+  - `validate_firewall_filters()` validates both `field.string_value` and `field.value` directly against allowed tokens.
+  - Enforces property-specific semantics: disallows empty string `""` for `LocalAddress`, `RemoteAddress`, `Protocol`, `LocalPort`, `RemotePort`, and `InterfaceAlias` (`allow_empty=False`). Permitted empty string is preserved only for `Service`, `InterfaceType`, `Package`, `IcmpType`, `DynamicTarget`, `LocalUser`, `RemoteUser`, and `RemoteMachine`.
+  - Validates `Authentication`, `Encryption`, and `OverrideBlockRules` values and string values strictly against `NotRequired` / `False`.
+- **Broad CIM Type Category Preservation Documentation & Boundary Tests**:
+  - Clarified documentation in `PRIVACY.md`, `DEVELOPMENT.md`, `DEVELOPMENT_LOG.md`, and `CHANGELOG.md` that the production PowerShell serializer (`Get-CimFieldRecord`) classifies properties into broad type categories (`Boolean`, `Integer`, `String`, `Array`, `Null`, `None`).
+  - Reworked boundary tests in `tests/test_windows_firewall.py` to exercise the actual PowerShell serialization boundary (`PS_CIM_SERIALIZER_SNIPPET` -> `Get-CimFieldRecord`) across all 6 broad type categories.
+- **Test Suite Expansion**:
+  - Added 13 new regression tests in `tests/test_windows_firewall.py` (elevating module to 224 tests).
+  - Total test suite expanded to 279 collected items (275 passed, 4 skipped on Windows; all 279 passing on Linux).
+
 ## [0.1.6] - Final Phase 1 Acceptance Fixes - 2026-11-17
 
 ### Added

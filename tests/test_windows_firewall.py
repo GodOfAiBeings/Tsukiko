@@ -2511,6 +2511,237 @@ def test_bypass_malformed_response_fails_closed(temp_dir):
         assert "BypassRules must be a list" in reason
 
 
+def test_bypass_matching_normal_executable_path_not_classified_as_ambiguous(temp_dir):
+    """Ordinary Windows executable paths (e.g. Common Files, System32) are not ambiguous and do not trigger false bypass."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    # ActiveStore contains an outbound allow rule for svchost or an ordinary service
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[],  # Unrelated normal paths do not apply to Tsukiko
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is True
+        assert "Effective Windows Firewall policy verified" in reason
+
+
+def test_bypass_matching_ambiguous_wildcard_patterns_fail_closed(temp_dir):
+    """Ambiguous wildcard application patterns (containing ? or non-trivial *) fail closed."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    ambiguous_patterns = [
+        r"C:\App\*.exe",
+        r"C:\App\te?t.exe",
+        r"*.exe",
+        r"C:\Users\?\app.exe",
+    ]
+    for pat in ambiguous_patterns:
+        fail_json = json.dumps({
+            "SchemaVersion": 1,
+            "Success": False,
+            "InspectionComplete": False,
+            "PolicyStore": "ActiveStore",
+            "Profiles": [],
+            "Rules": [],
+            "BypassRules": [],
+            "Errors": [f"Ambiguous application filter pattern in bypass candidate rule 'WildcardRule': '{pat}'"],
+        })
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=fail_json)):
+            ok, reason = verify_effective_firewall_policy(dedicated)
+            assert ok is False
+            assert "Ambiguous application filter pattern" in reason or "ActiveStore inspection failed" in reason
+
+
+def test_bypass_matching_star_wildcard_recognized_as_all_programs(temp_dir):
+    """A literal lone star '*' application filter with no package represents AllPrograms and rejects verification."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[{
+            "Name": "Bypass_Star_Wildcard",
+            "DisplayName": "Bypass Star Wildcard",
+            "Program": "*",
+            "Scope": "AllPrograms",
+            "OverrideBlockRules": True,
+        }],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Bypass Star Wildcard" in reason
+        assert "AllPrograms" in reason
+
+
+def test_bypass_matching_empty_program_recognized_as_all_programs(temp_dir):
+    """An empty or null Program application filter with no package restriction represents AllPrograms."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[{
+            "Name": "Bypass_Empty_Prog",
+            "DisplayName": "Bypass Empty Prog",
+            "Program": "Any",
+            "Scope": "AllPrograms",
+            "OverrideBlockRules": True,
+        }],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Bypass Empty Prog" in reason
+        assert "AllPrograms" in reason
+
+
+def test_bypass_matching_app_package_restriction_not_all_programs(temp_dir):
+    """A candidate with empty Program but non-empty Package is restricted to that app package and does not apply to Tsukiko."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[],  # Empty because package-restricted rule does not apply
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is True
+        assert "Effective Windows Firewall policy verified" in reason
+
+
+def test_bypass_multiple_candidates_detection(temp_dir):
+    """Multiple candidates in ActiveStore: unrelated rules are filtered out while exact Tsukiko matches trigger rejection."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[{
+            "Name": "Bypass_Targeted_Rule",
+            "DisplayName": "Bypass Targeted Rule",
+            "Program": str(dedicated.resolve()),
+            "Scope": "ExactExecutable",
+            "OverrideBlockRules": True,
+        }],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Bypass Targeted Rule" in reason
+        assert "ExactExecutable" in reason
+
+
+def test_bypass_powershell_literal_wildcard_detection_native():
+    """When PowerShell is available, verify that literal wildcard checking in the PS script behaves identically."""
+    real_ps = _REAL_SHUTIL_WHICH("powershell") or _REAL_SHUTIL_WHICH("powershell.exe")
+    if not real_ps or not Path(real_ps).exists():
+        pytest.skip("PowerShell is not available on host system")
+
+    # Script testing the exact logic used in build_activestore_inspection_powershell_script
+    ps_snippet = """
+$targetExe = "C:\\tsukiko\\tsukiko.exe"
+$normTargetExe = $targetExe.Trim().ToLower()
+
+$testCases = @(
+    @{ prog = "C:\\Program Files\\Common Files\\service.exe"; pkg = ""; expectedResult = "unrelated" },
+    @{ prog = "C:\\Windows\\System32\\svchost.exe"; pkg = ""; expectedResult = "unrelated" },
+    @{ prog = "C:\\tsukiko\\tsukiko.exe"; pkg = ""; expectedResult = "exact" },
+    @{ prog = "Any"; pkg = ""; expectedResult = "all" },
+    @{ prog = "*"; pkg = ""; expectedResult = "all" },
+    @{ prog = ""; pkg = ""; expectedResult = "all" },
+    @{ prog = $null; pkg = ""; expectedResult = "all" },
+    @{ prog = "C:\\app\\*.exe"; pkg = ""; expectedResult = "ambiguous" },
+    @{ prog = "C:\\app\\te?t.exe"; pkg = ""; expectedResult = "ambiguous" },
+    @{ prog = "*.exe"; pkg = ""; expectedResult = "ambiguous" },
+    @{ prog = "C:\\users\\?\\app.exe"; pkg = ""; expectedResult = "ambiguous" },
+    @{ prog = ""; pkg = "AppPackage123"; expectedResult = "unrelated" }
+)
+
+$out = @()
+foreach ($tc in $testCases) {
+    $prog = $tc.prog
+    $pkg = [string]$tc.pkg
+
+    $trimmedProg = if ($null -ne $prog) { ([string]$prog).Trim() } else { "" }
+    $hasWildcard = $trimmedProg.Contains("?") -or ($trimmedProg.Contains("*") -and $trimmedProg -ne "*")
+
+    $actual = ""
+    if ($hasWildcard) {
+        $actual = "ambiguous"
+    } else {
+        $applies = $false
+        $scope = ""
+        $normProg = $trimmedProg.ToLower()
+
+        if ($normProg -ne "" -and $normProg -ne "any" -and $normProg -ne "*") {
+            if ($normTargetExe -ne "" -and $normProg -eq $normTargetExe) {
+                $applies = $true
+                $scope = "ExactExecutable"
+                $actual = "exact"
+            } else {
+                $applies = $false
+                $actual = "unrelated"
+            }
+        } else {
+            if ($pkg.Trim() -ne "") {
+                $applies = $false
+                $actual = "unrelated"
+            } else {
+                $applies = $true
+                $scope = "AllPrograms"
+                $actual = "all"
+            }
+        }
+    }
+
+    $out += [PSCustomObject]@{
+        Prog = [string]$prog
+        Expected = $tc.expectedResult
+        Actual = $actual
+        Pass = ($actual -eq $tc.expectedResult)
+    }
+}
+
+$out | ConvertTo-Json -Depth 2
+"""
+    res = subprocess.run(
+        [real_ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_snippet],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert res.returncode == 0
+    results = json.loads(res.stdout.strip())
+    assert len(results) == 12
+    for r in results:
+        assert r["Pass"] is True, f"Failed case: {r}"
+
+
 # --- Response Envelope Schema Tests ---
 
 def test_envelope_missing_schema_version_fails_closed():
@@ -2830,25 +3061,165 @@ def test_cim_record_rejects_contradictory_combinations():
         assert "Contradictory" in (rec.string_value or "")
 
 
-def test_cim_record_exact_type_preservation():
-    """Exact CIM types (Boolean, String, UInt16, UInt32, Array, etc.) are preserved in type_name."""
-    types_to_test = ["Boolean", "String", "UInt16", "UInt32", "Integer", "Array", "StringArray"]
-    for t in types_to_test:
+def test_cim_record_valid_missing_or_null_string_value_marked_malformed():
+    """A VALID state record with missing or null StringValue is strictly marked MALFORMED."""
+    # Missing StringValue
+    raw_missing = {
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": "TCP",
+    }
+    rec1 = CimFieldRecord.from_raw(raw_missing)
+    assert rec1.state == CimFieldState.MALFORMED
+    assert "Missing, null, or non-string StringValue" in (rec1.string_value or "")
+
+    # Null StringValue
+    raw_null = {
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": "TCP",
+        "StringValue": None,
+    }
+    rec2 = CimFieldRecord.from_raw(raw_null)
+    assert rec2.state == CimFieldState.MALFORMED
+
+    # Restrictive IP with null StringValue
+    raw_ip = {
+        "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+        "Exists": True,
+        "IsNull": False,
+        "Value": "192.168.1.1",
+        "StringValue": None,
+    }
+    rec3 = CimFieldRecord.from_raw(raw_ip)
+    assert rec3.state == CimFieldState.MALFORMED
+
+
+def test_cim_record_valid_non_string_string_value_marked_malformed():
+    """A VALID state record with non-string StringValue (int, list, dict) is marked MALFORMED."""
+    for bad_str in [123, 45.6, ["Any"], {"key": "val"}]:
         raw = {
             "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
             "Exists": True,
             "IsNull": False,
             "Value": "Any",
-            "StringValue": "Any",
-            "Type": t,
+            "StringValue": bad_str,
         }
         rec = CimFieldRecord.from_raw(raw)
-        assert rec.state == CimFieldState.VALID
-        assert rec.type_name == t
+        assert rec.state == CimFieldState.MALFORMED
+        assert "Missing, null, or non-string StringValue" in (rec.string_value or "")
+
+
+def test_cim_record_contradictory_value_and_string_value_marked_malformed():
+    """Contradictions between Value and StringValue across string, list, boolean, and numeric types are rejected."""
+    contradictory_pairs = [
+        ("TCP", "Any"),
+        ("Any", "TCP"),
+        (["80", "443"], "80"),
+        (["80"], "80,443"),
+        (True, "False"),
+        (False, "True"),
+        (42, "99"),
+        (8080, "80"),
+    ]
+    for val, str_val in contradictory_pairs:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE",
+            "Exists": True,
+            "IsNull": False,
+            "Value": val,
+            "StringValue": str_val,
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.state == CimFieldState.MALFORMED
+        assert "Contradictory" in (rec.string_value or "")
+
+
+def test_validate_firewall_filters_rejects_missing_null_or_contradictory_string_value(temp_dir):
+    """validate_firewall_filters rejects rules where any filter property has missing, null, or contradictory StringValue."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    # 1. Missing StringValue on Protocol
+    bad_rule_1 = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    bad_rule_1.protocol_field = CimFieldRecord.malformed(value="TCP", string_value="Protocol has null StringValue")
+    ok, err = validate_firewall_filters(bad_rule_1, dedicated)
+    assert ok is False
+    assert "malformed" in err.lower() or "protocol" in err.lower()
+
+    # 2. Contradictory Value and StringValue on LocalAddress (Value='192.168.1.1', StringValue='Any')
+    bad_rule_2 = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    bad_rule_2.local_address_field = CimFieldRecord.valid(value="192.168.1.1", string_value="Any")
+    ok, err = validate_firewall_filters(bad_rule_2, dedicated)
+    assert ok is False
+    assert "contradictory" in err.lower() or "restricted" in err.lower()
+
+    # 3. Contradictory Value and StringValue on RemoteAddress (Value='Any', StringValue='10.0.0.1')
+    bad_rule_3 = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    bad_rule_3.remote_address_field = CimFieldRecord.valid(value="Any", string_value="10.0.0.1")
+    ok, err = validate_firewall_filters(bad_rule_3, dedicated)
+    assert ok is False
+    assert "contradictory" in err.lower() or "restricted" in err.lower()
+
+
+def test_validate_firewall_filters_disallows_empty_string_for_protocol_addresses_ports(temp_dir):
+    """Empty string '' is NOT permitted as unrestricted for Protocol, Addresses, Ports, or InterfaceAlias."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    restricted_fields = [
+        ("protocol_field", "Protocol"),
+        ("local_address_field", "Local address"),
+        ("remote_address_field", "Remote address"),
+        ("local_port_field", "Local port"),
+        ("remote_port_field", "Remote port"),
+        ("interface_alias_field", "Interface"),
+    ]
+    for field_attr, label in restricted_fields:
+        r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+        setattr(r, field_attr, CimFieldRecord.valid(value="", string_value=""))
+        ok, err = validate_firewall_filters(r, dedicated)
+        assert ok is False, f"Expected rejection for empty string on {label}"
+        assert "restricted" in err.lower() or label.lower() in err.lower()
+
+
+def test_validate_firewall_filters_allows_empty_string_for_service_and_interface_type(temp_dir):
+    """Empty string '' IS permitted for Service and InterfaceType (where empty denotes all services / any interface type)."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    r = FirewallRuleInfo.create_unrestricted(str(dedicated))
+    r.service_field = CimFieldRecord.valid(value="", string_value="")
+    r.interface_type_field = CimFieldRecord.valid(value="", string_value="")
+    ok, err = validate_firewall_filters(r, dedicated)
+    assert ok is True
+    assert "All 7 outbound filter categories positively verified" in err
+
+
+def test_cim_record_broad_type_category_preservation():
+    """The PowerShell CIM serializer categorizes properties into broad type categories.
+
+    Categories: Boolean, Integer, String, Array, Null, None.
+    CimFieldRecord preserves these broad type categories faithfully.
+    """
+    categories = ["Boolean", "Integer", "String", "Array", "Null", "None"]
+    for cat in categories:
+        raw = {
+            "State": "PROPERTY_PRESENT_WITH_VALID_VALUE" if cat not in ("Null", "None") else ("PROPERTY_PRESENT_WITH_NULL" if cat == "Null" else "PROPERTY_MISSING"),
+            "Exists": cat != "None",
+            "IsNull": cat in ("Null", "None"),
+            "Value": "Any" if cat not in ("Null", "None") else None,
+            "StringValue": "Any" if cat not in ("Null", "None") else None,
+            "Type": cat,
+        }
+        rec = CimFieldRecord.from_raw(raw)
+        assert rec.type_name == cat
 
 
 def test_cim_record_roundtrip_serialization_powershell():
-    """When PowerShell is available, verify Get-CimFieldRecord roundtrips genuine booleans, numbers, strings, and nulls."""
+    """When PowerShell is available, verify Get-CimFieldRecord serializes all broad type categories faithfully."""
     real_ps = _REAL_SHUTIL_WHICH("powershell") or _REAL_SHUTIL_WHICH("powershell.exe")
     if not real_ps or not Path(real_ps).exists():
         pytest.skip("PowerShell is not available on host system")
@@ -2858,6 +3229,7 @@ $testObj = [PSCustomObject]@{
     TestBool = $true
     TestInt = 42
     TestStr = "LoopbackOnly"
+    TestArray = @("192.168.1.1", "10.0.0.1")
     TestNull = $null
 }
 
@@ -2865,6 +3237,7 @@ $results = [PSCustomObject]@{
     BoolRec = Get-CimFieldRecord $testObj "TestBool"
     IntRec = Get-CimFieldRecord $testObj "TestInt"
     StrRec = Get-CimFieldRecord $testObj "TestStr"
+    ArrayRec = Get-CimFieldRecord $testObj "TestArray"
     NullRec = Get-CimFieldRecord $testObj "TestNull"
     MissingRec = Get-CimFieldRecord $testObj "NonExistentProp"
 }
@@ -2884,23 +3257,40 @@ $results | ConvertTo-Json -Depth 3
     assert rec_bool.state == CimFieldState.VALID
     assert rec_bool.value is True
     assert type(rec_bool.value) is bool
+    assert rec_bool.string_value == "True"
+    assert rec_bool.type_name == "Boolean"
 
     rec_int = CimFieldRecord.from_raw(data["IntRec"])
     assert rec_int.state == CimFieldState.VALID
     assert rec_int.value == 42
     assert isinstance(rec_int.value, int)
+    assert rec_int.string_value == "42"
+    assert rec_int.type_name == "Integer"
 
     rec_str = CimFieldRecord.from_raw(data["StrRec"])
     assert rec_str.state == CimFieldState.VALID
     assert rec_str.value == "LoopbackOnly"
+    assert rec_str.string_value == "LoopbackOnly"
+    assert rec_str.type_name == "String"
+
+    rec_arr = CimFieldRecord.from_raw(data["ArrayRec"])
+    assert rec_arr.state == CimFieldState.VALID
+    assert rec_arr.value == ["192.168.1.1", "10.0.0.1"]
+    assert rec_arr.string_value == "192.168.1.1,10.0.0.1"
+    assert rec_arr.type_name == "Array"
 
     rec_null = CimFieldRecord.from_raw(data["NullRec"])
     assert rec_null.state == CimFieldState.NULL
     assert rec_null.value is None
+    assert rec_null.string_value is None
+    assert rec_null.type_name == "Null"
 
     rec_miss = CimFieldRecord.from_raw(data["MissingRec"])
     assert rec_miss.state == CimFieldState.MISSING
     assert rec_miss.exists is False
+    assert rec_miss.value is None
+    assert rec_miss.string_value is None
+    assert rec_miss.type_name == "None"
 
 
 

@@ -168,8 +168,22 @@ class CimFieldRecord(BaseModel):
             if state_enum == CimFieldState.VALID:
                 if exists is not True or is_null is not False or val is None:
                     return cls.malformed(val, f"Contradictory VALID state: exists={exists}, is_null={is_null}, value={val!r}")
-                if str_val is not None and not isinstance(str_val, str):
-                    return cls.malformed(val, f"Non-string StringValue for VALID state: {str_val!r}")
+                if str_val is None or not isinstance(str_val, str):
+                    return cls.malformed(val, f"Missing, null, or non-string StringValue for VALID state: {str_val!r}")
+                if isinstance(val, str):
+                    if val.strip().lower() != str_val.strip().lower():
+                        return cls.malformed(val, f"Contradictory Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
+                elif isinstance(val, list):
+                    joined_val = ",".join(str(x) for x in val).strip().lower()
+                    if joined_val != str_val.strip().lower():
+                        return cls.malformed(val, f"Contradictory Array Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
+                elif isinstance(val, bool):
+                    expected_str = "true" if val else "false"
+                    if str_val.strip().lower() != expected_str:
+                        return cls.malformed(val, f"Contradictory Boolean Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
+                elif isinstance(val, (int, float)):
+                    if str(val).strip().lower() != str_val.strip().lower():
+                        return cls.malformed(val, f"Contradictory Numeric Value and StringValue for VALID state: Value={val!r}, StringValue={str_val!r}")
             elif state_enum == CimFieldState.NULL:
                 if exists is not True or is_null is not True or val is not None:
                     return cls.malformed(val, f"Contradictory NULL state: exists={exists}, is_null={is_null}, value={val!r}")
@@ -841,37 +855,73 @@ def validate_firewall_filters(
         field: CimFieldRecord,
         prop_label: str,
         extra_allowed: tuple[str, ...] = (),
+        allow_empty: bool = False,
     ) -> Tuple[bool, str]:
         if field.state == CimFieldState.MISSING or field.is_null:
             return False, f"Filter property '{prop_label}' is missing or null (cannot be verified as unrestricted)."
         if field.state == CimFieldState.MALFORMED:
-            return False, f"Filter property '{prop_label}' has malformed value."
-        clean = (field.string_value or "").strip().lower()
-        allowed = ("", "any", "*", *extra_allowed)
-        if clean not in allowed:
+            return False, f"Filter property '{prop_label}' has malformed value: {field.string_value}."
+        if field.state != CimFieldState.VALID:
+            return False, f"Filter property '{prop_label}' has invalid state: {field.state}."
+        if field.string_value is None or not isinstance(field.string_value, str):
+            return False, f"Filter property '{prop_label}' has missing, null, or non-string StringValue."
+
+        str_clean = field.string_value.strip().lower()
+        allowed = ("any", "*", *extra_allowed)
+        if allow_empty:
+            allowed = allowed + ("",)
+
+        if str_clean not in allowed:
             return False, f"{prop_label} filter is restricted: '{field.string_value}' (must be Any or unrestricted)."
+
+        # Validate Value matches StringValue and is not restricted
+        if field.value is None:
+            return False, f"Filter property '{prop_label}' has null Value."
+        if isinstance(field.value, str):
+            val_clean = field.value.strip().lower()
+            if val_clean not in allowed:
+                return False, f"{prop_label} filter Value is restricted: '{field.value}' (must be Any or unrestricted)."
+            if val_clean != str_clean:
+                return False, f"{prop_label} filter has contradictory Value ({field.value!r}) and StringValue ({field.string_value!r})."
+        elif isinstance(field.value, list):
+            if len(field.value) == 0 and not allow_empty:
+                return False, f"{prop_label} filter Value array is empty (must be Any or unrestricted)."
+            for elem in field.value:
+                elem_clean = str(elem).strip().lower()
+                if elem_clean not in allowed:
+                    return False, f"{prop_label} filter Value contains restricted element: '{elem}' (must be Any or unrestricted)."
+            joined = ",".join(str(x) for x in field.value).strip().lower()
+            if joined != str_clean:
+                return False, f"{prop_label} filter has contradictory Array Value ({field.value!r}) and StringValue ({field.string_value!r})."
+        elif isinstance(field.value, (int, float)):
+            val_str = str(field.value).strip().lower()
+            if val_str not in allowed:
+                return False, f"{prop_label} filter Value is restricted: '{field.value}' (must be Any or unrestricted)."
+            if val_str != str_clean:
+                return False, f"{prop_label} filter has contradictory Numeric Value ({field.value!r}) and StringValue ({field.string_value!r})."
+
         return True, ""
 
     # -------------------------------------------------------------
     # Category 2: Address filter
     # -------------------------------------------------------------
-    ok, err = check_field_unrestricted(rule.local_address_field, "Local address")
+    ok, err = check_field_unrestricted(rule.local_address_field, "Local address", allow_empty=False)
     if not ok:
         return False, err
-    ok, err = check_field_unrestricted(rule.remote_address_field, "Remote address")
+    ok, err = check_field_unrestricted(rule.remote_address_field, "Remote address", allow_empty=False)
     if not ok:
         return False, err
 
     # -------------------------------------------------------------
     # Category 3: Port & protocol filter
     # -------------------------------------------------------------
-    ok, err = check_field_unrestricted(rule.protocol_field, "Protocol", extra_allowed=("0", "256"))
+    ok, err = check_field_unrestricted(rule.protocol_field, "Protocol", extra_allowed=("0", "256"), allow_empty=False)
     if not ok:
         return False, err
-    ok, err = check_field_unrestricted(rule.local_port_field, "Local port")
+    ok, err = check_field_unrestricted(rule.local_port_field, "Local port", allow_empty=False)
     if not ok:
         return False, err
-    ok, err = check_field_unrestricted(rule.remote_port_field, "Remote port")
+    ok, err = check_field_unrestricted(rule.remote_port_field, "Remote port", allow_empty=False)
     if not ok:
         return False, err
 
@@ -881,10 +931,10 @@ def validate_firewall_filters(
     if rule.icmp_type_field.is_null:
         return False, "Port filter missing or null IcmpType property."
     if rule.icmp_type_field.state == CimFieldState.MALFORMED:
-        return False, "Port filter has malformed IcmpType property."
-    icmp_val = (rule.icmp_type or "").strip().lower()
-    if icmp_val not in ("", "any", "*"):
-        return False, f"Port filter restricts ICMP type: '{rule.icmp_type}'."
+        return False, f"Port filter has malformed IcmpType property: {rule.icmp_type_field.string_value}."
+    ok, err = check_field_unrestricted(rule.icmp_type_field, "ICMP type", extra_allowed=("0",), allow_empty=False)
+    if not ok:
+        return False, f"Port filter restricts ICMP type: '{rule.icmp_type}'." if "restricted" in err else err
 
     # DynamicTarget
     if rule.dynamic_target_field.state == CimFieldState.MISSING:
@@ -892,29 +942,29 @@ def validate_firewall_filters(
     if rule.dynamic_target_field.is_null:
         return False, "Port filter missing or null DynamicTarget property."
     if rule.dynamic_target_field.state == CimFieldState.MALFORMED:
-        return False, "Port filter has malformed DynamicTarget property."
-    dyn_val = (rule.dynamic_target or "").strip().lower()
-    if dyn_val not in ("", "any", "*", "0"):
-        return False, f"Port filter restricts dynamic target: '{rule.dynamic_target}'."
+        return False, f"Port filter has malformed DynamicTarget property: {rule.dynamic_target_field.string_value}."
+    ok, err = check_field_unrestricted(rule.dynamic_target_field, "Dynamic target", extra_allowed=("0",), allow_empty=True)
+    if not ok:
+        return False, f"Port filter restricts dynamic target: '{rule.dynamic_target}'." if "restricted" in err else err
 
     # -------------------------------------------------------------
     # Category 4: Service filter
     # -------------------------------------------------------------
-    ok, err = check_field_unrestricted(rule.service_field, "Service")
+    ok, err = check_field_unrestricted(rule.service_field, "Service", allow_empty=True)
     if not ok:
         return False, err
 
     # -------------------------------------------------------------
     # Category 5: Interface filter
     # -------------------------------------------------------------
-    ok, err = check_field_unrestricted(rule.interface_alias_field, "Interface")
+    ok, err = check_field_unrestricted(rule.interface_alias_field, "Interface", allow_empty=False)
     if not ok:
         return False, err
 
     # -------------------------------------------------------------
     # Category 6: Interface-type filter
     # -------------------------------------------------------------
-    ok, err = check_field_unrestricted(rule.interface_type_field, "Interface type", extra_allowed=("0",))
+    ok, err = check_field_unrestricted(rule.interface_type_field, "Interface type", extra_allowed=("0",), allow_empty=True)
     if not ok:
         return False, err
 
@@ -925,19 +975,31 @@ def validate_firewall_filters(
     if rule.authentication_field.state == CimFieldState.MISSING or rule.authentication_field.is_null:
         return False, "Security filter missing or null Authentication property (must be explicitly NotRequired)."
     if rule.authentication_field.state == CimFieldState.MALFORMED:
-        return False, "Security filter has malformed Authentication property."
-    auth_val = (rule.authentication or "").strip().lower()
+        return False, f"Security filter has malformed Authentication property: {rule.authentication_field.string_value}."
+    if rule.authentication_field.string_value is None or not isinstance(rule.authentication_field.string_value, str):
+        return False, "Security filter has missing or non-string Authentication StringValue."
+    auth_val = rule.authentication_field.string_value.strip().lower()
     if auth_val not in ("notrequired", "no", "0"):
         return False, f"Security filter requires authentication: '{rule.authentication}' (must be NotRequired)."
+    if rule.authentication_field.value is not None:
+        raw_auth = str(rule.authentication_field.value).strip().lower()
+        if raw_auth not in ("notrequired", "no", "0"):
+            return False, f"Security filter requires authentication: '{rule.authentication_field.value}' (must be NotRequired)."
 
     # Encryption
     if rule.encryption_field.state == CimFieldState.MISSING or rule.encryption_field.is_null:
         return False, "Security filter missing or null Encryption property (must be explicitly NotRequired)."
     if rule.encryption_field.state == CimFieldState.MALFORMED:
-        return False, "Security filter has malformed Encryption property."
-    enc_val = (rule.encryption or "").strip().lower()
+        return False, f"Security filter has malformed Encryption property: {rule.encryption_field.string_value}."
+    if rule.encryption_field.string_value is None or not isinstance(rule.encryption_field.string_value, str):
+        return False, "Security filter has missing or non-string Encryption StringValue."
+    enc_val = rule.encryption_field.string_value.strip().lower()
     if enc_val not in ("notrequired", "no", "0"):
         return False, f"Security filter requires encryption: '{rule.encryption}' (must be NotRequired)."
+    if rule.encryption_field.value is not None:
+        raw_enc = str(rule.encryption_field.value).strip().lower()
+        if raw_enc not in ("notrequired", "no", "0"):
+            return False, f"Security filter requires encryption: '{rule.encryption_field.value}' (must be NotRequired)."
 
     # OverrideBlockRules: strictly boolean False
     if rule.override_block_rules_field.state == CimFieldState.MISSING or rule.override_block_rules_field.is_null:
@@ -954,27 +1016,33 @@ def validate_firewall_filters(
         return False, "Security filter missing or null LocalUser property (must be unrestricted Any)."
     if rule.local_user_field.state == CimFieldState.MALFORMED:
         return False, "Security filter has malformed LocalUser property."
-    usr_val = (rule.local_user or "").strip().lower()
-    if usr_val not in ("", "any", "*"):
-        return False, f"Security filter restricts local users: '{rule.local_user}'."
+    ok, err = check_field_unrestricted(rule.local_user_field, "LocalUser", allow_empty=True)
+    if not ok:
+        if "is restricted" in err:
+            return False, f"Security filter restricts local users: '{rule.local_user}'."
+        return False, err
 
     # RemoteUser: singular CIM property
     if rule.remote_user_field.state == CimFieldState.MISSING or rule.remote_user_field.is_null:
         return False, "Security filter missing or null RemoteUser property (must be unrestricted Any)."
     if rule.remote_user_field.state == CimFieldState.MALFORMED:
         return False, "Security filter has malformed RemoteUser property."
-    rusr_val = (rule.remote_user or "").strip().lower()
-    if rusr_val not in ("", "any", "*"):
-        return False, f"Security filter restricts remote users: '{rule.remote_user}'."
+    ok, err = check_field_unrestricted(rule.remote_user_field, "RemoteUser", allow_empty=True)
+    if not ok:
+        if "is restricted" in err:
+            return False, f"Security filter restricts remote users: '{rule.remote_user}'."
+        return False, err
 
     # RemoteMachine: singular CIM property
     if rule.remote_machine_field.state == CimFieldState.MISSING or rule.remote_machine_field.is_null:
         return False, "Security filter missing or null RemoteMachine property (must be unrestricted Any)."
     if rule.remote_machine_field.state == CimFieldState.MALFORMED:
         return False, "Security filter has malformed RemoteMachine property."
-    rmach_val = (rule.remote_machine or "").strip().lower()
-    if rmach_val not in ("", "any", "*"):
-        return False, f"Security filter restricts remote machines: '{rule.remote_machine}'."
+    ok, err = check_field_unrestricted(rule.remote_machine_field, "RemoteMachine", allow_empty=True)
+    if not ok:
+        if "is restricted" in err:
+            return False, f"Security filter restricts remote machines: '{rule.remote_machine}'."
+        return False, err
 
     return True, "All 7 outbound filter categories positively verified as unrestricted."
 
@@ -1567,7 +1635,9 @@ try {
         $prog = [string]$app.Program
         $pkg = [string]$app.Package
 
-        if ($prog -like "*?*" -or ($prog.Contains("*") -and $prog -ne "*")) {
+        $trimmedProg = if ($null -ne $prog) { ([string]$prog).Trim() } else { "" }
+        $hasWildcard = $trimmedProg.Contains("?") -or ($trimmedProg.Contains("*") -and $trimmedProg -ne "*")
+        if ($hasWildcard) {
             throw "Ambiguous application filter pattern in bypass candidate rule '$($cr.Name)': '$prog'"
         }
 
@@ -1575,7 +1645,7 @@ try {
         $scope = ""
 
         $normTargetExe = if ($targetExe) { $targetExe.Trim().ToLower() } else { "" }
-        $normProg = $prog.Trim().ToLower()
+        $normProg = $trimmedProg.ToLower()
 
         if ($normProg -ne "" -and $normProg -ne "any" -and $normProg -ne "*") {
             if ($normTargetExe -ne "" -and $normProg -eq $normTargetExe) {

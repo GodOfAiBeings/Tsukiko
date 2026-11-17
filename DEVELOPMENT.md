@@ -53,13 +53,13 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (266 test items: 262 passed, 4 Unix-specific skipped on Windows; all 266 passing on Linux):
+Execute the complete automated test suite (279 test items: 275 passed, 4 Unix-specific skipped on Windows; all 279 passing on Linux):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, strict CIM field-state invariants, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) across exact executable and all-programs scopes without error suppression, precise rule ownership identity, safe deletion by stable internal Name, strict 8-key response envelope validation, and structured query result parsing (211 tests).
+* [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, strict CIM field-state invariants, non-null StringValue consistency checks, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, precise rule ownership identity, safe deletion by stable internal Name, strict 8-key response envelope validation, and structured query result parsing (224 tests).
 * [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
 * [`tests/test_hardware.py`](tests/test_hardware.py): Hardware inspection, fail-safe VRAM classification matrix, and approximate model footprint estimation (14 tests).
 * [`tests/test_entrypoint.py`](tests/test_entrypoint.py): Subprocess-based bounded 5.0s deadlock tests with automatic child process reaping (8 tests).
@@ -72,8 +72,8 @@ pytest -v
 ## 5. Dual-Platform CI Matrix
 
 Continuous Integration runs on GitHub Actions across two distinct environments:
-1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (262 passed, 4 Unix-specific skipped).
-2. **Linux (`ubuntu-latest`)**: Validates full 266-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (275 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 279-test suite including genuine native `sendmsg` (TCP/UDP) communication and real `AF_UNIX` domain socket IPC.
 
 ---
 
@@ -127,7 +127,7 @@ Enforced in [`app/core/privacy/windows_firewall.py`](app/core/privacy/windows_fi
 * **Dedicated Binary Validation**: Targets must be regular files named `tsukiko.exe` containing the Windows DOS/PE `MZ` binary header.
 * **PE Header Limitation**: Validating the PE header confirms binary format, not cryptographic Authenticode signature verification.
 * **Explicit User Authorization**: Never runs automatic rule modifications at application startup. User authorization (`user_authorized=True`) and administrator elevation are strictly required.
-* **Read-Only Inspection Verification**: Windows CI runs [`scripts/verify_windows_firewall_inspection.py`](scripts/verify_windows_firewall_inspection.py) with 5 stages (profiles, rules sample, 23-property schema, boolean serialization, parser & synthetic rejections) with strictly zero system mutations.
+* **Read-Only Inspection Verification**: Windows CI runs [`scripts/verify_windows_firewall_inspection.py`](scripts/verify_windows_firewall_inspection.py) with 6 stages (profiles, unmanufactured bypass discovery, 26-field schema, CIM field-state consistency & boolean fidelity, parser & synthetic rejections, fail-closed cmdlet error behavior) with strictly zero system mutations.
 
 ---
 
@@ -139,7 +139,7 @@ A dual-platform CI workflow is established at [`.github/workflows/ci.yml`](.gith
   * Ubuntu Linux (`ubuntu-latest`, Python 3.11 x64).
 * **Pipeline**:
   1. Installs base and developer dependencies.
-  2. Runs full 221-item pytest suite (217 passed, 4 skipped on Windows; all 221 passing on Linux).
+  2. Runs full 279-item pytest suite (275 passed, 4 skipped on Windows; all 279 passing on Linux).
   3. Builds distribution wheel (`tsukiko-*.whl`).
   4. Installs wheel in clean environment and executes `tsukiko --check-hardware` outside source tree.
   5. Windows runner executes read-only ActiveStore inspection verification (`scripts/verify_windows_firewall_inspection.py`).

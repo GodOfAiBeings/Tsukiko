@@ -90,7 +90,13 @@ Tsukiko strictly validates network profiles and distinguishes persistent rules f
   * Verifies all three network profiles (`Domain`, `Private`, `Public`) are enabled in ActiveStore.
   * Verifies local firewall rule merging is allowed (`AllowLocalFirewallRules` is true) and not blocked by corporate GPO.
   * Confirms that an effective Outbound Block rule exists in ActiveStore, is enabled, outbound, blocking, covers all profiles, and matches the target binary.
-  * Evaluates ActiveStore for conflicting Outbound Allow bypass rules without error suppression: enumerates all security filters with `OverrideBlockRules=True` using `Get-NetFirewallSecurityFilter -PolicyStore ActiveStore -OverrideBlockRules $true`. Resolves candidate rules and verifies 1-to-1 association cardinality. Evaluates applicability against Tsukiko: detects exact-executable matches (`Program == targetExe`) and unrestricted all-programs rules (`Program` is Any/empty/`*` with no AppContainer package). Unrelated application rules do not invalidate Tsukiko. If any applicable bypass rule exists, reports bypass conflict and rejects `os_policy_active`.
+  * Evaluates ActiveStore for conflicting Outbound Allow bypass rules without error suppression: enumerates all security filters with `OverrideBlockRules=True` using `Get-NetFirewallSecurityFilter -PolicyStore ActiveStore -OverrideBlockRules $true`. Resolves candidate rules and verifies 1-to-1 association cardinality. Evaluates applicability against Tsukiko via strict literal wildcard detection:
+    - Ambiguous wildcard application patterns (containing literal `?` or non-trivial `*` patterns like `C:\App\*.exe`, `*.exe`, `C:\App\te?t.exe`) fail closed by throwing an inspection exception.
+    - Ordinary Windows executable paths (e.g. `C:\Program Files\Common Files\service.exe`, `C:\Windows\System32\svchost.exe`) are evaluated literally without wildcard expansion; unrelated paths are classified as unrelated (`applies = false`) and do not invalidate Tsukiko.
+    - Exact executable path matches are classified as `ExactExecutable` (`applies = true`).
+    - Unrestricted application scopes (`Program` is Any, empty, or `*` with no AppContainer package) are classified as `AllPrograms` (`applies = true`).
+    - AppContainer package-restricted rules (`Package` is non-empty) do not apply to unpackaged Win32 binaries (`applies = false`).
+    - If any applicable bypass rule exists, reports bypass conflict and rejects `os_policy_active`.
   * Verifies all 18 outbound filter properties across all 7 categories are unrestricted (`validate_firewall_filters`):
     1. **Application Filter (`Get-NetFirewallApplicationFilter`)**:
        - `Program`: Matches the dedicated deployment binary path (`tsukiko.exe`). Wildcards and empty targets are rejected.
@@ -133,13 +139,13 @@ Tsukiko enforces a unique, documented rule ownership and query mechanism:
   * Foreign rules sharing the name prefix or display name are rejected and will never be deleted.
   * If multiple rules claim Tsukiko ownership, deletion halts with an ambiguous identity error requiring operator intervention.
   * Creation refuses to proceed if pre-creation inspection fails or if a conflicting foreign rule already exists.
-* **Lossless CIM Serialization & Association Integrity:**
-  * Inspection scripts query CIM objects using `Get-CimFieldRecord` helper, outputting structured records with explicit state:
+* **Lossless CIM Serialization & Broad Type Category Preservation:**
+  * Inspection scripts query CIM objects using the `Get-CimFieldRecord` helper, outputting structured records with explicit state:
     - `PROPERTY_PRESENT_WITH_VALID_VALUE`
     - `PROPERTY_PRESENT_WITH_NULL`
     - `PROPERTY_MISSING`
     - `PROPERTY_PRESENT_WITH_MALFORMED_VALUE`
-  * Eliminates lossy conversions (`[string]`, `[bool]`) in PowerShell that previously collapsed `$null` into empty strings or booleans into strings.
+  * Preserves broad CIM type categories (`Boolean`, `Integer`, `String`, `Array`, `Null`, `None`) across the JSON serialization boundary without lossy conversions that previously collapsed `$null` into empty strings or booleans into strings.
   * Association integrity check confirms exactly 1 associated CIM filter object per category (`Count -eq 1`). Multiple or missing associated filter objects trigger immediate failure.
 * **PowerShell Fail-Closed Response Envelope (`SchemaVersion: 1`):**
   * Inspection scripts execute under `$ErrorActionPreference = 'Stop'` without `-ErrorAction SilentlyContinue`. Cmdlet failures, missing modules, or CIM filter errors trigger the catch handler, emit a structured error envelope, and terminate with exit code 1.
@@ -149,7 +155,8 @@ Tsukiko enforces a unique, documented rule ownership and query mechanism:
   * Pre-creation inspection requires complete, successful inspection before allowing rule creation; post-deletion verification requires complete, successful re-inspection to confirm rule elimination.
 * **Strict Missing-Value Semantics & Invariant Field-State Validation:**
   * The parser never manufactures unrestricted defaults (`"Any"`, `"NotRequired"`, `False`) when properties are missing or null.
-  * `CimFieldRecord.from_raw()` rejects non-boolean `Exists` / `IsNull` values (disallowing arbitrary string coercion), enforces state consistency across `VALID`, `NULL`, `MISSING`, and `MALFORMED`, and rejects contradictory combinations.
+  * `CimFieldRecord.from_raw()` requires non-null string `StringValue` matching `Value` for `VALID` state, rejects contradictory values (e.g. `Value="TCP"` with `StringValue="Any"` or `Value="192.168.1.1"` with `StringValue=null`), rejects non-boolean `Exists` / `IsNull` values, and validates state consistency.
+  * `validate_firewall_filters` enforces property-specific semantics: disallows empty strings for `LocalAddress`, `RemoteAddress`, `Protocol`, `LocalPort`, `RemotePort`, `InterfaceAlias` (`allow_empty=False`), allowing empty strings only where documented for `Service` and `InterfaceType` (`allow_empty=True`).
   * All 18 required filter properties across all 7 categories are deserialized into typed `CimFieldRecord` models and validated with fail-closed semantics.
 * **No Incomplete Fallbacks:**
   * `netsh advfirewall` is strictly prohibited from declaring complete inspection or evaluating security status. If PowerShell NetSecurity cmdlets are unavailable, queries fail closed (`success=False`), mapping directly to `os_policy_unverified`.
