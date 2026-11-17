@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - Phase 3 Final Safety and Personality Fixes - 2026-11-18
+
+### Added
+- **Speech Bubble Safe Fullscreen Policy (`app/desktop/companion/widget.py`, `app/desktop/companion/bubble.py`, `app/desktop/companion/scheduler.py`)**:
+  - Shared fullscreen safety: Speech bubbles now follow the exact same read-only foreground window safety policy as the floating companion widget.
+  - Immediate dismissal: Any visible speech bubble is immediately dismissed when a foreground fullscreen game or application is detected.
+  - Proactive initiative suppression: `CompanionInitiativeScheduler` and `FloatingCompanionWidget.show_speech_bubble()` check fullscreen state and suppress remarks during fullscreen.
+  - Fail-safe operation: If OS window inspection fails or is unavailable, speech bubbles fail safe and remain hidden.
+  - Safe restoration: Normal speech bubble operation resumes cleanly once fullscreen applications exit.
+  - Preserved existing Game Mode and hidden-widget suppression invariants.
+- **Character Consistency in Proactive Conversation (`app/core/personality/initiative.py`, `app/core/brain/brain.py`)**:
+  - Proactive prompt construction now incorporates Tsukiko's authentic personality directive (independent, gentle, cheerful, stubborn, occasionally proud and jealous, observant, practical).
+  - Respects active disclosure stages (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`).
+  - Strict stage isolation: Proactive prompts at `ACQUAINTANCE` strictly purge all restricted terms (no Sayo, Shirakawa-go, 1814, 1846, silkworms, Atlas, mamushi, snakebite, or fever/death).
+  - Preserves silence token (`[SILENCE]`) option and strictly forbids hollow greetings or artificial attention-seeking.
+- **Model Runtime Verification & Documentation Alignment (`MODEL_COMPATIBILITY.md`, `README.md`, `DEVELOPMENT.md`, `ARCHITECTURE.md`)**:
+  - Truthful CI documentation: explicitly documented that in CI environments, `llama-cpp-python: installed=False` by design.
+  - Verified pre-built Windows Python 3.11 CPU and CUDA 12.4 wheel availability on the abetlen index without claiming CI execution of physical GPU inference.
+  - Clarified that actual Qwen3.5 inference requires the user's local GGUF model file and compatible local wheel.
+
+### Changed
+- Total automated test suite expanded to 403 tests (399 passed, 4 skipped on Windows; 401 passed, 2 skipped on Linux) with 0 failures and 0 errors.
+
+---
+
 ## [0.3.2] - Phase 3 Final Corrections - 2026-11-18
 
 ### Added

@@ -59,7 +59,10 @@ For a 2B–3B parameter instruction-tuned model within Tsukiko's 2,800 MB safe V
 
 ## 4. Inference Engine Installation Procedures
 
-Inference libraries are kept completely optional and decoupled from base dependencies. The core application runs cleanly in headless and UI modes without `llama-cpp-python`. Tested with `llama-cpp-python>=0.3.17`, which incorporates the upstream fixes for Qwen3.5 architecture, RoPE scaling, and the hybrid-prefix reuse fix (ensuring prompt prefix reuse does not corrupt KV cache across turns).
+Inference libraries are kept completely optional and decoupled from base dependencies. The core application runs cleanly in headless and UI modes without `llama-cpp-python`. Upstream compatibility requires `llama-cpp-python>=0.3.17`, which incorporates the upstream fixes for Qwen3.5 architecture, RoPE scaling, and the hybrid-prefix reuse fix (ensuring prompt prefix reuse does not corrupt KV cache across multi-turn prompts).
+
+> [!NOTE]
+> **CI & Environment Truthfulness**: In GitHub Actions CI and default development environments, `llama-cpp-python: installed=False` by design to preserve lightweight virtual environments and rapid CI execution. Automated test suites verify model lifecycle state transitions, safe VRAM/RAM offload algorithms, non-thinking prompt isolation, context window pruning, and streaming worker threads using `DeterministicFakeEngine`. Actual local Qwen3.5 inference is NOT executed in CI; it requires the user to install a compatible local wheel and supply their own local GGUF model file on their physical workstation. Pre-built Windows Python 3.11 CPU and CUDA 12.4 wheels on the abetlen index have been verified as available, but physical GPU inference has not been executed in CI.
 
 ### Option A: Optimized CPU-Only Runtime (Default Fallback)
 For lightweight CPU execution using AVX2 instructions:
@@ -127,5 +130,7 @@ To maintain scientific integrity and prevent hallucinated benchmark claims, all 
 | **Inactivity Auto-Unloading** | **Implemented & Tested** | Verified background timer unloading after 300 seconds of inactivity without interrupting active generations. |
 | **Streaming UI Worker (`chat.py`)** | **Implemented & Tested** | Offscreen Qt test verifies `ChatWorker(QThread)` non-blocking progressive token emission, auto-scroll, stop generation, and retry button. |
 | **Deterministic Test Double (`engine.py`)** | **Implemented & Tested** | `DeterministicFakeEngine` verifies streaming, cancellation, and error handling without external model weights. |
-| **Actual GGUF Inference on Physical Hardware** | **Staged for User Testing** | Requires user to download the recommended `Qwen3.5-2B-Instruct-Q4_K_M.gguf` file to their physical laptop. |
+| **llama-cpp-python in CI** | **Decoupled / Not Installed in CI** | In CI, `llama-cpp-python: installed=False` by design. Test suite uses `DeterministicFakeEngine` to verify lifecycle and streaming without native compilation or downloading weights. |
+| **Windows Python 3.11 Wheel Availability** | **Verified on Index** | Verified prebuilt wheels on official abetlen index (`cpu` and `cu124` for Python 3.11). Physical GPU inference has not been tested in CI. |
+| **Actual GGUF Inference on Physical Hardware** | **Requires Local Setup** | Requires user to download the recommended `Qwen3.5-2B-Instruct-Q4_K_M.gguf` file and install a compatible runtime on their physical workstation. No cloud inference or automatic model downloads exist. |
 | **Token-Per-Second Benchmarks on RTX 3050** | **Pending Physical Measurement** | No synthetic or estimated token-per-second values are claimed prior to physical benchmarking on the user's laptop. |

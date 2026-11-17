@@ -37,9 +37,9 @@ Tsukiko is engineered from first principles for:
 | **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
 | **Packaging & Distribution** | **Implemented & Tested** | Genuine wheel build, isolated venv installation, out-of-tree CLI execution, and resource isolation verified. Verified in `tests/test_packaging.py` (3 tests). |
 | **Continuous Integration (CI)** | **Implemented & Tested** | Windows 11 / Python 3.11 GitHub Actions workflow in `.github/workflows/ci.yml`. |
-| **Automated Test Suite** | **Implemented & Tested** | 397 unit, regression, packaging, and integration tests (393 passing, 4 skipped on Windows; 395 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
-| **Desktop Companion UI** | **Implemented & Tested** | PySide6-Essentials floating companion widget, procedural moonlight avatar, compact vertical left menu, main window, and 5 views. Verified in `tests/test_desktop_companion.py` (49 tests). |
-| **Local AI Brain (llama.cpp)** | **Implemented & Tested** | Offline GGUF binary inspection, ModelManager with 9 lifecycle states, safe RAM/VRAM offload budgeting (3,500 MB RAM ceiling, $\ge 500$ MB headroom, safe VRAM layer clamping), historical character identity (12 canonical milestones, Sayo, 1814-1846, Ogimachi, Unfinished Atlas, snake dread, practical craft), 4-stage rapport-gated gradual disclosure (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`), stage-isolated prompt content, automatic proactive conversation scheduling via `CompanionInitiativeScheduler` and `ProactiveInitiativeWorker(QThread)`, non-repetitive safeguards, silence handling (`[SILENCE]`), desktop `CompanionSpeechBubble`, reentrant reload safety without deadlocks, non-blocking Qt workers, streaming chat via QThread, cancellation, auto-scroll, retry on error, temporary in-memory history pruning, and Qwen3.5 runtime compatibility (`llama-cpp-python>=0.3.17`). Verified in `tests/test_local_brain.py` (54 tests). |
+| **Automated Test Suite** | **Implemented & Tested** | 403 unit, regression, packaging, and integration tests (399 passing, 4 skipped on Windows; 401 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
+| **Desktop Companion UI** | **Implemented & Tested** | PySide6-Essentials floating companion widget, procedural moonlight avatar, compact vertical left menu, main window, and 5 views. Verified in `tests/test_desktop_companion.py` (54 tests). |
+| **Local AI Brain (llama.cpp)** | **Implemented & Tested** | Offline GGUF binary inspection, ModelManager with 9 lifecycle states, safe RAM/VRAM offload budgeting (3,500 MB RAM ceiling, $\ge 500$ MB headroom, safe VRAM layer clamping), historical character identity (12 canonical milestones, Sayo, 1814-1846, Ogimachi, Unfinished Atlas, snake dread, practical craft), 4-stage rapport-gated gradual disclosure (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`), stage-isolated prompt content, automatic proactive conversation scheduling via `CompanionInitiativeScheduler` and `ProactiveInitiativeWorker(QThread)`, safe fullscreen speech bubble suppression, non-repetitive safeguards, silence handling (`[SILENCE]`), desktop `CompanionSpeechBubble`, reentrant reload safety without deadlocks, non-blocking Qt workers, streaming chat via QThread, cancellation, auto-scroll, retry on error, temporary in-memory history pruning, and Qwen3.5 runtime compatibility (`llama-cpp-python>=0.3.17`). Verified in `tests/test_local_brain.py` (55 tests). Actual inference requires the user's local GGUF model and optional runtime. |
 | **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
 | **Desktop Perception Pipeline** | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Screen capture OFF by default. |
 | **Offline Voice Subsystem** | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Microphone OFF by default. |
@@ -86,7 +86,7 @@ tsukiko --headless
 ```
 
 ### 5. Execute Test Suite
-Run automated unit and integration tests (397 tests):
+Run automated unit and integration tests (403 tests):
 ```powershell
 pytest -v
 ```
@@ -135,8 +135,10 @@ pytest -v
   - Progressive disclosure through 4 stages (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`) is strictly gated by genuine conversational rapport and contextual inquiries—never by raw turn counts alone.
 * **Automatic Conversational Autonomy & Desktop Speech Bubble (`app/desktop/companion/scheduler.py`, `app/desktop/companion/bubble.py`)**:
   - Automatic idle-check scheduler (`CompanionInitiativeScheduler`) running on the application lifecycle: evaluates remarks after $\ge 45$s idle, with 120s cooldown.
+  - Character-grounded proactive prompt: includes Tsukiko's authentic traits (independent, gentle, cheerful, stubborn, occasionally proud and jealous, observant, practical) and respects the active disclosure stage without leaking restricted history.
   - Non-repetitive remarks check and anti-spam backoff: remains quiet after an unanswered initiative (`consecutive_unanswered >= 1`) until the user initiates a message.
   - Suppressed during Game Mode, hidden-widget state, minimized window, disabled chat view, or when model is unloaded.
+  - Fullscreen safety policy: speech bubble is immediately dismissed upon fullscreen game detection, suppressed during fullscreen, and fails safe if inspection fails.
   - Zero model auto-load invariant: never loads an unloaded model from disk just to speak proactively.
   - Offloaded inference: `ProactiveInitiativeWorker(QThread)` runs inference off the Qt main thread so the GUI never freezes.
   - Speech bubble popover (`CompanionSpeechBubble`): Frameless Moonlight bubble anchored near the floating avatar widget with 15s auto-dismiss and click-to-open-chat behavior.
@@ -153,6 +155,7 @@ pytest -v
 * **Qwen3.5 Upstream Runtime Compatibility (`requirements/ai.txt`, `pyproject.toml`, `MODEL_COMPATIBILITY.md`)**:
   - Requires `llama-cpp-python>=0.3.17`, incorporating upstream Qwen3.5 architecture support and the hybrid prefix-reuse fix.
   - Verified pre-built Windows Python 3.11 CPU and CUDA 12.4 wheels available on the abetlen index.
+  - Decoupled optional dependency: in CI, `llama-cpp-python: installed=False` by design, with tests utilizing `DeterministicFakeEngine`. Actual local Qwen3.5 inference requires the user to install a compatible local wheel and provide a local GGUF model file on their workstation (zero automatic model downloads or cloud inference).
 * For complete hardware formulas, quantization matrices, and local model installation instructions, see [Hardware & Model Compatibility](MODEL_COMPATIBILITY.md).
 
 ---

@@ -622,12 +622,59 @@ The final CIM value validation correction addressed the malformed-CIM-value acce
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 397 unit, regression, packaging, and integration tests (393 passed, 4 skipped on Windows; 395 passed, 2 skipped on Linux). |
+---
+
+## 2026-11-18 - Phase 3 Final Safety and Personality Fixes (v0.3.3)
+
+### Completed Objectives
+1. **Critical: Speech Bubble Safe Fullscreen Policy (`app/desktop/companion/widget.py`, `app/desktop/companion/bubble.py`, `app/desktop/companion/scheduler.py`)**:
+   - Reused the existing read-only `FullscreenDetector` and `FullscreenEvaluation` using Win32 window metadata without hooks, injection, process scanning, or input automation.
+   - Immediate dismissal: `_check_fullscreen_policy()` immediately dismisses any visible speech bubble when a foreground fullscreen game or application is detected.
+   - Fail-safe suppression: When fullscreen detection is unavailable or encounters an error, speech bubble display is suppressed (`safe_always_on_top=False`).
+   - Proactive suppression: `CompanionInitiativeScheduler` evaluates fullscreen state and suppresses proactive remarks during fullscreen gameplay.
+   - Dynamic synchronization: Synchronized `CompanionSpeechBubble.set_always_on_top()` with the floating companion widget's effective always-on-top state.
+   - Safe restoration: Normal speech bubble operation resumes cleanly once fullscreen applications exit.
+   - Preserved existing Game Mode and hidden-widget suppression invariants.
+2. **Character Consistency in Proactive Conversation (`app/core/personality/initiative.py`, `app/core/brain/brain.py`)**:
+   - Proactive prompt construction now incorporates Tsukiko's authentic personality directive (independent, gentle, cheerful, stubborn, occasionally proud and jealous, observant, practical).
+   - Respects active disclosure stages (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`).
+   - Strict stage isolation: Proactive prompts at `ACQUAINTANCE` strictly purge all restricted terms (no Sayo, Shirakawa-go, 1814, 1846, silkworms, Atlas, mamushi, snakebite, or fever/death).
+   - Preserves silence token (`[SILENCE]`) option and strictly forbids hollow greetings or artificial attention-seeking.
+   - Prohibits auto-loading unloaded models for proactive remarks.
+3. **Model Runtime Verification & Documentation Alignment (`MODEL_COMPATIBILITY.md`, `README.md`, `DEVELOPMENT.md`, `ARCHITECTURE.md`)**:
+   - Truthful CI documentation: explicitly documented that in CI environments, `llama-cpp-python: installed=False` by design.
+   - Verified pre-built Windows Python 3.11 CPU and CUDA 12.4 wheel availability on the abetlen index without claiming CI execution of physical GPU inference.
+   - Clarified that actual Qwen3.5 inference requires the user's local GGUF model file and compatible local wheel.
+4. **Expanded Automated Test Suite (`tests/test_desktop_companion.py`, `tests/test_local_brain.py`)**:
+   - Added 5 integration tests in `TestSpeechBubbleFullscreenSafety`:
+     1. Fullscreen game detected while bubble is visible -> dismissed immediately.
+     2. Proactive remark generated during fullscreen -> suppressed.
+     3. Fullscreen detector failure -> fails safe (suppressed).
+     4. Fullscreen ends and safe behavior resumes.
+     5. Game Mode and hidden-widget behavior remains unchanged.
+   - Added stage-isolated personality test `test_proactive_prompt_includes_stage_isolated_personality` in `TestConversationalAutonomy`.
+   - Total test suite expanded to 403 tests (399 passed, 4 skipped on Windows; 401 passed, 2 skipped on Linux) with 0 failures and 0 errors.
+
+---
+
+### Implementation Status Matrix
+
+| Subsystem / Feature | Classification | Notes |
+|---|---|---|
+| Workstation Hardware Profiler | **Implemented & Tested** | Queries AMD Ryzen CPU, RAM, RTX 3050 VRAM, and storage with safe fallbacks and status categorization (`measured`/`zero_available`/`unavailable`). |
+| Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
+| Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
+| Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization with strict invariant checking, exact 1:1 Value/Type metadata consistency (rejecting dicts/nested objects/unsupported types), strict Program value validation without relying solely on string_value, Package validation without truthiness coercion, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, exact stable-name creation/deletion via PowerShell, fail-closed strict 8-key JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
+| Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
+| Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
+| CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
+| Automated Pytest Test Suite | **Implemented & Tested** | 403 unit, regression, packaging, and integration tests (399 passed, 4 skipped on Windows; 401 passed, 2 skipped on Linux). |
 | Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with offscreen PySide6 and 6-stage read-only ActiveStore inspection). |
-| PySide6 Desktop Companion UI | **Implemented & Tested** | Procedural vector moonlight emblem, compact left menu, safe foreground fullscreen detection with Win32 ctypes signatures, reversible Game Mode, tray manager with accessible fallback panel, dynamic settings persistence, and main window. |
-| llama.cpp Local Brain Engine | **Implemented & Tested** | Pure-Python GGUF inspection, 9-state ModelManager lifecycle, hardware-aware RAM/VRAM offloading with 400MB headroom, non-thinking personality engine, streaming ChatWorker, cancellation, retry on error, temporary in-memory history pruning, and Settings/Status telemetry cards. |
-| Conversational Autonomy & Initiative | **Implemented & Tested** | Automatic `CompanionInitiativeScheduler` with idle timer ($\ge 45$s), cooldown (120s), anti-spam backoff, background `ProactiveInitiativeWorker(QThread)` non-blocking inference, zero auto-load invariant, and `CompanionSpeechBubble` desktop popover. |
-| Historical Character Identity & Canon | **Implemented & Tested** | 12 canonical life milestones in `CharacterBiography`, 4-stage rapport-gated disclosure tracker (`DisclosureTracker`), and strict stage-isolated prompt content in `prompts.py`. |
+| PySide6 Desktop Companion UI | **Implemented & Tested** | Procedural vector moonlight emblem, compact left menu, safe foreground fullscreen detection with Win32 ctypes signatures, speech bubble fullscreen safety policy, reversible Game Mode, tray manager with accessible fallback panel, dynamic settings persistence, and main window. |
+| llama.cpp Local Brain Engine | **Implemented & Tested** | Pure-Python GGUF inspection, 9-state ModelManager lifecycle, hardware-aware RAM/VRAM offloading with 400MB headroom, non-thinking personality engine, streaming ChatWorker, cancellation, retry on error, temporary in-memory history pruning, and Settings/Status telemetry cards. Decoupled in CI (`installed=False`), tested via `DeterministicFakeEngine`. |
+| Conversational Autonomy & Initiative | **Implemented & Tested** | Automatic `CompanionInitiativeScheduler` with idle timer ($\ge 45$s), cooldown (120s), anti-spam backoff, stage-isolated character prompt, background `ProactiveInitiativeWorker(QThread)` non-blocking inference, zero auto-load invariant, and `CompanionSpeechBubble` desktop popover with fullscreen safety. |
+| Historical Character Identity & Canon | **Implemented & Tested** | 12 canonical life milestones in `CharacterBiography`, 4-stage rapport-gated disclosure tracker (`DisclosureTracker`), and strict stage-isolated prompt content in `prompts.py` and `initiative.py`. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
 | Desktop Perception Pipeline | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Capture OFF by default. |
 | Offline Voice Subsystem (STT/TTS) | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Voice OFF by default. |

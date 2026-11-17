@@ -9,6 +9,7 @@ proactive inference strictly to a background QThread to keep the UI 100% respons
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -146,7 +147,15 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
             logger.debug("Initiative scheduler: suppressed due to hidden companion widget.")
             return False
 
-        # 5. Minimized and Disabled Chat Conditions Suppression
+        # 5. Fullscreen Safety Suppression
+        # Speech bubbles and proactive initiatives must never intrude over fullscreen games or apps
+        if self._widget and hasattr(self._widget, "_fullscreen_detector"):
+            eval_result = self._widget._fullscreen_detector.evaluate_fullscreen(own_pids={os.getpid()})
+            if eval_result.is_fullscreen or not eval_result.safe_always_on_top:
+                logger.debug(f"Initiative scheduler: suppressed due to fullscreen safety ({eval_result.reason}).")
+                return False
+
+        # 6. Minimized and Disabled Chat Conditions Suppression
         if self._main_window:
             if self._main_window.isMinimized():
                 logger.debug("Initiative scheduler: suppressed due to minimized main window.")
@@ -159,7 +168,7 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
                 if getattr(chat_view, "_active_worker", None) is not None:
                     return False
 
-        # 6. Evaluate Initiative Engine Invariants (idle >= 45s, cooldown >= 120s, unanswered backoff)
+        # 7. Evaluate Initiative Engine Invariants (idle >= 45s, cooldown >= 120s, unanswered backoff)
         game_mode_active = self._widget.is_game_mode if self._widget else False
         widget_hidden = self._widget.is_hidden if self._widget else False
         window_minimized = self._main_window.isMinimized() if self._main_window else False
@@ -174,7 +183,7 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
             logger.debug(f"Initiative scheduler evaluation: {reason}")
             return False
 
-        # 7. Offload inference strictly to background QThread
+        # 8. Offload inference strictly to background QThread
         self._active_worker = ProactiveInitiativeWorker(brain=self._brain, parent=self)
         self._active_worker.initiative_ready.connect(self._handle_initiative_ready)
         self._active_worker.initiative_silent.connect(self._handle_initiative_silent)

@@ -41,22 +41,36 @@ class CompanionSpeechBubble(QWidget if HAS_PYSIDE6 else object):  # type: ignore
         self,
         parent: Optional[QWidget] = None,
         auto_dismiss_ms: int = 15000,
+        always_on_top: bool = True,
     ) -> None:
         if not HAS_PYSIDE6:
             raise RuntimeError("PySide6 is required to instantiate CompanionSpeechBubble")
 
-        flags = Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+        flags = Qt.FramelessWindowHint | Qt.Tool
+        if always_on_top:
+            flags |= Qt.WindowStaysOnTopHint
         super().__init__(parent, flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setObjectName("CompanionSpeechBubble")
         self.setCursor(Qt.PointingHandCursor)
 
+        self._always_on_top = always_on_top
         self._auto_dismiss_ms = auto_dismiss_ms
         self._dismiss_timer = QTimer(self)
         self._dismiss_timer.setSingleShot(True)
         self._dismiss_timer.timeout.connect(self.dismiss)
 
         self._setup_ui()
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        """Applies WindowStaysOnTopHint flag change to match companion safety state."""
+        if self._always_on_top == enabled:
+            return
+        self._always_on_top = enabled
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
+        if was_visible:
+            self.show()
 
     def _setup_ui(self) -> None:
         outer_layout = QVBoxLayout(self)

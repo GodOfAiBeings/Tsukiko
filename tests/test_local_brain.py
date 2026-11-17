@@ -1045,6 +1045,76 @@ class TestConversationalAutonomy:
         res = engine.parse_initiative_response(f"  {SILENCE_TOKEN}  ")
         assert res is None
 
+    def test_proactive_prompt_includes_stage_isolated_personality(self) -> None:
+        """Verifies that proactive initiative prompts include Tsukiko's personality and respect disclosure stages."""
+        from app.core.personality.initiative import ConversationalInitiativeEngine, SILENCE_TOKEN
+        from app.core.personality.disclosure import DisclosureStage
+
+        engine = ConversationalInitiativeEngine()
+
+        # 1. ACQUAINTANCE Stage:
+        acq_msgs = engine.build_initiative_prompt(
+            session_history=[],
+            stage=DisclosureStage.ACQUAINTANCE,
+        )
+        assert len(acq_msgs) >= 2
+        acq_system = acq_msgs[0]["content"]
+
+        # Must include Tsukiko's personality and authentic traits
+        assert "Tsukiko" in acq_system
+        assert "independent" in acq_system
+        assert "gentle" in acq_system
+        assert "cheerful" in acq_system
+        assert "stubborn" in acq_system
+        assert "proud" in acq_system
+        assert SILENCE_TOKEN in acq_system
+        assert "No Hollow Greetings" in acq_system
+
+        # Strictly ZERO leaks of restricted Sayo history in Acquaintance stage
+        restricted_words = [
+            "sayo", "佐代", "1814", "1846", "shirakawa", "ogimachi",
+            "silkworm", "atlas", "mamushi", "viper", "snake", "bite", "fever", "death", "died",
+        ]
+        acq_lower = acq_system.lower()
+        for restricted in restricted_words:
+            assert restricted not in acq_lower, f"Restricted word '{restricted}' leaked in ACQUAINTANCE proactive prompt!"
+
+        # 2. FAMILIAR Stage:
+        fam_msgs = engine.build_initiative_prompt(
+            session_history=[],
+            stage=DisclosureStage.FAMILIAR,
+        )
+        fam_system = fam_msgs[0]["content"]
+        fam_lower = fam_system.lower()
+        assert "mountain" in fam_lower
+        # Still strictly no birth name, snakebite, or death
+        for restricted in ["sayo", "1814", "1846", "bite", "death", "died"]:
+            assert restricted not in fam_lower, f"Restricted word '{restricted}' leaked in FAMILIAR proactive prompt!"
+
+        # 3. TRUSTED Stage:
+        trusted_msgs = engine.build_initiative_prompt(
+            session_history=[],
+            stage=DisclosureStage.TRUSTED,
+        )
+        trusted_system = trusted_msgs[0]["content"]
+        trusted_lower = trusted_system.lower()
+        assert "sayo" in trusted_lower
+        assert "1814" in trusted_lower
+        # Still strictly no snakebite or death
+        for restricted in ["bite", "death", "died", "1846"]:
+            assert restricted not in trusted_lower, f"Restricted word '{restricted}' leaked in TRUSTED proactive prompt!"
+
+        # 4. CONFIDANT Stage:
+        conf_msgs = engine.build_initiative_prompt(
+            session_history=[],
+            stage=DisclosureStage.CONFIDANT,
+        )
+        conf_system = conf_msgs[0]["content"]
+        conf_lower = conf_system.lower()
+        assert "sayo" in conf_lower
+        assert "1846" in conf_lower
+        assert "mamushi" in conf_lower
+
     def test_brain_check_conversational_initiative_end_to_end(self, tmp_path: Path) -> None:
         model_file = tmp_path / "model.gguf"
         model_file.write_bytes(create_synthetic_gguf_binary())
@@ -1138,6 +1208,18 @@ class TestCompanionInitiativeScheduler:
         widget.hide_widget()
         assert scheduler.check_initiative() is False
         widget.show_widget()
+
+        # Fullscreen suppresses initiative
+        from unittest.mock import patch
+        from app.desktop.companion.fullscreen import FullscreenEvaluation
+        fs_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=True,
+            safe_always_on_top=False,
+            reason="Game is fullscreen",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fs_eval):
+            assert scheduler.check_initiative() is False
 
         # 4. Idle time requirement: immediately after user activity, suppressed
         brain.personality.initiative_engine.record_user_activity()

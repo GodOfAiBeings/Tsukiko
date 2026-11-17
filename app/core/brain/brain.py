@@ -206,7 +206,14 @@ class TsukikoBrain:
                 logger.debug("Conversational initiative skipped: model is not currently loaded in memory.")
                 return None
 
-            prompt_messages = self.personality.initiative_engine.build_initiative_prompt(self._history)
+            prompt_messages = self.personality.initiative_engine.build_initiative_prompt(
+                session_history=self._history,
+                stage=self.personality.disclosure_tracker.stage,
+                biography=self.personality.biography,
+                personality_directive=self.personality.biography.get_stage_personality_directive(
+                    self.personality.disclosure_tracker.stage
+                ),
+            )
 
             # If model engine is DeterministicFakeEngine (testing):
             if isinstance(self.model_manager.engine, DeterministicFakeEngine):

@@ -639,6 +639,117 @@ class TestWidgetFullscreenPolicy:
 
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestSpeechBubbleFullscreenSafety:
+    """Verifies that speech bubbles strictly follow the safe fullscreen and gaming policy."""
+
+    def test_fullscreen_game_dismisses_visible_speech_bubble(self, qapp: QApplication) -> None:
+        """1. Fullscreen game detected while bubble is visible -> bubble immediately dismissed."""
+        widget = FloatingCompanionWidget()
+        safe_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=False,
+            safe_always_on_top=True,
+            reason="Normal windowed desktop",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=safe_eval):
+            shown = widget.show_speech_bubble("Visible thought before game starts")
+            assert shown is True
+            assert widget.speech_bubble.isVisible() is True
+
+            # Fullscreen game launched
+            fs_eval = FullscreenEvaluation(
+                detection_available=True,
+                is_fullscreen=True,
+                safe_always_on_top=False,
+                reason="Foreground window occupies entire monitor (fullscreen game).",
+            )
+            with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fs_eval):
+                widget._check_fullscreen_policy()
+                # Speech bubble must be immediately dismissed
+                assert widget.speech_bubble.isVisible() is False
+        widget.close()
+
+    def test_proactive_remark_suppressed_during_fullscreen(self, qapp: QApplication) -> None:
+        """2. Proactive remark generated during fullscreen -> bubble is suppressed."""
+        widget = FloatingCompanionWidget()
+        fs_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=True,
+            safe_always_on_top=False,
+            reason="Game is fullscreen",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fs_eval):
+            result = widget.show_speech_bubble("Proactive remark during game")
+            assert result is False
+            assert widget.speech_bubble.isVisible() is False
+        widget.close()
+
+    def test_fullscreen_detector_failure_fails_safe(self, qapp: QApplication) -> None:
+        """3. Fullscreen detector failure -> fails safe: bubble suppressed and dismissed."""
+        widget = FloatingCompanionWidget()
+        error_eval = FullscreenEvaluation(
+            detection_available=False,
+            is_fullscreen=False,
+            safe_always_on_top=False,
+            reason="Exception during inspection; failing safe.",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=error_eval):
+            result = widget.show_speech_bubble("Cannot show when detection fails")
+            assert result is False
+            assert widget.speech_bubble.isVisible() is False
+        widget.close()
+
+    def test_fullscreen_ends_and_safe_behavior_resumes(self, qapp: QApplication) -> None:
+        """4. Fullscreen ends and safe behavior resumes."""
+        widget = FloatingCompanionWidget()
+        fs_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=True,
+            safe_always_on_top=False,
+            reason="Game is fullscreen",
+        )
+        safe_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=False,
+            safe_always_on_top=True,
+            reason="Game exited; normal desktop",
+        )
+
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fs_eval):
+            assert widget.show_speech_bubble("During game") is False
+            assert widget.speech_bubble.isVisible() is False
+
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=safe_eval):
+            widget._check_fullscreen_policy()
+            shown = widget.show_speech_bubble("After game exited")
+            assert shown is True
+            assert widget.speech_bubble.isVisible() is True
+            assert widget.speech_bubble.lbl_text.text() == "After game exited"
+        widget.close()
+
+    def test_game_mode_and_hidden_widget_suppression_unchanged(self, qapp: QApplication) -> None:
+        """5. Game Mode and hidden-widget behavior remains unchanged."""
+        widget = FloatingCompanionWidget()
+
+        # Game Mode
+        widget.enable_game_mode()
+        assert widget.is_game_mode is True
+        assert widget.show_speech_bubble("During Game Mode") is False
+        assert widget.speech_bubble.isVisible() is False
+        widget.disable_game_mode()
+        assert widget.is_game_mode is False
+
+        # Hidden widget
+        widget.hide_widget()
+        assert widget.is_hidden is True
+        assert widget.show_speech_bubble("While hidden") is False
+        assert widget.speech_bubble.isVisible() is False
+        widget.show_widget()
+        assert widget.is_hidden is False
+        widget.close()
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
 class TestSettingsApplicationAndPersistence:
     """Verifies that settings apply dynamically to UI and persist to YAML."""
 

@@ -321,7 +321,7 @@ class FloatingCompanionWidget(QWidget):
         self.menu.exit_requested.connect(self._handle_exit)
 
         # Proactive speech bubble anchored to the avatar
-        self.speech_bubble = CompanionSpeechBubble()
+        self.speech_bubble = CompanionSpeechBubble(always_on_top=self._effective_always_on_top)
         self.speech_bubble.clicked.connect(self._handle_open_main)
 
         self._setup_ui()
@@ -373,12 +373,30 @@ class FloatingCompanionWidget(QWidget):
             self.menu.close()
         super().closeEvent(event)
 
-    def show_speech_bubble(self, text: str) -> None:
-        """Displays a proactive speech bubble anchored above/near the companion avatar."""
+    def show_speech_bubble(self, text: str) -> bool:
+        """Displays a proactive speech bubble anchored above/near the companion avatar.
+
+        Safety and Fullscreen Invariants:
+        - Speech bubbles must NEVER appear over fullscreen applications or games.
+        - Immediately dismissed and suppressed if a fullscreen application is detected.
+        - Suppressed if fullscreen detection fails or is unavailable (fails safe).
+        - Suppressed during Game Mode and hidden-widget state.
+        - Returns True if displayed, False if suppressed.
+        """
         if self._is_hidden or self._is_game_mode:
-            return
+            return False
+
+        eval_result = self._check_fullscreen_policy()
+        if eval_result.is_fullscreen or not eval_result.safe_always_on_top:
+            logger.debug(f"Speech bubble display suppressed by fullscreen safety policy: {eval_result.reason}")
+            return False
+
         if hasattr(self, "speech_bubble") and self.speech_bubble:
+            if hasattr(self.speech_bubble, "set_always_on_top"):
+                self.speech_bubble.set_always_on_top(self._effective_always_on_top)
             self.speech_bubble.show_message(text, self.pos(), self._size)
+            return True
+        return False
 
     def hide_speech_bubble(self) -> None:
         """Hides the speech bubble if currently shown."""
@@ -392,6 +410,8 @@ class FloatingCompanionWidget(QWidget):
         - If foreground window is fullscreen: remove always-on-top and lower widget.
         - If foreground window is NOT fullscreen: restore user's configured always_on_top preference.
         - If detection fails or is unavailable: fail safely by removing always-on-top.
+        - Fullscreen safety for speech bubbles: immediately dismisses visible speech bubbles
+          and suppresses new bubbles during fullscreen or when detection is unsafe.
         """
         eval_result = self._fullscreen_detector.evaluate_fullscreen(own_pids={os.getpid()})
 
@@ -406,6 +426,11 @@ class FloatingCompanionWidget(QWidget):
         if eval_result.is_fullscreen and self.isVisible():
             self.lower()
 
+        # Speech bubble fullscreen safety policy:
+        # Dismiss any visible speech bubble when fullscreen is active or when unsafe
+        if eval_result.is_fullscreen or not eval_result.safe_always_on_top:
+            self.hide_speech_bubble()
+
         return eval_result
 
     def _set_effective_always_on_top(self, enabled: bool) -> None:
@@ -417,6 +442,9 @@ class FloatingCompanionWidget(QWidget):
         was_visible = self.isVisible() and not self._is_hidden and not self._is_game_mode
 
         self.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
+        if hasattr(self, "speech_bubble") and self.speech_bubble:
+            if hasattr(self.speech_bubble, "set_always_on_top"):
+                self.speech_bubble.set_always_on_top(enabled)
         if was_visible:
             self.show()
 

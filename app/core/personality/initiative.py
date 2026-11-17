@@ -22,6 +22,9 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from app.core.personality.biography import CharacterBiography, TSUKIKO_BIOGRAPHY
+from app.core.personality.disclosure import DisclosureStage
+
 logger = logging.getLogger(__name__)
 
 SILENCE_TOKEN = "[SILENCE]"
@@ -141,8 +144,20 @@ class ConversationalInitiativeEngine:
         self,
         session_history: List[Dict[str, str]],
         current_dt: Optional[datetime] = None,
+        stage: DisclosureStage = DisclosureStage.ACQUAINTANCE,
+        biography: Optional[CharacterBiography] = None,
+        personality_directive: Optional[str] = None,
     ) -> List[Dict[str, str]]:
-        """Constructs an initiative evaluation prompt for the local inference model."""
+        """Constructs a stage-isolated, character-grounded proactive initiative prompt.
+
+        Safety & Personality Invariants:
+        1. Includes Tsukiko's active stage-specific personality directive.
+        2. Strictly respects the current disclosure stage (never exposes restricted history).
+        3. Preserves Tsukiko's authentic traits: independent, gentle, cheerful, stubborn,
+           occasionally proud and jealous, observant, pragmatic, and nature/seasonal-minded.
+        4. Provides the [SILENCE] option when quiet is preferable or there is nothing genuine to say.
+        5. Prohibits repetitive greetings, polite corporate filler, and attention-seeking.
+        """
         dt = current_dt or datetime.now()
         hour = dt.hour
 
@@ -155,17 +170,48 @@ class ConversationalInitiativeEngine:
         else:
             time_desc = "late night"
 
-        system_instruction = (
-            "You are Tsukiko. Some time has passed in quiet on the desktop. "
-            f"It is currently {time_desc}. "
-            "Consider whether there is a brief, grounded, natural thought, seasonal observation, "
-            "or reflection connected to our recent conversation worth mentioning. "
-            f"If quiet is better, or if you have nothing genuine to say, reply ONLY with '{SILENCE_TOKEN}'. "
-            "NEVER say hollow greetings like 'Hello? Are you still there?' or demand attention. "
-            "Keep any thought under 2-3 sentences, natural and unforced."
+        bio = biography or TSUKIKO_BIOGRAPHY
+        base_directive = personality_directive or bio.get_stage_personality_directive(stage)
+
+        if stage == DisclosureStage.ACQUAINTANCE:
+            stage_guidance = (
+                "Proactive Conversation Guidance (Acquaintance Stage):\n"
+                "- Speak from your present perspective as Tsukiko living on the desktop.\n"
+                "- Keep any remark grounded in practical everyday reality, quiet companionship, "
+                "the current time of day, or weather and seasonal changes.\n"
+                "- You have no prior public history or past identity to recite. Do not offer unprompted "
+                "historical disclosures or personal backstory."
+            )
+        elif stage == DisclosureStage.FAMILIAR:
+            stage_guidance = (
+                "Proactive Conversation Guidance (Familiar Stage):\n"
+                "- You may share a subtle reflection on seasons, weather, natural rhythms, or quiet crafts.\n"
+                "- Keep private historical names and passing strictly unmentioned."
+            )
+        elif stage == DisclosureStage.TRUSTED:
+            stage_guidance = (
+                "Proactive Conversation Guidance (Trusted Stage):\n"
+                "- You share established trust with the user. You may occasionally weave in your passion "
+                "for observing the living world or your roots if relevant to what you have discussed."
+            )
+        else:  # CONFIDANT
+            stage_guidance = (
+                "Proactive Conversation Guidance (Confidant Stage):\n"
+                "- Full mutual trust. You may speak with complete openness and personal depth."
+            )
+
+        proactive_instruction = (
+            f"Context: Some time has passed in quiet on the desktop. It is currently {time_desc}.\n\n"
+            f"{base_directive}\n\n"
+            f"{stage_guidance}\n\n"
+            "Proactive Initiative Rules:\n"
+            f"1. Silence by Choice: If quiet is better, or if you have nothing genuine or worthwhile to say, reply ONLY with '{SILENCE_TOKEN}'.\n"
+            "2. No Hollow Greetings: NEVER say 'Hello?', 'Are you still there?', 'How are you doing?', or generic attention-seeking phrases.\n"
+            "3. Character Consistency: Be your genuine self—independent, gentle, cheerful, stubborn, occasionally proud and jealous, observant of practical details.\n"
+            "4. Length: Keep any thought concise (1 to 3 natural sentences). Do not lecture or interrogate the user."
         )
 
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_instruction}]
+        messages: List[Dict[str, str]] = [{"role": "system", "content": proactive_instruction}]
 
         # Include last 2 turns of session history if available
         recent_turns = session_history[-4:] if len(session_history) > 4 else session_history

@@ -134,11 +134,11 @@ flowchart TD
   * **Suppression Invariants**: Strictly silenced during Game Mode, when the floating widget is hidden, when the main window is minimized, or when chat input is disabled.
   * **Unloaded Model Protection**: Never automatically loads an unloaded model from disk just to generate a proactive message.
   * **Non-Blocking Inference**: Proactive generation runs strictly in a background `ProactiveInitiativeWorker(QThread)`, never on the Qt main GUI thread.
-  * **Visual Desktop Delivery (`CompanionSpeechBubble`)**: Proactive remarks are delivered to `ChatView` and displayed directly on the user's desktop via a sleek Moonlight speech bubble anchored to `FloatingCompanionWidget`, ensuring proactive thoughts are visible rather than buried in a hidden window.
+  * **Visual Desktop Delivery & Fullscreen Safety (`CompanionSpeechBubble`)**: Proactive remarks are delivered to `ChatView` and displayed directly on the user's desktop via a sleek Moonlight speech bubble anchored to `FloatingCompanionWidget`. Strictly adheres to the same safe fullscreen policy as the floating widget: automatically dismissed upon fullscreen game detection, suppressed during fullscreen, and fails safe if inspection fails.
   * Silence token (`[SILENCE]`): Tsukiko can decide that quiet is better than speaking, emitting `[SILENCE]` and remaining silent.
-* **Inference Engine & Qwen3.5 Compatibility (`app/core/model_manager/engine.py`, `requirements/ai.txt`, `MODEL_COMPATIBILITY.md`)**:
-  * Tested and validated with `llama-cpp-python>=0.3.17`, incorporating upstream support for Qwen3.5 architecture, RoPE scaling, and the critical hybrid-prefix reuse fix preventing KV-cache corruption across multi-turn prompts.
-  * Fully documented Windows Python 3.11 prebuilt wheel installations for both AVX2 CPU and CUDA 12.4 acceleration.
+* **Inference Engine & Qwen3.5 Upstream Compatibility (`app/core/model_manager/engine.py`, `requirements/ai.txt`, `MODEL_COMPATIBILITY.md`)**:
+  * Upstream compatibility requires `llama-cpp-python>=0.3.17`, incorporating upstream support for Qwen3.5 architecture, RoPE scaling, and the critical hybrid-prefix reuse fix preventing KV-cache corruption across multi-turn prompts.
+  * AI runtime dependencies are strictly optional and decoupled; in CI, `llama-cpp-python: installed=False` by design, with tests using `DeterministicFakeEngine` to verify orchestration. Verified pre-built Windows Python 3.11 wheel availability on the abetlen index without claiming CI execution of physical GPU inference. Actual Qwen3.5 inference requires the user's local GGUF model file and compatible local runtime.
 * **Personality & Non-Thinking Engine (`app/core/personality/prompts.py`, `app/core/personality/engine.py`)**:
   * Dynamic system prompt construction reflecting character biography, current disclosure stage, and strict operational invariants.
   * Invariant honesty: Strictly truthful about active Phase 3 capabilities and disabled Phase 4-7 sensors (no screen watching, no microphone listening, no persistent memory, no desktop automation).
