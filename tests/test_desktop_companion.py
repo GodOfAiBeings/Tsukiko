@@ -28,9 +28,11 @@ import pytest
 # Enforce offscreen Qt rendering for headless CI and automated test environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.config.settings import TsukikoConfig, UIConfig
+from app.core.config.settings import TsukikoConfig, UIConfig, save_config
 from app.desktop.companion.avatar import TsukikoAvatarWidget
+from app.desktop.companion.fullscreen import FullscreenDetector, FullscreenEvaluation
 from app.desktop.companion.theme import MoonlightTheme
+from app.desktop.companion.tray import TsukikoTrayManager
 from app.desktop.companion.views.chat import ChatView
 from app.desktop.companion.views.memory_view import MemoryView
 from app.desktop.companion.views.privacy_view import PrivacyView
@@ -106,17 +108,34 @@ class TestTsukikoAvatarWidget:
         assert avatar.width() == 96
         assert avatar.height() == 96
         assert avatar.is_active is False
+        # Static idle emblem by default: timer does not run
+        assert avatar.animation_timer.isActive() is False
+
+    def test_avatar_construction_with_idle_animation(self, qapp: QApplication) -> None:
+        avatar = TsukikoAvatarWidget(size=96, idle_animation=True)
         assert avatar.animation_timer.isActive() is True
+
+    def test_avatar_renders_pixmap_and_icon(self, qapp: QApplication) -> None:
+        pm = TsukikoAvatarWidget.render_to_pixmap(64)
+        assert not pm.isNull()
+        assert pm.width() == 64
+        assert pm.height() == 64
+
+        icon = TsukikoAvatarWidget.render_to_icon(32)
+        assert not icon.isNull()
 
     def test_avatar_state_toggle(self, qapp: QApplication) -> None:
         avatar = TsukikoAvatarWidget(size=64)
         avatar.set_active(True)
         assert avatar.is_active is True
+        assert avatar.animation_timer.isActive() is True
         avatar.set_active(False)
         assert avatar.is_active is False
+        assert avatar.animation_timer.isActive() is False
 
     def test_avatar_animation_suspend_and_resume(self, qapp: QApplication) -> None:
-        avatar = TsukikoAvatarWidget(size=64)
+        avatar = TsukikoAvatarWidget(size=64, idle_animation=True)
+        assert avatar.animation_timer.isActive() is True
         avatar.stop_animation()
         assert avatar.animation_timer.isActive() is False
         avatar.start_animation()
@@ -215,8 +234,12 @@ class TestFloatingCompanionWidget:
         widget = FloatingCompanionWidget()
         flags = widget.windowFlags()
         assert bool(flags & Qt.FramelessWindowHint) is True
-        assert bool(flags & Qt.WindowStaysOnTopHint) is True
         assert widget.testAttribute(Qt.WA_TranslucentBackground) is True
+        if widget.fullscreen_detector.is_available():
+            assert bool(flags & Qt.WindowStaysOnTopHint) == widget.effective_always_on_top
+        else:
+            assert widget.effective_always_on_top is False
+            assert bool(flags & Qt.WindowStaysOnTopHint) is False
 
     def test_widget_screen_clamping(self, qapp: QApplication) -> None:
         widget = FloatingCompanionWidget()
@@ -240,28 +263,60 @@ class TestFloatingCompanionWidget:
         widget.menu.close()
 
     def test_game_mode_activation_and_deactivation(self, qapp: QApplication) -> None:
-        widget = FloatingCompanionWidget()
+        config = UIConfig(idle_animation=True)
+        widget = FloatingCompanionWidget(config=config)
         widget.show()
         assert widget.isVisible() is True
         assert widget.avatar.animation_timer.isActive() is True
 
         # Activate Game Mode
         widget.enable_game_mode()
-        assert widget._is_game_mode is True
+        assert widget.is_game_mode is True
         assert widget.isVisible() is False
         assert widget.avatar.animation_timer.isActive() is False
 
         # Disable Game Mode
         widget.disable_game_mode()
-        assert widget._is_game_mode is False
+        assert widget.is_game_mode is False
         assert widget.isVisible() is True
         assert widget.avatar.animation_timer.isActive() is True
+
+    def test_distinct_hide_and_game_mode_states(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        widget.show()
+        assert widget.is_hidden is False
+        assert widget.is_game_mode is False
+
+        # Hide widget
+        widget.hide_widget()
+        assert widget.is_hidden is True
+        assert widget.is_game_mode is False
+        assert widget.isVisible() is False
+
+        # Show widget
+        widget.show_widget()
+        assert widget.is_hidden is False
+        assert widget.is_game_mode is False
+        assert widget.isVisible() is True
+
+        # Enable game mode
+        widget.enable_game_mode()
+        assert widget.is_game_mode is True
+        assert widget.is_hidden is False
+        assert widget.isVisible() is False
+
+        # Disable game mode
+        widget.disable_game_mode()
+        assert widget.is_game_mode is False
+        assert widget.is_hidden is False
+        assert widget.isVisible() is True
 
     def test_hide_widget(self, qapp: QApplication) -> None:
         widget = FloatingCompanionWidget()
         widget.show()
         widget.hide_widget()
         assert widget.isVisible() is False
+        assert widget.is_hidden is True
 
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
@@ -343,7 +398,8 @@ class TestSettingsView:
         settings.spin_margin_y.setValue(48)
         is_valid, msg = settings.validate_inputs()
         assert is_valid is True
-        assert settings.save_settings() is True
+        with patch("app.desktop.companion.views.settings_view.save_config"):
+            assert settings.save_settings() is True
 
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
@@ -403,6 +459,243 @@ class TestLaunchCompanionIntegration:
 
         widget.close()
         main_window.close()
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestFullscreenDetector:
+    """Verifies safe read-only foreground window fullscreen evaluation."""
+
+    def test_unavailable_fails_safe(self) -> None:
+        detector = FullscreenDetector()
+        with patch.object(detector, "is_available", return_value=False):
+            eval_res = detector.evaluate_fullscreen()
+            assert eval_res.detection_available is False
+            assert eval_res.safe_always_on_top is False
+            assert "failing safe" in eval_res.reason
+
+    def test_exception_in_evaluation_fails_safe(self) -> None:
+        detector = FullscreenDetector()
+        with patch.object(detector, "is_available", return_value=True):
+            with patch.object(detector, "_user32", None):
+                eval_res = detector.evaluate_fullscreen()
+                assert eval_res.safe_always_on_top is False
+
+    def test_evaluate_fullscreen_real_or_simulated(self) -> None:
+        detector = FullscreenDetector()
+        eval_res = detector.evaluate_fullscreen()
+        assert isinstance(eval_res, FullscreenEvaluation)
+        assert isinstance(eval_res.safe_always_on_top, bool)
+        assert isinstance(eval_res.is_fullscreen, bool)
+        assert len(eval_res.reason) > 0
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestWidgetFullscreenPolicy:
+    """Verifies that the floating companion widget respects fullscreen games."""
+
+    def test_widget_drops_always_on_top_on_fullscreen(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        fullscreen_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=True,
+            safe_always_on_top=False,
+            reason="Game is fullscreen",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fullscreen_eval):
+            widget._check_fullscreen_policy()
+            assert widget.effective_always_on_top is False
+            assert bool(widget.windowFlags() & Qt.WindowStaysOnTopHint) is False
+
+    def test_widget_restores_always_on_top_when_fullscreen_exits(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        widget.set_always_on_top(True)
+
+        # 1. Fullscreen active
+        fs_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=True,
+            safe_always_on_top=False,
+            reason="Game is fullscreen",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fs_eval):
+            widget._check_fullscreen_policy()
+            assert widget.effective_always_on_top is False
+
+        # 2. Fullscreen ends -> restores preference
+        windowed_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=False,
+            safe_always_on_top=True,
+            reason="Windowed application",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=windowed_eval):
+            widget._check_fullscreen_policy()
+            assert widget.effective_always_on_top is True
+            assert bool(widget.windowFlags() & Qt.WindowStaysOnTopHint) is True
+
+    def test_widget_fails_safe_on_detector_error(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        widget.set_always_on_top(True)
+
+        error_eval = FullscreenEvaluation(
+            detection_available=False,
+            is_fullscreen=False,
+            safe_always_on_top=False,
+            reason="Inspection failed",
+        )
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=error_eval):
+            widget._check_fullscreen_policy()
+            assert widget.effective_always_on_top is False
+            assert bool(widget.windowFlags() & Qt.WindowStaysOnTopHint) is False
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestSettingsApplicationAndPersistence:
+    """Verifies that settings apply dynamically to UI and persist to YAML."""
+
+    def test_save_config_persists_to_yaml(self, tmp_path: Path) -> None:
+        target_yaml = tmp_path / "tsukiko_test.yaml"
+        cfg = TsukikoConfig()
+        cfg.ui.accent_color = "#123456"
+        cfg.ui.glow_color = "#654321"
+        cfg.ui.default_corner = "top-left"
+        cfg.ui.background_opacity = 0.88
+
+        save_config(config=cfg, target_path=target_yaml)
+        assert target_yaml.exists()
+
+        import yaml
+        with open(target_yaml, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        assert data["ui"]["accent_color"] == "#123456"
+        assert data["ui"]["glow_color"] == "#654321"
+        assert data["ui"]["default_corner"] == "top-left"
+        assert data["ui"]["background_opacity"] == 0.88
+
+    def test_settings_view_saves_and_persists(self, qapp: QApplication) -> None:
+        cfg = TsukikoConfig()
+        settings_view = SettingsView(config=cfg)
+        settings_view.edit_accent.setText("#224466")
+        settings_view.edit_glow.setText("#88AACC")
+        settings_view.slider_opacity.setValue(80)
+
+        with patch("app.desktop.companion.views.settings_view.save_config") as mock_save:
+            assert settings_view.save_settings() is True
+            mock_save.assert_called_once()
+            assert cfg.ui.accent_color == "#224466"
+            assert cfg.ui.glow_color == "#88AACC"
+            assert abs(cfg.ui.background_opacity - 0.80) < 0.01
+
+    def test_apply_ui_config_to_widget(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        new_ui = UIConfig(
+            accent_color="#AABBCC",
+            glow_color="#DDEEFF",
+            default_corner="bottom-left",
+            margin_x=30,
+            margin_y=50,
+        )
+        widget.apply_ui_config(new_ui)
+        assert widget.avatar._accent_hex == "#AABBCC"
+        assert widget.avatar._glow_hex == "#DDEEFF"
+        assert widget.ui_config.default_corner == "bottom-left"
+
+    def test_apply_ui_config_to_main_window(self, qapp: QApplication) -> None:
+        win = CompanionMainWindow()
+        new_ui = UIConfig(
+            background_opacity=0.75,
+            accent_color="#7FB3D5",
+            glow_color="#D4E6F1",
+        )
+        win.apply_ui_config(new_ui)
+        assert abs(win.windowOpacity() - 0.75) < 0.01
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestSystemTrayAndWidgetRecovery:
+    """Verifies system tray restore actions and fallback behavior when tray is unavailable."""
+
+    def test_tray_manager_actions_when_available(self, qapp: QApplication) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+        widget = FloatingCompanionWidget()
+        main_win = CompanionMainWindow()
+        with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True):
+            tray = TsukikoTrayManager(widget=widget, main_window=main_win)
+
+            assert tray.is_available is True
+            assert tray.action_show_widget.text() == "Show Widget"
+            assert tray.action_open.text() == "Open Tsukiko"
+            assert tray.action_resume_game.text() == "Resume from Game Mode"
+            assert tray.action_exit.text() == "Exit"
+
+            # Hide widget -> tray restores
+            widget.hide_widget()
+            assert widget.isVisible() is False
+            assert widget.is_hidden is True
+            tray._handle_show_widget()
+            assert widget.isVisible() is True
+            assert widget.is_hidden is False
+
+            # Game mode -> tray resumes
+            widget.enable_game_mode()
+            assert widget.is_game_mode is True
+            tray.update_state(is_game_mode=True)
+            assert tray.action_resume_game.isEnabled() is True
+            tray._handle_resume_game()
+            assert widget.is_game_mode is False
+
+    def test_tray_unavailable_fallback_in_main_window(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        main_win = CompanionMainWindow()
+        main_win.show()
+        main_win.enable_tray_fallback(widget)
+
+        assert main_win.fallback_frame.isVisible() is True
+
+        # Test restore button
+        widget.hide_widget()
+        assert widget.isVisible() is False
+        main_win.btn_fallback_restore.click()
+        assert widget.isVisible() is True
+
+        # Test resume from game mode button
+        widget.enable_game_mode()
+        assert main_win.btn_fallback_game_mode.isVisible() is True
+        main_win.btn_fallback_game_mode.click()
+        assert widget.is_game_mode is False
+        assert main_win.btn_fallback_game_mode.isVisible() is False
+
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestIdleAnimationZeroOverhead:
+    """Verifies that static idle emblem consumes zero CPU timer wakeups."""
+
+    def test_zero_overhead_idle_state(self, qapp: QApplication) -> None:
+        avatar = TsukikoAvatarWidget(active=False, idle_animation=False)
+        assert avatar.animation_timer.isActive() is False
+
+        avatar.set_active(True)
+        assert avatar.animation_timer.isActive() is True
+
+        avatar.set_active(False)
+        assert avatar.animation_timer.isActive() is False
+
+    def test_hide_stops_active_animation(self, qapp: QApplication) -> None:
+        avatar = TsukikoAvatarWidget(active=True)
+        avatar.show()
+        assert avatar.animation_timer.isActive() is True
+
+        avatar.hide()
+        assert avatar.animation_timer.isActive() is False
+
+        avatar.show()
+        assert avatar.animation_timer.isActive() is True
+
+    def test_close_event_stops_timer(self, qapp: QApplication) -> None:
+        avatar = TsukikoAvatarWidget(active=True)
+        avatar.close()
+        assert avatar.animation_timer.isActive() is False
 
 
 class TestCliAndHeadlessPreservation:

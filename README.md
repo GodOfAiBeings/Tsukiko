@@ -86,7 +86,7 @@ tsukiko --headless
 ```
 
 ### 5. Execute Test Suite
-Run automated unit and integration tests (317 tests):
+Run automated unit and integration tests (335 tests):
 ```powershell
 pytest -v
 ```
@@ -96,6 +96,11 @@ pytest -v
 ## Desktop Companion Interface (Phase 2)
 
 * **Floating Companion Widget**: Frameless, translucent desktop widget with a procedural vector moonlight avatar (`QPainter`). Draggable across screens, clamped to display boundaries, and supports Game Mode (suspends visual activity without game hooking).
+* **Safe Fullscreen & Gaming Policy**: Automatically detects foreground fullscreen applications using minimal, read-only operating-system window metadata (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`). Never inspects game memory, enumerates game processes, injects DLLs, installs hooks, or interacts with game internals. Relinquishes always-on-top and lowers the widget when a fullscreen game is active; automatically restores user preference upon exit; fails safe by disabling always-on-top if inspection fails or is unsupported.
+* **System Tray & Restoration**: Provides a persistent tray icon (`QSystemTrayIcon`) with `Show Widget`, `Open Tsukiko`, `Resume from Game Mode`, and `Exit`. If the operating system or environment lacks system tray support, the main application window automatically provides in-window fallback controls so the companion can never be stranded.
+* **Distinct Hide vs Game Mode States**: `Hide Widget` hides the widget without exiting Tsukiko; `Game Mode` hides the widget and suspends visual animations/timers. Both states are fully reversible from the system tray or fallback panel.
+* **Dynamic Settings Application & Persistence**: Real-time updates to accent/glow palettes, background opacity, always-on-top, corner positioning, and margins. Validated settings are persisted to YAML across restarts without compromising Phase 1 privacy invariants.
+* **Zero-Overhead Idle Display**: Static procedural vector emblem by default; visual shimmer timers activate only during active dialogue or when explicit idle animation is configured. Visual timers immediately stop on widget hide, Game Mode activation, and application close.
 * **Compact Vertical Menu**: Clicking the logo opens an 8-item menu immediately to its left:
   1. `Open` — opens the complete Tsukiko main application window.
   2. `Microphone` — voice input control (*locked / Phase 6*).

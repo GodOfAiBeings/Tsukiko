@@ -13,22 +13,28 @@ Primary Phase 2 desktop interaction:
    - Game Mode: hides widget and suspends visual animations without game hooking/inspection.
    - Hide Widget: hides floating widget without exiting Tsukiko.
    - Exit: shuts down application cleanly.
-5. Never forces itself over exclusive fullscreen games.
+5. Never forces itself over exclusive fullscreen games or windows.
+   - Read-only OS window metadata check.
+   - Relinquishes always-on-top when fullscreen foreground window is active.
+   - Restores configured preference when fullscreen mode ends.
+   - Fails safely by disabling always-on-top if inspection is unavailable or fails.
 6. Preserves Phase 1 privacy and security invariants.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import os
+from typing import Any, Optional
 
 from app.core.config.settings import UIConfig, get_config
 from app.desktop.companion.avatar import TsukikoAvatarWidget
+from app.desktop.companion.fullscreen import FullscreenDetector, FullscreenEvaluation
 
 logger = logging.getLogger(__name__)
 
 try:
-    from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+    from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal
     from PySide6.QtGui import QCursor, QGuiApplication, QMouseEvent, QPainter, QPaintEvent
     from PySide6.QtWidgets import (
         QApplication,
@@ -145,7 +151,6 @@ class CompactCompanionMenu(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         if not HAS_PYSIDE6:
             raise RuntimeError("PySide6 is required to instantiate CompactCompanionMenu")
-        # Use Qt.Popup to get automatic dismiss-on-click-outside behavior
         super().__init__(
             parent,
             Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint,
@@ -256,13 +261,18 @@ class FloatingCompanionWidget(QWidget):
     - Independent transparent frameless window.
     - Clicking logo opens CompactCompanionMenu immediately to its LEFT.
     - Draggable across desktop; clamped to available screen boundaries.
-    - Never forces itself over fullscreen exclusive games.
+    - Never forces itself over fullscreen exclusive games or windows.
+    - Fullscreen detector automatically removes always-on-top when fullscreen app is foreground.
+    - Restores user's configured preference when fullscreen mode exits.
+    - Safe fail-closed behavior: disables always-on-top if detection fails.
     """
 
     if HAS_PYSIDE6:
         open_main_requested = Signal()
         open_settings_requested = Signal()
         game_mode_activated = Signal()
+        game_mode_deactivated = Signal()
+        widget_visibility_changed = Signal(bool)
         exit_requested = Signal()
 
     def __init__(
@@ -272,22 +282,34 @@ class FloatingCompanionWidget(QWidget):
     ) -> None:
         if not HAS_PYSIDE6:
             raise RuntimeError("PySide6 is required to instantiate FloatingCompanionWidget")
-        super().__init__(
-            parent,
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.SubWindow,
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setObjectName("FloatingCompanionWidget")
 
         self.ui_config: UIConfig = config or get_config().ui
         self._size = self.ui_config.companion_size
+
+        # Determine initial window flags based on configuration
+        initial_flags = Qt.FramelessWindowHint | Qt.Tool | Qt.SubWindow
+        if self.ui_config.always_on_top:
+            initial_flags |= Qt.WindowStaysOnTopHint
+
+        super().__init__(parent, initial_flags)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setObjectName("FloatingCompanionWidget")
         self.resize(self._size, self._size)
+
+        # State tracking
+        self._is_game_mode: bool = False
+        self._is_hidden: bool = False
+        self._effective_always_on_top: bool = self.ui_config.always_on_top
 
         # Drag state tracking
         self._drag_start_pos: Optional[QPoint] = None
         self._mouse_press_pos: Optional[QPoint] = None
         self._is_dragging: bool = False
-        self._is_game_mode: bool = False
+
+        # Fullscreen detection engine (safe read-only OS metadata)
+        self._fullscreen_detector = FullscreenDetector()
+        self._fullscreen_timer = QTimer(self)
+        self._fullscreen_timer.timeout.connect(self._check_fullscreen_policy)
 
         # Compact menu positioned to the left
         self.menu = CompactCompanionMenu()
@@ -300,37 +322,118 @@ class FloatingCompanionWidget(QWidget):
         self._setup_ui()
         self._position_to_initial_corner()
 
+        # Start periodic fullscreen evaluation
+        self._fullscreen_timer.start(1000)
+        self._check_fullscreen_policy()
+
+    @property
+    def is_game_mode(self) -> bool:
+        return self._is_game_mode
+
+    @property
+    def is_hidden(self) -> bool:
+        return self._is_hidden
+
+    @property
+    def effective_always_on_top(self) -> bool:
+        return self._effective_always_on_top
+
+    @property
+    def fullscreen_detector(self) -> FullscreenDetector:
+        return self._fullscreen_detector
+
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Procedural vector avatar logo
+        # Procedural vector avatar logo (respects fps & idle_animation config)
         self.avatar = TsukikoAvatarWidget(
             size=self._size,
             accent_color=self.ui_config.accent_color,
             glow_color=self.ui_config.glow_color,
+            active=False,
+            fps=self.ui_config.fps,
+            idle_animation=self.ui_config.idle_animation,
             parent=self,
         )
         layout.addWidget(self.avatar)
         self.setCursor(Qt.PointingHandCursor)
 
     def closeEvent(self, event: Any) -> None:
+        self._fullscreen_timer.stop()
         self.avatar.stop_animation()
         if hasattr(self, "menu") and self.menu:
             self.menu.close()
         super().closeEvent(event)
 
-    def _position_to_initial_corner(self) -> None:
-        """Position widget in the configured desktop corner with margins."""
+    def _check_fullscreen_policy(self) -> FullscreenEvaluation:
+        """Inspects foreground window geometry in read-only manner and adjusts always-on-top.
+        
+        Invariant:
+        - If foreground window is fullscreen: remove always-on-top and lower widget.
+        - If foreground window is NOT fullscreen: restore user's configured always_on_top preference.
+        - If detection fails or is unavailable: fail safely by removing always-on-top.
+        """
+        eval_result = self._fullscreen_detector.evaluate_fullscreen(own_pids={os.getpid()})
+
+        # Calculate target always-on-top state
+        target_always_on_top = eval_result.safe_always_on_top and self.ui_config.always_on_top
+
+        # Apply state transition if changed
+        if target_always_on_top != self._effective_always_on_top:
+            self._set_effective_always_on_top(target_always_on_top)
+
+        # If a fullscreen application is active, ensure we do not sit over it
+        if eval_result.is_fullscreen and self.isVisible():
+            self.lower()
+
+        return eval_result
+
+    def _set_effective_always_on_top(self, enabled: bool) -> None:
+        """Applies WindowStaysOnTopHint flag change cleanly without unintended hiding."""
+        if self._effective_always_on_top == enabled:
+            return
+
+        self._effective_always_on_top = enabled
+        was_visible = self.isVisible() and not self._is_hidden and not self._is_game_mode
+
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
+        if was_visible:
+            self.show()
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        """Updates user's always_on_top preference and applies fullscreen safety check."""
+        self.ui_config.always_on_top = enabled
+        self._check_fullscreen_policy()
+
+    def apply_ui_config(self, new_config: UIConfig) -> None:
+        """Dynamically applies updated UIConfig settings in memory."""
+        self.ui_config = new_config
+
+        # Update avatar palette
+        self.avatar.set_palette(new_config.accent_color, new_config.glow_color)
+        self.avatar._fps = max(10, min(60, new_config.fps))
+        self.avatar._idle_animation = new_config.idle_animation
+        self.avatar._sync_animation_state()
+
+        # Reposition widget based on corner and margins
+        self._position_to_corner(
+            new_config.default_corner,
+            new_config.margin_x,
+            new_config.margin_y,
+        )
+
+        # Re-evaluate always on top policy with new user preference
+        self._check_fullscreen_policy()
+
+    def _position_to_corner(self, corner: str, mx: int, my: int) -> None:
+        """Position widget in specified desktop corner with custom margins."""
         screen = QGuiApplication.primaryScreen()
         if not screen:
             return
 
         geo = screen.availableGeometry()
-        corner = self.ui_config.default_corner
-        mx = self.ui_config.margin_x
-        my = self.ui_config.margin_y
 
         if corner == "bottom-right":
             x = geo.right() - self._size - mx
@@ -349,6 +452,14 @@ class FloatingCompanionWidget(QWidget):
             y = geo.bottom() - self._size - my
 
         self.move(self._clamp_point_to_screen(QPoint(x, y)))
+
+    def _position_to_initial_corner(self) -> None:
+        """Position widget in the configured desktop corner with margins."""
+        self._position_to_corner(
+            self.ui_config.default_corner,
+            self.ui_config.margin_x,
+            self.ui_config.margin_y,
+        )
 
     def _clamp_point_to_screen(self, pos: QPoint) -> QPoint:
         """Clamp position so widget stays completely within available screen boundaries."""
@@ -371,7 +482,6 @@ class FloatingCompanionWidget(QWidget):
             self._is_dragging = False
             event.accept()
         elif event.button() == Qt.RightButton:
-            # Right click also triggers the companion menu
             self.toggle_menu()
             event.accept()
         else:
@@ -391,7 +501,6 @@ class FloatingCompanionWidget(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
             if not self._is_dragging:
-                # Clicked without dragging: toggle compact menu to the LEFT
                 self.toggle_menu()
             self._drag_start_pos = None
             self._mouse_press_pos = None
@@ -442,6 +551,7 @@ class FloatingCompanionWidget(QWidget):
         logger.info("Game Mode activated: suspending animations and hiding widget.")
         self._is_game_mode = True
         self.avatar.stop_animation()
+        self._fullscreen_timer.stop()
         self.hide()
         self.menu.close()
         self.game_mode_activated.emit()
@@ -450,14 +560,32 @@ class FloatingCompanionWidget(QWidget):
         """Exits Game Mode: restores widget visibility and resumes animations."""
         logger.info("Exiting Game Mode: restoring widget and animations.")
         self._is_game_mode = False
-        self.avatar.start_animation()
-        self.show()
+        self.avatar.set_animated(True)
+        self._fullscreen_timer.start(1000)
+        if not self._is_hidden:
+            self.show()
+            self._check_fullscreen_policy()
+        self.game_mode_deactivated.emit()
 
     def hide_widget(self) -> None:
         """Hides the floating widget without exiting Tsukiko."""
         logger.info("Hiding Tsukiko companion widget.")
+        self._is_hidden = True
         self.menu.close()
         self.hide()
+        self.widget_visibility_changed.emit(False)
+
+    def show_widget(self) -> None:
+        """Restores visibility of the companion widget."""
+        logger.info("Showing Tsukiko companion widget.")
+        self._is_hidden = False
+        if self._is_game_mode:
+            self.disable_game_mode()
+        else:
+            self.show()
+            self.avatar._sync_animation_state()
+            self._check_fullscreen_policy()
+        self.widget_visibility_changed.emit(True)
 
     def _handle_open_main(self) -> None:
         self.open_main_requested.emit()

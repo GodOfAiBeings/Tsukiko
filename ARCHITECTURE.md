@@ -115,14 +115,36 @@ flowchart TD
   * Draggable across display work area with screen boundary clamping.
   * Left-clicking the logo toggles the compact vertical menu immediately to its left.
   * Right-clicking also opens the menu.
-  * Never forces itself over fullscreen exclusive games.
+  * Never forces itself over fullscreen exclusive games or applications.
+* **Safe Fullscreen & Gaming Policy (`app/desktop/companion/fullscreen.py`)**:
+  * Employs `FullscreenDetector` using strictly read-only operating system window geometry (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `GetClassNameW`, `GetWindowThreadProcessId`).
+  * **Anti-Cheat Safe Invariants**:
+    1. NEVER inspects game process memory, scans memory pages, or reads game structures.
+    2. NEVER enumerates game processes or checks running executable names.
+    3. NEVER injects DLLs, installs API hooks, or registers global hooks (`SetWindowsHookEx`).
+    4. NEVER captures screen buffers, window frames, or automates user input.
+    5. Fails safe: disables always-on-top if OS metadata is unavailable, unsupported (non-Windows/headless), or raises an exception.
+  * Automatically removes `Qt.WindowStaysOnTopHint` and calls `lower()` when a fullscreen foreground window is active.
+  * Automatically restores the user's configured always-on-top preference when fullscreen mode exits.
+  * Does not claim universal anti-cheat compatibility or guarantee that every game permits third-party desktop companions.
 * **Compact Vertical Menu (`CompactCompanionMenu`)**:
   * Positioned immediately to the left of the floating avatar with screen edge fallback.
   * Ordered options: Open, Microphone (locked Phase 6), Speaker (locked Phase 6), Screen Sharing (locked Phase 5), Settings, Game Mode, Hide Widget, Exit.
   * Dismisses smoothly when clicking outside (`Qt.Popup`).
-* **Game Mode**:
-  * Suspends avatar shimmer animation and hides the widget.
-  * Does not inspect game processes, inject code, or install hooks.
+* **System Tray & Restoration Architecture (`app/desktop/companion/tray.py`)**:
+  * Lightweight `QSystemTrayIcon` with procedural vector icon.
+  * Tray actions: `Show Widget`, `Open Tsukiko`, `Resume from Game Mode` (visible/enabled when Game Mode active), and `Exit`.
+  * Distinct states: `Hide Widget` and `Game Mode` are separate states (Game Mode suspends visual animation timers; both reversible from tray).
+  * **Tray Fallback Guarantee**: If `QSystemTrayIcon.isSystemTrayAvailable()` returns False (e.g. headless, unsupported display server), `CompanionMainWindow` displays an in-window companion control panel (`fallback_frame`) so the user is never stranded.
+* **Zero-Overhead Idle Animation (`app/desktop/companion/avatar.py`)**:
+  * Uses `UIConfig.fps` and `UIConfig.idle_animation`.
+  * Static procedural vector emblem by default: the visual animation timer (`_timer`) is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
+  * Hiding the widget, entering Game Mode, and closing the widget immediately stops visual timers.
+  * Provides `render_to_pixmap()` and `render_to_icon()` for static emblem rendering without running timers.
+* **Dynamic Settings Application & YAML Persistence (`app/desktop/companion/views/settings_view.py`)**:
+  * Real-time in-memory application of accent/glow color palettes, background opacity, default corner positioning, and margins.
+  * Validated settings persist across application restarts to YAML via `save_config()`.
+  * Privacy and zero-trust policies strictly cannot be altered or bypassed from the UI.
 * **Companion Main Window (`CompanionMainWindow`)**:
   * Complete application window launched via `Open` or `Settings`.
   * Silver-blue Moonlight design system (`MoonlightTheme`).
@@ -130,4 +152,5 @@ flowchart TD
   * Closing the main window hides it to the background while preserving independent widget execution.
 * **Testing Architecture**:
   * Full offscreen Qt test execution via `QT_QPA_PLATFORM=offscreen`.
-  * Verified in `tests/test_desktop_companion.py` (24 dedicated unit tests).
+  * Verified in `tests/test_desktop_companion.py` (42 dedicated unit tests).
+  * Full project test suite: 335 tests passing cleanly across Windows and Linux CI.

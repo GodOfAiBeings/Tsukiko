@@ -1,23 +1,26 @@
-"""
-Tsukiko Desktop Companion Avatar Emblem
+"""Tsukiko Desktop Companion Avatar Emblem.
+
 Graceful, locally-drawn procedural moonlight emblem for Tsukiko.
-Renders with anti-aliasing without external assets, images, or font dependencies.
+Renders with anti-aliasing without external assets, images, 3D engines, or font dependencies.
+Optimized for zero-overhead idle display: animation timers run only when active.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from PySide6.QtCore import QPointF, QRectF, QTimer, Qt
     from PySide6.QtGui import (
         QBrush,
         QColor,
+        QIcon,
         QLinearGradient,
         QPainter,
         QPainterPath,
         QPen,
+        QPixmap,
         QRadialGradient,
     )
     from PySide6.QtWidgets import QWidget
@@ -34,7 +37,7 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
     - Soft outer lunar halo with translucent blue-glow falloff.
     - Silver-blue inner celestial circle with subtle depth gradient.
     - Elegant crescent moon silhouette intersecting an orbital ring.
-    - Gentle pulse/shimmer animation during active state.
+    - Low-overhead: static idle emblem by default; shimmer animation only when active.
     """
 
     def __init__(
@@ -45,6 +48,7 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         active: bool = False,
         animate: bool = True,
         fps: int = 30,
+        idle_animation: bool = False,
         parent: Optional[QWidget] = None,
     ) -> None:
         if not PYSIDE6_AVAILABLE:
@@ -56,6 +60,7 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         self._glow_hex = glow_color
         self._active = active
         self._animate = animate
+        self._idle_animation = idle_animation
         self._fps = max(10, min(60, fps))
         self._phase = 0.0
 
@@ -65,20 +70,40 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         # Pulse timer for moonlight shimmer
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
-        if self._animate:
-            self._timer.start(int(1000 / self._fps))
+
+        # Only start timer if animation is enabled AND (widget is active OR idle_animation is requested)
+        self._sync_animation_state()
 
     @property
     def animation_timer(self) -> QTimer:
         return self._timer
 
+    def _sync_animation_state(self) -> None:
+        """Starts or stops the animation timer based on current active & idle configuration."""
+        should_run = self._animate and (self._active or self._idle_animation)
+        if should_run and not self._timer.isActive():
+            self._timer.start(int(1000 / self._fps))
+        elif not should_run and self._timer.isActive():
+            self._timer.stop()
+            self._phase = 0.0
+            self.update()
+
     def start_animation(self) -> None:
-        self.set_animated(True)
+        """Explicitly starts visual shimmer animation."""
+        self._animate = True
+        if not self._timer.isActive():
+            self._timer.start(int(1000 / self._fps))
 
     def stop_animation(self) -> None:
-        self.set_animated(False)
+        """Halts visual shimmer timer cleanly and resets to static idle pose."""
+        self._animate = False
+        if self._timer.isActive():
+            self._timer.stop()
+        self._phase = 0.0
+        self.update()
 
     def set_active(self, val: bool) -> None:
+        """Sets active state; starts animation when active, reverts to static when idle."""
         self.is_active = val
 
     @property
@@ -89,52 +114,69 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
     def is_active(self, val: bool) -> None:
         if self._active != val:
             self._active = val
+            self._sync_animation_state()
             self.update()
 
     def set_palette(self, accent_hex: str, glow_hex: str) -> None:
+        """Updates color tokens immediately."""
         self._accent_hex = accent_hex
         self._glow_hex = glow_hex
         self.update()
 
     def set_animated(self, enabled: bool) -> None:
+        """Toggles animation capability."""
         self._animate = enabled
-        if enabled and not self._timer.isActive():
-            self._timer.start(int(1000 / self._fps))
-        elif not enabled and self._timer.isActive():
+        self._sync_animation_state()
+
+    def hideEvent(self, event: Any) -> None:
+        """Halt animation timers immediately when hidden to avoid idle background repaints."""
+        if self._timer.isActive():
             self._timer.stop()
-            self._phase = 0.0
-            self.update()
+        super().hideEvent(event)
+
+    def showEvent(self, event: Any) -> None:
+        """Restore animation when shown if active or idle_animation enabled."""
+        self._sync_animation_state()
+        super().showEvent(event)
 
     def closeEvent(self, event: Any) -> None:
+        """Ensure timer is stopped cleanly on widget close."""
         self.stop_animation()
         super().closeEvent(event)
 
     def _on_tick(self) -> None:
-        # Subtle gentle oscillation (1.5s per cycle)
+        """Gentle oscillation cycle."""
         speed = 0.08 if self._active else 0.03
         self._phase = (self._phase + speed) % (2 * math.pi)
         self.update()
 
-    def paintEvent(self, event: Any) -> None:
-        painter = QPainter(self)
+    @staticmethod
+    def _draw_emblem_static(
+        painter: QPainter,
+        w: float,
+        h: float,
+        accent_hex: str = "#7FB3D5",
+        glow_hex: str = "#D4E6F1",
+        phase: float = 0.0,
+        is_active: bool = False,
+    ) -> None:
+        """Renders the procedural moonlight vector artwork."""
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        w = float(self.width())
-        h = float(self.height())
         center_x = w / 2.0
         center_y = h / 2.0
         base_radius = min(w, h) * 0.42
 
-        # Compute dynamic pulse factor
-        pulse = math.sin(self._phase)
-        glow_radius = base_radius * (1.18 + (0.08 * pulse if self._active else 0.03 * pulse))
-        glow_alpha = int(90 + 50 * pulse) if self._active else int(45 + 15 * pulse)
+        # Dynamic pulse factor (zero pulse if phase is 0.0)
+        pulse = math.sin(phase)
+        glow_radius = base_radius * (1.18 + (0.08 * pulse if is_active else 0.03 * pulse))
+        glow_alpha = int(90 + 50 * pulse) if is_active else int(45 + 15 * pulse)
 
-        accent_color = QColor(self._accent_hex)
-        glow_color = QColor(self._glow_hex)
+        accent_color = QColor(accent_hex)
+        glow_color = QColor(glow_hex)
 
-        # ── 1. Outer Lunar Halo (Radial Gradient) ─────────────────────
+        # 1. Outer Lunar Halo
         halo_gradient = QRadialGradient(center_x, center_y, glow_radius)
         glow_c = QColor(glow_color)
         glow_c.setAlpha(glow_alpha)
@@ -148,7 +190,7 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(QPointF(center_x, center_y), glow_radius, glow_radius)
 
-        # ── 2. Core Lunar Orb Surface ─────────────────────────────────
+        # 2. Core Lunar Orb Surface
         orb_gradient = QLinearGradient(
             center_x - base_radius, center_y - base_radius,
             center_x + base_radius, center_y + base_radius,
@@ -159,12 +201,12 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         orb_gradient.setColorAt(1.0, orb_bot)
 
         painter.setBrush(QBrush(orb_gradient))
-        orb_border = QColor(self._accent_hex)
-        orb_border.setAlpha(200 if self._active else 120)
+        orb_border = QColor(accent_hex)
+        orb_border.setAlpha(200 if is_active else 120)
         painter.setPen(QPen(orb_border, 1.8))
         painter.drawEllipse(QPointF(center_x, center_y), base_radius, base_radius)
 
-        # ── 3. Orbital Ring Accent ────────────────────────────────────
+        # 3. Orbital Ring Accent
         ring_rect = QRectF(
             center_x - base_radius * 0.95,
             center_y - base_radius * 0.40,
@@ -183,15 +225,13 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         painter.drawEllipse(ring_rect)
         painter.restore()
 
-        # ── 4. Elegant Crescent Moon Motif ────────────────────────────
+        # 4. Crescent Moon Motif
         moon_path = QPainterPath()
         moon_r = base_radius * 0.62
         offset_x = base_radius * 0.22
 
-        # Outer moon arc
         moon_path.addEllipse(QPointF(center_x - offset_x * 0.3, center_y), moon_r, moon_r)
 
-        # Cutout arc to form the crescent
         cutout = QPainterPath()
         cutout.addEllipse(QPointF(center_x + offset_x * 0.5, center_y - offset_x * 0.2), moon_r * 0.88, moon_r * 0.88)
         crescent = moon_path.subtracted(cutout)
@@ -200,10 +240,10 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
             center_x - moon_r, center_y - moon_r,
             center_x + moon_r, center_y + moon_r,
         )
-        cres_c1 = QColor(self._glow_hex)
-        cres_c1.setAlpha(240 if self._active else 200)
-        cres_c2 = QColor(self._accent_hex)
-        cres_c2.setAlpha(190 if self._active else 140)
+        cres_c1 = QColor(glow_hex)
+        cres_c1.setAlpha(240 if is_active else 200)
+        cres_c2 = QColor(accent_hex)
+        cres_c2.setAlpha(190 if is_active else 140)
         crescent_grad.setColorAt(0.0, cres_c1)
         crescent_grad.setColorAt(1.0, cres_c2)
 
@@ -211,11 +251,55 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
         painter.setPen(Qt.NoPen)
         painter.drawPath(crescent)
 
-        # ── 5. Central Shimmer Star / Moon Eye ────────────────────────
-        sparkle_r = 2.2 + (0.8 * pulse if self._active else 0.3 * pulse)
+        # 5. Central Shimmer Star
+        sparkle_r = 2.2 + (0.8 * pulse if is_active else 0.3 * pulse)
         sparkle_c = QColor("#FFFFFF")
-        sparkle_c.setAlpha(240 if self._active else 170)
+        sparkle_c.setAlpha(240 if is_active else 170)
         painter.setBrush(QBrush(sparkle_c))
         painter.drawEllipse(QPointF(center_x + base_radius * 0.18, center_y - base_radius * 0.22), sparkle_r, sparkle_r)
 
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        self._draw_emblem_static(
+            painter,
+            float(self.width()),
+            float(self.height()),
+            accent_hex=self._accent_hex,
+            glow_hex=self._glow_hex,
+            phase=self._phase,
+            is_active=self._active,
+        )
         painter.end()
+
+    @classmethod
+    def render_to_pixmap(
+        cls,
+        size: int = 32,
+        accent_color: str = "#7FB3D5",
+        glow_color: str = "#D4E6F1",
+    ) -> QPixmap:
+        """Renders static emblem into an offscreen QPixmap for tray/window icons."""
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        cls._draw_emblem_static(
+            painter,
+            float(size),
+            float(size),
+            accent_hex=accent_color,
+            glow_hex=glow_color,
+            phase=0.0,
+            is_active=False,
+        )
+        painter.end()
+        return pixmap
+
+    @classmethod
+    def render_to_icon(
+        cls,
+        size: int = 32,
+        accent_color: str = "#7FB3D5",
+        glow_color: str = "#D4E6F1",
+    ) -> QIcon:
+        """Returns QIcon with static emblem for system tray or window icon."""
+        return QIcon(cls.render_to_pixmap(size, accent_color, glow_color))

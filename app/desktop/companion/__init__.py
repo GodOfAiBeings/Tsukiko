@@ -14,14 +14,19 @@ logger = logging.getLogger(__name__)
 try:
     from PySide6.QtWidgets import QApplication
     from app.desktop.companion.avatar import TsukikoAvatarWidget
+    from app.desktop.companion.fullscreen import FullscreenDetector, FullscreenEvaluation
     from app.desktop.companion.theme import MoonlightTheme
+    from app.desktop.companion.tray import TsukikoTrayManager
     from app.desktop.companion.widget import CompactCompanionMenu, FloatingCompanionWidget
     from app.desktop.companion.window import CompanionMainWindow
     HAS_PYSIDE6 = True
 except ImportError:
     HAS_PYSIDE6 = False
     TsukikoAvatarWidget = None  # type: ignore[assignment,misc]
+    FullscreenDetector = None  # type: ignore[assignment,misc]
+    FullscreenEvaluation = None  # type: ignore[assignment,misc]
     MoonlightTheme = None  # type: ignore[assignment,misc]
+    TsukikoTrayManager = None  # type: ignore[assignment,misc]
     CompactCompanionMenu = None  # type: ignore[assignment,misc]
     FloatingCompanionWidget = None  # type: ignore[assignment,misc]
     CompanionMainWindow = None  # type: ignore[assignment,misc]
@@ -29,7 +34,10 @@ except ImportError:
 __all__ = [
     "HAS_PYSIDE6",
     "TsukikoAvatarWidget",
+    "FullscreenDetector",
+    "FullscreenEvaluation",
     "MoonlightTheme",
+    "TsukikoTrayManager",
     "CompactCompanionMenu",
     "FloatingCompanionWidget",
     "CompanionMainWindow",
@@ -63,8 +71,14 @@ def launch_companion(
     widget.open_main_requested.connect(lambda: (main_window.show(), main_window.raise_(), main_window.activateWindow()))
     widget.open_settings_requested.connect(lambda: (main_window.show_settings(), main_window.show(), main_window.raise_(), main_window.activateWindow()))
 
-    # Apply settings changes to widget dynamically
-    main_window.settings_view.settings_applied.connect(lambda new_cfg: widget._position_to_initial_corner())
+    # Apply settings changes to widget and main window dynamically
+    main_window.settings_view.settings_applied.connect(widget.apply_ui_config)
+    main_window.settings_view.settings_applied.connect(main_window.apply_ui_config)
+
+    # Initialize System Tray Manager
+    tray_manager = TsukikoTrayManager(widget=widget, main_window=main_window)
+    widget.tray_manager = tray_manager  # type: ignore[attr-defined]
+    main_window.tray_manager = tray_manager  # type: ignore[attr-defined]
 
     # Show floating widget
     widget.show()

@@ -222,3 +222,13 @@ def get_config() -> TsukikoConfig:
     if _CONFIG_INSTANCE is None:
         _CONFIG_INSTANCE = load_config()
     return _CONFIG_INSTANCE
+
+
+def save_config(config: Optional[TsukikoConfig] = None, target_path: Optional[str | Path] = None) -> Path:
+    """Saves the active configuration to YAML file so it persists across restarts."""
+    global _CONFIG_INSTANCE
+    cfg = config or get_config()
+    dest = Path(target_path) if target_path else find_default_config_path()
+    cfg.save_yaml(dest)
+    _CONFIG_INSTANCE = cfg
+    return dest

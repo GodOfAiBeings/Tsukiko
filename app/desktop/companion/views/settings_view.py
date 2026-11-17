@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Callable, Optional
 
-from app.core.config.settings import TsukikoConfig, UIConfig, get_config
+from app.core.config.settings import TsukikoConfig, UIConfig, get_config, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +287,7 @@ class SettingsView(QWidget):
             self.status_label.setStyleSheet("color: #E06C75; font-size: 12px;")
             return False
 
+        self._ui_config.theme = self.combo_theme.currentText()
         self._ui_config.accent_color = self.edit_accent.text().strip()
         self._ui_config.glow_color = self.edit_glow.text().strip()
         self._ui_config.background_opacity = self.slider_opacity.value() / 100.0
@@ -295,10 +296,14 @@ class SettingsView(QWidget):
         self._ui_config.margin_x = self.spin_margin_x.value()
         self._ui_config.margin_y = self.spin_margin_y.value()
 
-        # Update root config
+        # Update root config and persist to disk
         self._config.ui = self._ui_config
+        try:
+            save_config(self._config)
+        except Exception as e:
+            logger.warning(f"Failed to persist settings to disk: {e}")
 
-        self.status_label.setText("✓ Settings applied successfully.")
+        self.status_label.setText("✓ Settings applied and saved successfully.")
         self.status_label.setStyleSheet("color: #A8D5BA; font-size: 12px;")
         if HAS_PYSIDE6:
             self.settings_applied.emit(self._ui_config)

@@ -1,5 +1,58 @@
 # Tsukiko Development Log
 
+## Phase 2: Acceptance Corrections & Hardening (2026-11-17)
+
+### Status: Complete, Hardened & Verified across Windows and Linux
+
+### Architecture & Deliverables
+
+1. **Safe Foreground Fullscreen Detection Policy (`app/desktop/companion/fullscreen.py`)**:
+   - `FullscreenDetector`: Evaluates whether the current foreground window is occupying the display in fullscreen mode using minimal, read-only Windows User32 metadata (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `GetClassNameW`, `GetWindowThreadProcessId`).
+   - **Anti-Cheat Safe Invariants**:
+     - NEVER inspects game process memory, scans memory pages, or reads structures.
+     - NEVER enumerates game processes or checks running executable names.
+     - NEVER injects DLLs, installs API hooks, or registers global hooks (`SetWindowsHookEx`).
+     - NEVER captures screen buffers, window frames, or automates user input.
+     - Fails closed / safe: if OS metadata is unavailable (non-Windows / headless), raises an exception, or query fails, always-on-top is disabled.
+     - Explicitly does not claim universal anti-cheat compatibility or guarantee that every game permits third-party desktop overlays.
+   - Dynamic window flag adjustment: when a foreground window occupies the monitor, `FloatingCompanionWidget` removes `Qt.WindowStaysOnTopHint` and calls `self.lower()`. When fullscreen mode exits, the user's configured always-on-top preference is cleanly restored.
+
+2. **System Tray Integration & Restoration (`app/desktop/companion/tray.py`)**:
+   - `TsukikoTrayManager`: Lightweight `QSystemTrayIcon` with procedurally drawn vector icon.
+   - Context menu provides required Phase 2 options:
+     - `Show Widget`: restores floating companion widget from hidden or game mode.
+     - `Open Tsukiko`: brings up main application window.
+     - `Resume from Game Mode`: visible and enabled when Game Mode is active.
+     - `Exit`: cleanly terminates application and orchestrator.
+   - **Distinct State Tracking**:
+     - `Hide Widget`: sets `is_hidden=True` and hides widget without terminating Tsukiko.
+     - `Game Mode`: sets `is_game_mode=True`, halts visual timers, and hides widget without interacting with games.
+     - Both states are fully reversible from the system tray or fallback panel.
+   - **Tray Unavailable Fallback**:
+     - If `QSystemTrayIcon.isSystemTrayAvailable()` returns False (e.g. headless, unsupported display server), `CompanionMainWindow` displays an in-window fallback panel (`fallback_frame`) so the user can never be stranded.
+
+3. **Dynamic Settings Application & YAML Persistence (`app/core/config/settings.py`, `views/settings_view.py`)**:
+   - Implemented `save_config()` to persist validated settings to YAML so they survive application restarts.
+   - Settings applied immediately to live UI:
+     - `always_on_top`: adjusts window flags subject to fullscreen policy check.
+     - `accent_color` & `glow_color`: updates avatar vector palette dynamically.
+     - `background_opacity`: applies to main window and stylesheet immediately.
+     - `default_corner` & `margin_x`/`margin_y`: repositions widget dynamically.
+     - `theme`: keeps `silver-blue-moonlight` and updates stylesheet dynamically.
+   - Privacy and security settings strictly preserved and never mutated from the UI.
+
+4. **Zero-Overhead Idle Animation (`app/desktop/companion/avatar.py`, `widget.py`)**:
+   - Uses `UIConfig.fps` and `UIConfig.idle_animation`.
+   - Static procedural vector emblem by default: visual shimmer timer (`_timer`) is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
+   - Hiding the widget, entering Game Mode, and closing the widget immediately stops visual timers.
+   - Added `render_to_pixmap()` and `render_to_icon()` vector rendering without running timers.
+
+5. **Test Suite Expansion (`tests/test_desktop_companion.py`)**:
+   - Expanded unit and regression test suite with 18 new tests (42 tests total for UI companion subsystem).
+   - Total test suite expanded to 335 tests (331 passed, 4 Unix-specific skipped on Windows; 333 passed, 2 skipped on Linux).
+
+---
+
 ## Phase 2: Desktop Companion UI Implementation (2026-11-17)
 
 ### Status: Complete, Hardened & Verified across Windows and Linux

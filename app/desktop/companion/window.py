@@ -120,10 +120,14 @@ class CompanionMainWindow(QMainWindow):
 
         self._config = config or get_config()
         self._orchestrator = orchestrator
+        self._widget: Optional[Any] = None
+        self._tray_fallback_enabled: bool = False
         self._nav_buttons: Dict[str, NavButton] = {}
 
         self._init_theme()
         self._init_ui()
+        self.setWindowOpacity(self._config.ui.background_opacity)
+        self.settings_view.settings_applied.connect(self.apply_ui_config)
 
     def _init_theme(self) -> None:
         """Apply shared silver-blue moonlight theme stylesheet."""
@@ -185,6 +189,59 @@ class CompanionMainWindow(QMainWindow):
         self._add_nav_button(sidebar_layout, "settings", "⚙️", "Settings")
 
         sidebar_layout.addStretch(1)
+
+        # Fallback companion controls (shown if system tray is unavailable)
+        self.fallback_frame = QFrame()
+        self.fallback_frame.setObjectName("fallback_frame")
+        self.fallback_frame.setStyleSheet(
+            "QFrame#fallback_frame {"
+            "  background-color: rgba(30, 41, 59, 0.7);"
+            "  border: 1px solid rgba(127, 179, 213, 0.3);"
+            "  border-radius: 6px;"
+            "  padding: 6px;"
+            "}"
+        )
+        fb_layout = QVBoxLayout(self.fallback_frame)
+        fb_layout.setContentsMargins(6, 6, 6, 6)
+        fb_layout.setSpacing(4)
+
+        fb_title = QLabel("Companion Controls")
+        fb_title.setStyleSheet("font-size: 11px; font-weight: bold; color: #7FB3D5;")
+        fb_layout.addWidget(fb_title)
+
+        self.btn_fallback_restore = QPushButton("Show Floating Widget")
+        self.btn_fallback_restore.setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(127, 179, 213, 0.15);"
+            "  border: 1px solid #7FB3D5;"
+            "  color: #F8FAFC;"
+            "  font-size: 11px;"
+            "  border-radius: 4px;"
+            "  padding: 4px;"
+            "}"
+            "QPushButton:hover { background: rgba(127, 179, 213, 0.3); }"
+        )
+        self.btn_fallback_restore.clicked.connect(self._on_fallback_restore_clicked)
+        fb_layout.addWidget(self.btn_fallback_restore)
+
+        self.btn_fallback_game_mode = QPushButton("Resume from Game Mode")
+        self.btn_fallback_game_mode.setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(82, 190, 128, 0.15);"
+            "  border: 1px solid #52BE80;"
+            "  color: #A8D5BA;"
+            "  font-size: 11px;"
+            "  border-radius: 4px;"
+            "  padding: 4px;"
+            "}"
+            "QPushButton:hover { background: rgba(82, 190, 128, 0.3); }"
+        )
+        self.btn_fallback_game_mode.clicked.connect(self._on_fallback_game_mode_clicked)
+        self.btn_fallback_game_mode.setVisible(False)
+        fb_layout.addWidget(self.btn_fallback_game_mode)
+
+        self.fallback_frame.setVisible(False)
+        sidebar_layout.addWidget(self.fallback_frame)
 
         # Offline privacy invariant badge at bottom of sidebar
         badge_frame = QFrame()
@@ -284,3 +341,44 @@ class CompanionMainWindow(QMainWindow):
         logger.info("Main companion window closed; hiding to background companion widget.")
         self.hide()
         event.ignore()
+
+    def enable_tray_fallback(self, widget: Optional[Any] = None) -> None:
+        """Enables in-window companion controls when system tray is unavailable."""
+        self._tray_fallback_enabled = True
+        if widget:
+            self.set_widget_controller(widget)
+        self.fallback_frame.setVisible(True)
+
+    def set_widget_controller(self, widget: Any) -> None:
+        """Wires floating widget state to fallback controls."""
+        self._widget = widget
+        if hasattr(widget, "game_mode_activated"):
+            widget.game_mode_activated.connect(lambda: self.btn_fallback_game_mode.setVisible(True))
+        if hasattr(widget, "game_mode_deactivated"):
+            widget.game_mode_deactivated.connect(lambda: self.btn_fallback_game_mode.setVisible(False))
+
+    def _on_fallback_restore_clicked(self) -> None:
+        if self._widget:
+            if hasattr(self._widget, "disable_game_mode") and getattr(self._widget, "is_game_mode", False):
+                self._widget.disable_game_mode()
+            if hasattr(self._widget, "show_widget"):
+                self._widget.show_widget()
+            else:
+                self._widget.show()
+
+    def _on_fallback_game_mode_clicked(self) -> None:
+        if self._widget and hasattr(self._widget, "disable_game_mode"):
+            self._widget.disable_game_mode()
+        self.btn_fallback_game_mode.setVisible(False)
+
+    def apply_ui_config(self, new_config: Any) -> None:
+        """Applies dynamic UI settings to the main window."""
+        self._config.ui = new_config
+        self.setWindowOpacity(new_config.background_opacity)
+        self.setStyleSheet(
+            MoonlightTheme.get_stylesheet(
+                accent=new_config.accent_color,
+                glow=new_config.glow_color,
+                opacity=new_config.background_opacity,
+            )
+        )

@@ -54,7 +54,7 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (317 test items: 313 passed, 4 Unix-specific skipped on Windows; 315 passed, 2 skipped on Linux):
+Execute the complete automated test suite (335 test items: 331 passed, 4 Unix-specific skipped on Windows; 333 passed, 2 skipped on Linux):
 ```powershell
 pytest -v
 ```

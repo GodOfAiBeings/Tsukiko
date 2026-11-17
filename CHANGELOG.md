@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] - Phase 2 Acceptance Corrections & Hardening - 2026-11-17
+
+### Added
+- **Safe Foreground Fullscreen Detection Policy (`app/desktop/companion/fullscreen.py`)**:
+  - Implemented `FullscreenDetector` using minimal, read-only Windows User32 metadata (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `GetClassNameW`, `GetWindowThreadProcessId`).
+  - Zero Anti-Cheat Footprint: Never inspects game memory, enumerates game processes, injects DLLs, installs hooks, captures screens, or automates input.
+  - Automatically drops `Qt.WindowStaysOnTopHint` and lowers the widget when a fullscreen application occupies the display.
+  - Automatically restores user preference when fullscreen mode ends.
+  - Fails safe by disabling always-on-top if OS metadata inspection is unavailable or raises an error.
+  - Explicit anti-cheat disclaimers included in documentation and code.
+- **System Tray Management & Fallback (`app/desktop/companion/tray.py`)**:
+  - Implemented `TsukikoTrayManager` via `QSystemTrayIcon` with procedural vector icon.
+  - Context menu actions in exact required specification: `Show Widget`, `Open Tsukiko`, `Resume from Game Mode` (visible/enabled when Game Mode active), and `Exit`.
+  - Distinct state tracking: `Hide Widget` vs `Game Mode` are separate states (Game Mode suspends visual animation timers; both reversible from tray).
+  - In-window fallback controls in `CompanionMainWindow` (`fallback_frame`) when system tray is unavailable (`isSystemTrayAvailable() == False`) so user is never stranded.
+- **Dynamic Settings Application & YAML Persistence (`app/core/config/settings.py`, `app/desktop/companion/views/settings_view.py`)**:
+  - Implemented `save_config()` persisting settings across restarts to YAML.
+  - Settings applied immediately to live UI: `always_on_top`, `accent_color`, `glow_color`, `background_opacity`, `default_corner`, `margin_x`, `margin_y`, `theme`.
+  - Privacy and security settings strictly preserved and cannot be mutated from UI.
+- **Zero-Overhead Idle Animation (`app/desktop/companion/avatar.py`, `app/desktop/companion/widget.py`)**:
+  - Uses `UIConfig.fps` and `UIConfig.idle_animation`.
+  - Static idle emblem by default: visual shimmer timer is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
+  - Timer immediately halts on `hideEvent()`, widget hide, Game Mode activation, and widget close.
+  - Added `render_to_pixmap()` and `render_to_icon()` vector rendering without running timers.
+
+### Changed
+- Total automated test suite expanded to 335 tests (331 passed, 4 skipped on Windows; 333 passed, 2 skipped on Linux).
+
+---
+
 ## [0.2.0] - Phase 2: Desktop Companion UI Implementation - 2026-11-17
 
 ### Added
