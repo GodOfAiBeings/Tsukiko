@@ -118,6 +118,7 @@ flowchart TD
   * Never forces itself over fullscreen exclusive games or applications.
 * **Safe Fullscreen & Gaming Policy (`app/desktop/companion/fullscreen.py`)**:
   * Employs `FullscreenDetector` using strictly read-only operating system window geometry (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `GetClassNameW`, `GetWindowThreadProcessId`).
+  * Explicit ctypes function signatures (`argtypes` and pointer-sized `restype` using `HWND`, `HMONITOR`, `BOOL`, `DWORD`, `RECT`, and `MONITORINFO`) across all 10 Win32 APIs, eliminating 64-bit handle truncation.
   * **Anti-Cheat Safe Invariants**:
     1. NEVER inspects game process memory, scans memory pages, or reads game structures.
     2. NEVER enumerates game processes or checks running executable names.
@@ -135,22 +136,23 @@ flowchart TD
   * Lightweight `QSystemTrayIcon` with procedural vector icon.
   * Tray actions: `Show Widget`, `Open Tsukiko`, `Resume from Game Mode` (visible/enabled when Game Mode active), and `Exit`.
   * Distinct states: `Hide Widget` and `Game Mode` are separate states (Game Mode suspends visual animation timers; both reversible from tray).
-  * **Tray Fallback Guarantee**: If `QSystemTrayIcon.isSystemTrayAvailable()` returns False (e.g. headless, unsupported display server), `CompanionMainWindow` displays an in-window companion control panel (`fallback_frame`) so the user is never stranded.
+  * **Tray Fallback Guarantee**: If `QSystemTrayIcon.isSystemTrayAvailable()` returns False (e.g. headless, unsupported display server), Tsukiko launches `CompanionMainWindow` at startup with an in-window companion control panel (`fallback_frame`) including `Show Widget`, `Resume from Game Mode`, and `Exit Tsukiko`. Closing the main window in fallback mode minimizes to the OS taskbar rather than hiding, ensuring controls remain continuously accessible.
 * **Zero-Overhead Idle Animation (`app/desktop/companion/avatar.py`)**:
   * Uses `UIConfig.fps` and `UIConfig.idle_animation`.
-  * Static procedural vector emblem by default: the visual animation timer (`_timer`) is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
+  * Static procedural vector emblem by default (`idle_animation: false`): the visual animation timer (`_timer`) is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
   * Hiding the widget, entering Game Mode, and closing the widget immediately stops visual timers.
   * Provides `render_to_pixmap()` and `render_to_icon()` for static emblem rendering without running timers.
 * **Dynamic Settings Application & YAML Persistence (`app/desktop/companion/views/settings_view.py`)**:
   * Real-time in-memory application of accent/glow color palettes, background opacity, default corner positioning, and margins.
-  * Validated settings persist across application restarts to YAML via `save_config()`.
+  * Validated settings persist across application restarts to YAML via `save_config()`, with error handling that truthfully distinguishes session application from disk failure.
+  * Tracks `_ACTIVE_CONFIG_PATH` to honor custom configuration files specified via `--config`.
   * Privacy and zero-trust policies strictly cannot be altered or bypassed from the UI.
 * **Companion Main Window (`CompanionMainWindow`)**:
   * Complete application window launched via `Open` or `Settings`.
   * Silver-blue Moonlight design system (`MoonlightTheme`).
   * 5 modular views: `ChatView` (Phase 3 disclaimer), `SystemStatusView` (genuine hardware metrics), `PrivacyView` (locked sensor indicators and zero-trust invariants), `MemoryView` (Phase 4 placeholder), `SettingsView` (appearance customization).
-  * Closing the main window hides it to the background while preserving independent widget execution.
+  * Closing the main window hides it to the background while preserving independent widget execution (or minimizes in fallback mode).
 * **Testing Architecture**:
   * Full offscreen Qt test execution via `QT_QPA_PLATFORM=offscreen`.
-  * Verified in `tests/test_desktop_companion.py` (42 dedicated unit tests).
-  * Full project test suite: 335 tests passing cleanly across Windows and Linux CI.
+  * Verified in `tests/test_desktop_companion.py` (49 dedicated unit tests).
+  * Full project test suite: 342 tests passing cleanly across Windows and Linux CI.

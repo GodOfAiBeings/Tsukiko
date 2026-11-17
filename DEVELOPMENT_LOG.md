@@ -6,50 +6,52 @@
 
 ### Architecture & Deliverables
 
-1. **Safe Foreground Fullscreen Detection Policy (`app/desktop/companion/fullscreen.py`)**:
-   - `FullscreenDetector`: Evaluates whether the current foreground window is occupying the display in fullscreen mode using minimal, read-only Windows User32 metadata (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `GetClassNameW`, `GetWindowThreadProcessId`).
+1. **Explicit Windows User32 ctypes Signatures (`app/desktop/companion/fullscreen.py`)**:
+   - Implemented `setup_user32_signatures` explicitly defining `argtypes` and pointer-sized `restype` across all 10 Win32 APIs:
+     `GetForegroundWindow`, `GetDesktopWindow`, `GetShellWindow`, `GetClassNameW`, `GetWindowThreadProcessId`, `IsIconic`, `IsWindowVisible`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`.
+   - Uses `HWND` (`ctypes.wintypes.HWND`) and `HMONITOR` (`ctypes.c_void_p`), `BOOL`, `DWORD`, `RECT`, and `MONITORINFO`.
+   - Eliminates 32-bit truncation of 64-bit OS window and monitor handles on 64-bit Windows.
+   - Preserves fail-safe behavior: returns safe fallback (`safe_always_on_top = False`) whenever an API call fails or window metadata cannot be queried.
+   - Comprehensive tests verify signature declarations and mock 64-bit pointer handle values.
+
+2. **Accessible System Tray Recovery & Taskbar Preservation (`app/desktop/companion/window.py`, `app/desktop/companion/__init__.py`)**:
+   - When `QSystemTrayIcon.isSystemTrayAvailable()` is `False`:
+     - Tsukiko launches the main companion window automatically with visible fallback controls.
+     - Fallback controls provide `Show Widget`, `Resume from Game Mode`, and `Exit Tsukiko`.
+     - In fallback mode, `closeEvent` calls `showMinimized()` rather than `hide()`, keeping the recovery controls in the OS taskbar.
+     - Signal handlers for widget hide and game mode restore the main window from minimized state if necessary.
+   - Complete end-to-end tests verify tray unavailable → hide widget → restore widget, tray unavailable → Game Mode → resume, and clean exit.
+
+3. **Default Static Idle Emblem (`app/core/config/settings.py`, `config/default_config.yaml`, `app/core/config/default_config.yaml`)**:
+   - `idle_animation: bool = False` configured as default in `UIConfig` and default YAML configurations.
+   - Floating widget constructs with an inactive avatar animation timer by default; consumes 0% CPU timer wakeups until activated or explicitly configured.
+   - Verified that constructing the real floating widget using default configuration starts with an inactive timer.
+
+4. **Truthful Persistence Reporting & Custom Config Path Preservation (`app/desktop/companion/views/settings_view.py`, `app/core/config/settings.py`)**:
+   - `SettingsView.save_settings()` differentiates session state from disk persistence:
+     - Applies settings to the active session immediately (`settings_applied.emit`).
+     - Attempts disk write via `save_config()`. If an exception occurs, updates status label with an explicit warning and returns `False` without falsely reporting success.
+   - Tracks `_ACTIVE_CONFIG_PATH` across `load_config()`, ensuring that custom config paths provided via `--config` are honored on save rather than defaulting to the base config path.
+
+5. **Safe Foreground Fullscreen Detection Policy (`app/desktop/companion/fullscreen.py`)**:
+   - `FullscreenDetector`: Evaluates whether the current foreground window is occupying the display in fullscreen mode using minimal, read-only Windows User32 metadata.
    - **Anti-Cheat Safe Invariants**:
      - NEVER inspects game process memory, scans memory pages, or reads structures.
      - NEVER enumerates game processes or checks running executable names.
      - NEVER injects DLLs, installs API hooks, or registers global hooks (`SetWindowsHookEx`).
      - NEVER captures screen buffers, window frames, or automates user input.
-     - Fails closed / safe: if OS metadata is unavailable (non-Windows / headless), raises an exception, or query fails, always-on-top is disabled.
+     - Fails closed / safe: if OS metadata is unavailable, raises an exception, or query fails, always-on-top is disabled.
      - Explicitly does not claim universal anti-cheat compatibility or guarantee that every game permits third-party desktop overlays.
    - Dynamic window flag adjustment: when a foreground window occupies the monitor, `FloatingCompanionWidget` removes `Qt.WindowStaysOnTopHint` and calls `self.lower()`. When fullscreen mode exits, the user's configured always-on-top preference is cleanly restored.
 
-2. **System Tray Integration & Restoration (`app/desktop/companion/tray.py`)**:
+6. **System Tray Integration & Restoration (`app/desktop/companion/tray.py`)**:
    - `TsukikoTrayManager`: Lightweight `QSystemTrayIcon` with procedurally drawn vector icon.
-   - Context menu provides required Phase 2 options:
-     - `Show Widget`: restores floating companion widget from hidden or game mode.
-     - `Open Tsukiko`: brings up main application window.
-     - `Resume from Game Mode`: visible and enabled when Game Mode is active.
-     - `Exit`: cleanly terminates application and orchestrator.
-   - **Distinct State Tracking**:
-     - `Hide Widget`: sets `is_hidden=True` and hides widget without terminating Tsukiko.
-     - `Game Mode`: sets `is_game_mode=True`, halts visual timers, and hides widget without interacting with games.
-     - Both states are fully reversible from the system tray or fallback panel.
-   - **Tray Unavailable Fallback**:
-     - If `QSystemTrayIcon.isSystemTrayAvailable()` returns False (e.g. headless, unsupported display server), `CompanionMainWindow` displays an in-window fallback panel (`fallback_frame`) so the user can never be stranded.
+   - Context menu provides required Phase 2 options: `Show Widget`, `Open Tsukiko`, `Resume from Game Mode`, `Exit`.
+   - Distinct state tracking: `Hide Widget` and `Game Mode` are separate, fully reversible states.
 
-3. **Dynamic Settings Application & YAML Persistence (`app/core/config/settings.py`, `views/settings_view.py`)**:
-   - Implemented `save_config()` to persist validated settings to YAML so they survive application restarts.
-   - Settings applied immediately to live UI:
-     - `always_on_top`: adjusts window flags subject to fullscreen policy check.
-     - `accent_color` & `glow_color`: updates avatar vector palette dynamically.
-     - `background_opacity`: applies to main window and stylesheet immediately.
-     - `default_corner` & `margin_x`/`margin_y`: repositions widget dynamically.
-     - `theme`: keeps `silver-blue-moonlight` and updates stylesheet dynamically.
-   - Privacy and security settings strictly preserved and never mutated from the UI.
-
-4. **Zero-Overhead Idle Animation (`app/desktop/companion/avatar.py`, `widget.py`)**:
-   - Uses `UIConfig.fps` and `UIConfig.idle_animation`.
-   - Static procedural vector emblem by default: visual shimmer timer (`_timer`) is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
-   - Hiding the widget, entering Game Mode, and closing the widget immediately stops visual timers.
-   - Added `render_to_pixmap()` and `render_to_icon()` vector rendering without running timers.
-
-5. **Test Suite Expansion (`tests/test_desktop_companion.py`)**:
-   - Expanded unit and regression test suite with 18 new tests (42 tests total for UI companion subsystem).
-   - Total test suite expanded to 335 tests (331 passed, 4 Unix-specific skipped on Windows; 333 passed, 2 skipped on Linux).
+7. **Test Suite Expansion (`tests/test_desktop_companion.py`)**:
+   - Expanded unit and regression test suite with 25 new tests (49 tests total for UI companion subsystem).
+   - Total test suite expanded to 342 tests (338 passed, 4 Unix-specific skipped on Windows; 340 passed, 2 skipped on Linux).
 
 ---
 

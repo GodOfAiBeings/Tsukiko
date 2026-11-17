@@ -26,6 +26,7 @@ try:
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QCloseEvent, QFont, QIcon, QMouseEvent
     from PySide6.QtWidgets import (
+        QApplication,
         QFrame,
         QHBoxLayout,
         QLabel,
@@ -209,7 +210,7 @@ class CompanionMainWindow(QMainWindow):
         fb_title.setStyleSheet("font-size: 11px; font-weight: bold; color: #7FB3D5;")
         fb_layout.addWidget(fb_title)
 
-        self.btn_fallback_restore = QPushButton("Show Floating Widget")
+        self.btn_fallback_restore = QPushButton("Show Widget")
         self.btn_fallback_restore.setStyleSheet(
             "QPushButton {"
             "  background: rgba(127, 179, 213, 0.15);"
@@ -239,6 +240,21 @@ class CompanionMainWindow(QMainWindow):
         self.btn_fallback_game_mode.clicked.connect(self._on_fallback_game_mode_clicked)
         self.btn_fallback_game_mode.setVisible(False)
         fb_layout.addWidget(self.btn_fallback_game_mode)
+
+        self.btn_fallback_exit = QPushButton("Exit Tsukiko")
+        self.btn_fallback_exit.setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(236, 112, 99, 0.15);"
+            "  border: 1px solid #EC7063;"
+            "  color: #FADBD8;"
+            "  font-size: 11px;"
+            "  border-radius: 4px;"
+            "  padding: 4px;"
+            "}"
+            "QPushButton:hover { background: rgba(236, 112, 99, 0.3); }"
+        )
+        self.btn_fallback_exit.clicked.connect(self._on_fallback_exit_clicked)
+        fb_layout.addWidget(self.btn_fallback_exit)
 
         self.fallback_frame.setVisible(False)
         sidebar_layout.addWidget(self.fallback_frame)
@@ -337,7 +353,13 @@ class CompanionMainWindow(QMainWindow):
         self.show_view("status")
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Closing the main window hides it, preserving the independent floating widget."""
+        """Closing the main window hides it in tray mode, or minimizes it in fallback mode."""
+        if self._tray_fallback_enabled:
+            logger.info("System tray unavailable: minimizing main window instead of hiding so recovery controls remain accessible.")
+            self.showMinimized()
+            event.ignore()
+            return
+
         logger.info("Main companion window closed; hiding to background companion widget.")
         self.hide()
         event.ignore()
@@ -353,9 +375,31 @@ class CompanionMainWindow(QMainWindow):
         """Wires floating widget state to fallback controls."""
         self._widget = widget
         if hasattr(widget, "game_mode_activated"):
-            widget.game_mode_activated.connect(lambda: self.btn_fallback_game_mode.setVisible(True))
+            widget.game_mode_activated.connect(self._on_widget_game_mode_entered)
         if hasattr(widget, "game_mode_deactivated"):
-            widget.game_mode_deactivated.connect(lambda: self.btn_fallback_game_mode.setVisible(False))
+            widget.game_mode_deactivated.connect(self._on_widget_game_mode_exited)
+        if hasattr(widget, "widget_visibility_changed"):
+            widget.widget_visibility_changed.connect(self._on_widget_visibility_changed)
+
+    def _on_widget_game_mode_entered(self) -> None:
+        self.btn_fallback_game_mode.setVisible(True)
+        self.btn_fallback_game_mode.setEnabled(True)
+        if self._tray_fallback_enabled:
+            if self.isMinimized():
+                self.showNormal()
+            self.show()
+            self.raise_()
+
+    def _on_widget_game_mode_exited(self) -> None:
+        self.btn_fallback_game_mode.setVisible(False)
+        self.btn_fallback_game_mode.setEnabled(False)
+
+    def _on_widget_visibility_changed(self, is_visible: bool) -> None:
+        if not is_visible and self._tray_fallback_enabled:
+            if self.isMinimized():
+                self.showNormal()
+            self.show()
+            self.raise_()
 
     def _on_fallback_restore_clicked(self) -> None:
         if self._widget:
@@ -365,11 +409,19 @@ class CompanionMainWindow(QMainWindow):
                 self._widget.show_widget()
             else:
                 self._widget.show()
+            if hasattr(self._widget, "raise_"):
+                self._widget.raise_()
 
     def _on_fallback_game_mode_clicked(self) -> None:
         if self._widget and hasattr(self._widget, "disable_game_mode"):
             self._widget.disable_game_mode()
         self.btn_fallback_game_mode.setVisible(False)
+
+    def _on_fallback_exit_clicked(self) -> None:
+        logger.info("Exit requested from main window fallback controls.")
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     def apply_ui_config(self, new_config: Any) -> None:
         """Applies dynamic UI settings to the main window."""

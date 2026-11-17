@@ -20,7 +20,7 @@ ui:
   margin_y: 48
   companion_size: 96
   fps: 30
-  idle_animation: true
+  idle_animation: false
   accent_color: "#7FB3D5"
   glow_color: "#D4E6F1"
   background_opacity: 0.92

@@ -82,6 +82,15 @@ def launch_companion(
 
     # Show floating widget
     widget.show()
+
+    # If system tray is unavailable, show main window at launch with fallback controls
+    if not tray_manager.is_available:
+        logger.info("System tray is unavailable: launching main window with fallback controls.")
+        main_window.enable_tray_fallback(widget)
+        main_window.show()
+        main_window.raise_()
+        main_window.activateWindow()
+
     logger.info("Tsukiko floating desktop companion widget launched successfully.")
 
     return widget, main_window

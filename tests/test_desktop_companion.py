@@ -28,9 +28,26 @@ import pytest
 # Enforce offscreen Qt rendering for headless CI and automated test environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.config.settings import TsukikoConfig, UIConfig, save_config
+from app.core.config.settings import (
+    TsukikoConfig,
+    UIConfig,
+    get_active_config_path,
+    load_config,
+    reset_config,
+    save_config,
+)
 from app.desktop.companion.avatar import TsukikoAvatarWidget
-from app.desktop.companion.fullscreen import FullscreenDetector, FullscreenEvaluation
+from app.desktop.companion.fullscreen import (
+    BOOL,
+    DWORD,
+    HMONITOR,
+    HWND,
+    MONITORINFO,
+    RECT,
+    FullscreenDetector,
+    FullscreenEvaluation,
+    setup_user32_signatures,
+)
 from app.desktop.companion.theme import MoonlightTheme
 from app.desktop.companion.tray import TsukikoTrayManager
 from app.desktop.companion.views.chat import ChatView
@@ -442,23 +459,26 @@ class TestLaunchCompanionIntegration:
     """Verifies full companion launch and signal wiring."""
 
     def test_launch_companion(self, qapp: QApplication) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+
         config = TsukikoConfig()
-        widget, main_window = launch_companion(config=config)
-        assert widget is not None
-        assert main_window is not None
-        assert widget.isVisible() is True
-        assert main_window.isVisible() is False
+        with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True):
+            widget, main_window = launch_companion(config=config)
+            assert widget is not None
+            assert main_window is not None
+            assert widget.isVisible() is True
+            assert main_window.isVisible() is False
 
-        # Trigger open main window from widget menu
-        widget.menu.btn_open.click()
-        assert main_window.isVisible() is True
+            # Trigger open main window from widget menu
+            widget.menu.btn_open.click()
+            assert main_window.isVisible() is True
 
-        # Trigger settings from widget menu
-        widget.menu.btn_settings.click()
-        assert main_window.stack.currentIndex() == 4
+            # Trigger settings from widget menu
+            widget.menu.btn_settings.click()
+            assert main_window.stack.currentIndex() == 4
 
-        widget.close()
-        main_window.close()
+            widget.close()
+            main_window.close()
 
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
@@ -487,6 +507,75 @@ class TestFullscreenDetector:
         assert isinstance(eval_res.safe_always_on_top, bool)
         assert isinstance(eval_res.is_fullscreen, bool)
         assert len(eval_res.reason) > 0
+
+    def test_user32_api_signatures_setup(self) -> None:
+        import ctypes
+        mock_user32 = MagicMock()
+        setup_user32_signatures(mock_user32)
+        assert mock_user32.GetForegroundWindow.restype == HWND
+        assert mock_user32.GetForegroundWindow.argtypes == []
+        assert mock_user32.GetDesktopWindow.restype == HWND
+        assert mock_user32.GetDesktopWindow.argtypes == []
+        assert mock_user32.GetShellWindow.restype == HWND
+        assert mock_user32.GetShellWindow.argtypes == []
+        assert mock_user32.GetClassNameW.restype == ctypes.c_int
+        assert len(mock_user32.GetClassNameW.argtypes) == 3
+        assert mock_user32.GetWindowThreadProcessId.restype == DWORD
+        assert len(mock_user32.GetWindowThreadProcessId.argtypes) == 2
+        assert mock_user32.IsIconic.restype == BOOL
+        assert len(mock_user32.IsIconic.argtypes) == 1
+        assert mock_user32.IsWindowVisible.restype == BOOL
+        assert len(mock_user32.IsWindowVisible.argtypes) == 1
+        assert mock_user32.GetWindowRect.restype == BOOL
+        assert len(mock_user32.GetWindowRect.argtypes) == 2
+        assert mock_user32.MonitorFromWindow.restype == HMONITOR
+        assert len(mock_user32.MonitorFromWindow.argtypes) == 2
+        assert mock_user32.GetMonitorInfoW.restype == BOOL
+        assert len(mock_user32.GetMonitorInfoW.argtypes) == 2
+
+    def test_mocked_64bit_handle_values(self) -> None:
+        detector = FullscreenDetector()
+        mock_user32 = MagicMock()
+        mock_user32.GetForegroundWindow.return_value = 0x7FFF00001234
+        mock_user32.GetDesktopWindow.return_value = 0x1000
+        mock_user32.GetShellWindow.return_value = 0x2000
+        mock_user32.IsIconic.return_value = False
+        mock_user32.IsWindowVisible.return_value = True
+        mock_user32.MonitorFromWindow.return_value = 0x7FFF00005678
+
+        def mock_class_name(hwnd, buf, n):
+            buf.value = "TestGame"
+            return len("TestGame")
+        mock_user32.GetClassNameW.side_effect = mock_class_name
+
+        def mock_pid(hwnd, byref_pid):
+            byref_pid._obj.value = 9999
+            return 9999
+        mock_user32.GetWindowThreadProcessId.side_effect = mock_pid
+
+        def mock_rect(hwnd, byref_rect):
+            r = byref_rect._obj
+            r.left = 0
+            r.top = 0
+            r.right = 1920
+            r.bottom = 1080
+            return 1
+        mock_user32.GetWindowRect.side_effect = mock_rect
+
+        def mock_mon(hmon, byref_mi):
+            mi = byref_mi._obj
+            mi.rcMonitor.left = 0
+            mi.rcMonitor.top = 0
+            mi.rcMonitor.right = 1920
+            mi.rcMonitor.bottom = 1080
+            return 1
+        mock_user32.GetMonitorInfoW.side_effect = mock_mon
+
+        with patch.object(detector, "is_available", return_value=True):
+            with patch.object(detector, "_user32", mock_user32):
+                eval_res = detector.evaluate_fullscreen(own_pids={1111})
+                assert eval_res.is_fullscreen is True
+                assert eval_res.safe_always_on_top is False
 
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
@@ -587,6 +676,43 @@ class TestSettingsApplicationAndPersistence:
             assert cfg.ui.glow_color == "#88AACC"
             assert abs(cfg.ui.background_opacity - 0.80) < 0.01
 
+    def test_settings_view_persistence_failure_reports_truthfully(self, qapp: QApplication) -> None:
+        cfg = TsukikoConfig()
+        settings_view = SettingsView(config=cfg)
+        settings_view.edit_accent.setText("#336699")
+
+        with patch("app.desktop.companion.views.settings_view.save_config", side_effect=PermissionError("Disk is write-protected")):
+            res = settings_view.save_settings()
+            assert res is False
+            assert "failed to save to disk" in settings_view.status_label.text()
+            assert "applied to current session" in settings_view.status_label.text()
+            assert "✓" not in settings_view.status_label.text()
+            assert "⚠" in settings_view.status_label.text()
+            # Session must be updated despite disk failure
+            assert cfg.ui.accent_color == "#336699"
+
+    def test_save_config_honors_active_config_path(self, tmp_path: Path) -> None:
+        custom_yaml = tmp_path / "custom_config.yaml"
+        cfg = TsukikoConfig()
+        cfg.ui.accent_color = "#112233"
+        save_config(config=cfg, target_path=custom_yaml)
+        assert custom_yaml.exists()
+
+        try:
+            loaded_cfg = load_config(custom_yaml)
+            assert get_active_config_path() == custom_yaml
+
+            loaded_cfg.ui.accent_color = "#445566"
+            saved_path = save_config(config=loaded_cfg)
+            assert saved_path == custom_yaml
+
+            import yaml
+            with open(custom_yaml, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            assert data["ui"]["accent_color"] == "#445566"
+        finally:
+            reset_config()
+
     def test_apply_ui_config_to_widget(self, qapp: QApplication) -> None:
         widget = FloatingCompanionWidget()
         new_ui = UIConfig(
@@ -666,6 +792,56 @@ class TestSystemTrayAndWidgetRecovery:
         assert widget.is_game_mode is False
         assert main_win.btn_fallback_game_mode.isVisible() is False
 
+    def test_tray_unavailable_end_to_end_recovery_flow(self, qapp: QApplication) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+        from app.desktop.companion import launch_companion
+
+        with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=False):
+            widget, main_win = launch_companion()
+            assert widget is not None
+            assert main_win is not None
+
+            # Window must be shown at launch with fallback controls
+            assert main_win.isVisible() is True
+            assert main_win.fallback_frame.isVisible() is True
+
+            # Hide widget -> recover via fallback Show Widget button
+            widget.hide_widget()
+            assert widget.isVisible() is False
+            assert main_win.isVisible() is True
+            main_win.btn_fallback_restore.click()
+            assert widget.isVisible() is True
+            assert widget.is_hidden is False
+
+            # Game Mode -> recover via fallback Resume button
+            widget.enable_game_mode()
+            assert widget.is_game_mode is True
+            assert widget.isVisible() is False
+            assert main_win.btn_fallback_game_mode.isVisible() is True
+            main_win.btn_fallback_game_mode.click()
+            assert widget.is_game_mode is False
+            assert widget.isVisible() is True
+
+            # Exit button cleanly calls application quit
+            with patch.object(qapp, "quit") as mock_quit:
+                main_win.btn_fallback_exit.click()
+                mock_quit.assert_called_once()
+
+    def test_main_window_close_minimizes_in_fallback_mode(self, qapp: QApplication) -> None:
+        from PySide6.QtGui import QCloseEvent
+
+        widget = FloatingCompanionWidget()
+        main_win = CompanionMainWindow()
+        main_win.show()
+        main_win.enable_tray_fallback(widget)
+
+        close_event = QCloseEvent()
+        main_win.closeEvent(close_event)
+
+        assert close_event.isAccepted() is False
+        assert main_win.isMinimized() is True
+        assert main_win.isHidden() is False
+
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
 class TestIdleAnimationZeroOverhead:
@@ -696,6 +872,18 @@ class TestIdleAnimationZeroOverhead:
         avatar = TsukikoAvatarWidget(active=True)
         avatar.close()
         assert avatar.animation_timer.isActive() is False
+
+    def test_real_floating_widget_default_config_has_inactive_avatar_timer(self, qapp: QApplication) -> None:
+        widget = FloatingCompanionWidget()
+        assert widget.ui_config.idle_animation is False
+        assert widget.avatar.animation_timer.isActive() is False
+        assert widget.avatar.is_active is False
+
+        widget.avatar.set_active(True)
+        assert widget.avatar.animation_timer.isActive() is True
+
+        widget.avatar.set_active(False)
+        assert widget.avatar.animation_timer.isActive() is False
 
 
 class TestCliAndHeadlessPreservation:

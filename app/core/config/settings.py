@@ -55,7 +55,7 @@ class UIConfig(BaseModel):
     margin_y: int = 48
     companion_size: int = 96
     fps: int = 30
-    idle_animation: bool = True
+    idle_animation: bool = False
     accent_color: str = "#7FB3D5"
     glow_color: str = "#D4E6F1"
     background_opacity: float = 0.92
@@ -180,13 +180,17 @@ def _parse_env_value(val: str) -> Any:
     return stripped
 
 
+_ACTIVE_CONFIG_PATH: Optional[Path] = None
+
+
 def load_config(config_path: Optional[str | Path] = None, force_reload: bool = False) -> TsukikoConfig:
     """Loads configuration from YAML file and applies environment overrides."""
-    global _CONFIG_INSTANCE
+    global _CONFIG_INSTANCE, _ACTIVE_CONFIG_PATH
     if _CONFIG_INSTANCE is not None and not force_reload and config_path is None:
         return _CONFIG_INSTANCE
 
     resolved_path = Path(config_path) if config_path else find_default_config_path()
+    _ACTIVE_CONFIG_PATH = resolved_path
 
     raw_data: Dict[str, Any] = {}
     if resolved_path.exists():
@@ -212,8 +216,9 @@ def load_config(config_path: Optional[str | Path] = None, force_reload: bool = F
 
 def reset_config() -> None:
     """Clears the cached configuration singleton."""
-    global _CONFIG_INSTANCE
+    global _CONFIG_INSTANCE, _ACTIVE_CONFIG_PATH
     _CONFIG_INSTANCE = None
+    _ACTIVE_CONFIG_PATH = None
 
 
 def get_config() -> TsukikoConfig:
@@ -224,11 +229,18 @@ def get_config() -> TsukikoConfig:
     return _CONFIG_INSTANCE
 
 
+def get_active_config_path() -> Path:
+    """Returns the active configuration file path loaded at startup or default."""
+    global _ACTIVE_CONFIG_PATH
+    return _ACTIVE_CONFIG_PATH or find_default_config_path()
+
+
 def save_config(config: Optional[TsukikoConfig] = None, target_path: Optional[str | Path] = None) -> Path:
     """Saves the active configuration to YAML file so it persists across restarts."""
-    global _CONFIG_INSTANCE
+    global _CONFIG_INSTANCE, _ACTIVE_CONFIG_PATH
     cfg = config or get_config()
-    dest = Path(target_path) if target_path else find_default_config_path()
+    dest = Path(target_path) if target_path else (_ACTIVE_CONFIG_PATH or find_default_config_path())
     cfg.save_yaml(dest)
     _CONFIG_INSTANCE = cfg
+    _ACTIVE_CONFIG_PATH = dest
     return dest

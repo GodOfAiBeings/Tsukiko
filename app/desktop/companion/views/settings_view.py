@@ -296,15 +296,19 @@ class SettingsView(QWidget):
         self._ui_config.margin_x = self.spin_margin_x.value()
         self._ui_config.margin_y = self.spin_margin_y.value()
 
-        # Update root config and persist to disk
+        # Update root config and apply to current session
         self._config.ui = self._ui_config
-        try:
-            save_config(self._config)
-        except Exception as e:
-            logger.warning(f"Failed to persist settings to disk: {e}")
-
-        self.status_label.setText("✓ Settings applied and saved successfully.")
-        self.status_label.setStyleSheet("color: #A8D5BA; font-size: 12px;")
         if HAS_PYSIDE6:
             self.settings_applied.emit(self._ui_config)
-        return True
+
+        # Persist to disk using active config path
+        try:
+            saved_path = save_config(self._config)
+            self.status_label.setText(f"✓ Settings applied to current session and saved to {saved_path.name}.")
+            self.status_label.setStyleSheet("color: #A8D5BA; font-size: 12px;")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to persist settings to disk: {e}")
+            self.status_label.setText(f"⚠ Settings applied to current session, but failed to save to disk: {e}")
+            self.status_label.setStyleSheet("color: #F5B041; font-size: 12px;")
+            return False

@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.1] - Phase 2 Acceptance Corrections & Hardening - 2026-11-17
 
 ### Added
+- **Explicit Windows User32 ctypes Signatures (`app/desktop/companion/fullscreen.py`)**:
+  - Implemented `setup_user32_signatures` defining complete `argtypes` and pointer-sized `restype` (`HWND`, `HMONITOR`, `BOOL`, `DWORD`, `RECT`, `MONITORINFO`) across all 10 Win32 APIs, eliminating 64-bit handle truncation.
+  - Fail-safe behavior verified on mocked 64-bit handles and simulated execution failures.
+- **Accessible System Tray Recovery & Taskbar Preservation (`app/desktop/companion/window.py`, `app/desktop/companion/__init__.py`)**:
+  - When `QSystemTrayIcon.isSystemTrayAvailable()` is `False`, the main application window displays automatically at launch with the fallback control panel.
+  - Added visible "Exit Tsukiko" button to fallback controls alongside "Show Widget" and "Resume from Game Mode".
+  - Main window `closeEvent` minimizes to taskbar rather than hiding when in fallback mode, preventing application orphan states and ensuring recovery controls remain continuously accessible.
+  - Signal connections automatically restore main window when widget enters Game Mode or is hidden while tray is unavailable.
+- **Default Static Idle Emblem (`app/core/config/settings.py`, `config/default_config.yaml`, `app/core/config/default_config.yaml`)**:
+  - Configured `idle_animation: false` by default across `UIConfig` and YAML configs.
+  - Real floating widget constructs with an inactive avatar animation timer by default; consumes 0% CPU wakeups until activated or explicitly configured.
+- **Truthful Persistence Reporting & Custom Config Path Preservation (`app/desktop/companion/views/settings_view.py`, `app/core/config/settings.py`)**:
+  - `SettingsView.save_settings()` differentiates session state from disk persistence, displaying explicit warnings and returning `False` when write operations fail without falsely claiming disk success.
+  - Active configuration path (`_ACTIVE_CONFIG_PATH`) tracked during startup to honor custom configuration files supplied via `--config`.
 - **Safe Foreground Fullscreen Detection Policy (`app/desktop/companion/fullscreen.py`)**:
   - Implemented `FullscreenDetector` using minimal, read-only Windows User32 metadata (`GetForegroundWindow`, `GetWindowRect`, `MonitorFromWindow`, `GetMonitorInfoW`, `GetClassNameW`, `GetWindowThreadProcessId`).
   - Zero Anti-Cheat Footprint: Never inspects game memory, enumerates game processes, injects DLLs, installs hooks, captures screens, or automates input.
@@ -21,19 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Implemented `TsukikoTrayManager` via `QSystemTrayIcon` with procedural vector icon.
   - Context menu actions in exact required specification: `Show Widget`, `Open Tsukiko`, `Resume from Game Mode` (visible/enabled when Game Mode active), and `Exit`.
   - Distinct state tracking: `Hide Widget` vs `Game Mode` are separate states (Game Mode suspends visual animation timers; both reversible from tray).
-  - In-window fallback controls in `CompanionMainWindow` (`fallback_frame`) when system tray is unavailable (`isSystemTrayAvailable() == False`) so user is never stranded.
 - **Dynamic Settings Application & YAML Persistence (`app/core/config/settings.py`, `app/desktop/companion/views/settings_view.py`)**:
   - Implemented `save_config()` persisting settings across restarts to YAML.
   - Settings applied immediately to live UI: `always_on_top`, `accent_color`, `glow_color`, `background_opacity`, `default_corner`, `margin_x`, `margin_y`, `theme`.
   - Privacy and security settings strictly preserved and cannot be mutated from UI.
-- **Zero-Overhead Idle Animation (`app/desktop/companion/avatar.py`, `app/desktop/companion/widget.py`)**:
-  - Uses `UIConfig.fps` and `UIConfig.idle_animation`.
-  - Static idle emblem by default: visual shimmer timer is NOT started at initialization unless `is_active=True` or `idle_animation=True`.
-  - Timer immediately halts on `hideEvent()`, widget hide, Game Mode activation, and widget close.
-  - Added `render_to_pixmap()` and `render_to_icon()` vector rendering without running timers.
 
 ### Changed
-- Total automated test suite expanded to 335 tests (331 passed, 4 skipped on Windows; 333 passed, 2 skipped on Linux).
+- Total automated test suite expanded to 342 tests (338 passed, 4 skipped on Windows; 49 dedicated companion UI tests).
 
 ---
 
