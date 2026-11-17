@@ -1218,6 +1218,12 @@ class TestCompanionInitiativeScheduler:
             safe_always_on_top=False,
             reason="Game is fullscreen",
         )
+        safe_eval = FullscreenEvaluation(
+            detection_available=True,
+            is_fullscreen=False,
+            safe_always_on_top=True,
+            reason="Safe windowed desktop",
+        )
         with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=fs_eval):
             assert scheduler.check_initiative() is False
 
@@ -1229,28 +1235,29 @@ class TestCompanionInitiativeScheduler:
         brain.personality.initiative_engine._last_interaction_time = time.time() - 100.0
         brain.personality.initiative_engine._last_initiative_time = 0.0
 
-        # 5. Check initiative launches background worker without freezing main thread
-        launched = scheduler.check_initiative()
-        assert launched is True
-        assert scheduler._active_worker is not None
+        # 5. Check initiative launches background worker without freezing main thread (safe desktop)
+        with patch.object(widget._fullscreen_detector, "evaluate_fullscreen", return_value=safe_eval):
+            launched = scheduler.check_initiative()
+            assert launched is True
+            assert scheduler._active_worker is not None
 
-        # Wait for background worker to complete
-        scheduler._active_worker.wait(5000)
-        qapp.processEvents()
+            # Wait for background worker to complete
+            scheduler._active_worker.wait(5000)
+            qapp.processEvents()
 
-        # Proactive message delivered to chat view
-        last_chat_msg = main_window.chat_view.messages_layout.itemAt(
-            main_window.chat_view.messages_layout.count() - 2
-        ).widget()
-        assert last_chat_msg is not None
+            # Proactive message delivered to chat view
+            last_chat_msg = main_window.chat_view.messages_layout.itemAt(
+                main_window.chat_view.messages_layout.count() - 2
+            ).widget()
+            assert last_chat_msg is not None
 
-        # Speech bubble displayed on companion widget
-        assert widget.speech_bubble.isVisible() is True
-        assert len(widget.speech_bubble.lbl_text.text()) > 0
+            # Speech bubble displayed on companion widget
+            assert widget.speech_bubble.isVisible() is True
+            assert len(widget.speech_bubble.lbl_text.text()) > 0
 
-        # Clicking speech bubble dismisses it and raises main window
-        widget.speech_bubble.dismiss()
-        assert widget.speech_bubble.isVisible() is False
+            # Clicking speech bubble dismisses it and raises main window
+            widget.speech_bubble.dismiss()
+            assert widget.speech_bubble.isVisible() is False
 
         scheduler.stop()
         assert scheduler.is_running is False
