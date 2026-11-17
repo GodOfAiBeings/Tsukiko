@@ -2849,9 +2849,9 @@ def test_cim_record_exact_type_preservation():
 
 def test_cim_record_roundtrip_serialization_powershell():
     """When PowerShell is available, verify Get-CimFieldRecord roundtrips genuine booleans, numbers, strings, and nulls."""
-    ps_path = shutil.which("powershell") or shutil.which("powershell.exe")
-    if not ps_path:
-        pytest.skip("PowerShell is not available on PATH")
+    real_ps = _REAL_SHUTIL_WHICH("powershell") or _REAL_SHUTIL_WHICH("powershell.exe")
+    if not real_ps or not Path(real_ps).exists():
+        pytest.skip("PowerShell is not available on host system")
 
     test_script = PS_CIM_SERIALIZER_SNIPPET + """
 $testObj = [PSCustomObject]@{
@@ -2872,7 +2872,7 @@ $results = [PSCustomObject]@{
 $results | ConvertTo-Json -Depth 3
 """
     res = subprocess.run(
-        [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", test_script],
+        [real_ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", test_script],
         capture_output=True,
         text=True,
         timeout=10,
