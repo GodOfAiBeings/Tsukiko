@@ -2,7 +2,8 @@
 Tsukiko Windows Firewall Policy Manager
 Provides safe, application-specific OS-level outbound firewall rule management and status inspection.
 Enforces strict structural PE validation, fail-closed profile verification, precise rule ownership,
-safe deletion, and effective policy inspection in the ActiveStore.
+safe deletion, effective policy inspection in the ActiveStore, full Microsoft NetSecurity CIM filter
+schema coverage across all 18 properties, lossless field-state serialization, and bypass evaluation.
 
 Note on Executable Identity:
 Structural PE binary validation confirms that the file is formatted as a valid Windows PE binary.
@@ -12,6 +13,7 @@ Real cryptographic verification requires an established code-signing certificate
 
 from __future__ import annotations
 
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -60,6 +62,117 @@ DISALLOWED_EXECUTABLE_NAMES = frozenset({
 })
 
 
+class FirewallParseError(ValueError):
+    """Raised when firewall query output violates schema, is malformed, or cannot be parsed."""
+    pass
+
+
+class CimFieldState(str, Enum):
+    """Explicit field state classification for Microsoft NetSecurity CIM filter properties."""
+    VALID = "PROPERTY_PRESENT_WITH_VALID_VALUE"
+    NULL = "PROPERTY_PRESENT_WITH_NULL"
+    MISSING = "PROPERTY_MISSING"
+    MALFORMED = "PROPERTY_PRESENT_WITH_MALFORMED_VALUE"
+
+
+class CimFieldRecord(BaseModel):
+    """Lossless structured field record representing a Microsoft NetSecurity CIM property."""
+    state: CimFieldState
+    exists: bool
+    is_null: bool
+    value: Any = None
+    string_value: Optional[str] = None
+    type_name: str = "None"
+
+    @classmethod
+    def valid(cls, value: Any, string_value: Optional[str] = None, type_name: str = "String") -> CimFieldRecord:
+        if string_value is None and value is not None:
+            if isinstance(value, bool):
+                string_value = "True" if value else "False"
+            elif isinstance(value, list):
+                string_value = ",".join(str(x) for x in value)
+            else:
+                string_value = str(value)
+        return cls(
+            state=CimFieldState.VALID,
+            exists=True,
+            is_null=False,
+            value=value,
+            string_value=string_value,
+            type_name=type_name,
+        )
+
+    @classmethod
+    def null(cls, type_name: str = "Null") -> CimFieldRecord:
+        return cls(
+            state=CimFieldState.NULL,
+            exists=True,
+            is_null=True,
+            value=None,
+            string_value=None,
+            type_name=type_name,
+        )
+
+    @classmethod
+    def missing(cls) -> CimFieldRecord:
+        return cls(
+            state=CimFieldState.MISSING,
+            exists=False,
+            is_null=True,
+            value=None,
+            string_value=None,
+            type_name="None",
+        )
+
+    @classmethod
+    def malformed(cls, value: Any = None, string_value: Optional[str] = None) -> CimFieldRecord:
+        return cls(
+            state=CimFieldState.MALFORMED,
+            exists=True,
+            is_null=False,
+            value=value,
+            string_value=string_value or (str(value) if value is not None else None),
+            type_name="Malformed",
+        )
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> CimFieldRecord:
+        if isinstance(raw, CimFieldRecord):
+            return raw
+        if isinstance(raw, dict):
+            state_val = raw.get("State") or raw.get("state")
+            if state_val:
+                try:
+                    state_enum = CimFieldState(state_val)
+                except ValueError:
+                    return cls.malformed(raw, str(raw))
+                exists = bool(raw.get("Exists", raw.get("exists", True)))
+                is_null = bool(raw.get("IsNull", raw.get("is_null", False)))
+                val = raw.get("Value", raw.get("value"))
+                str_val = raw.get("StringValue", raw.get("string_value"))
+                t_name = str(raw.get("Type", raw.get("type_name", "String")))
+                return cls(
+                    state=state_enum,
+                    exists=exists,
+                    is_null=is_null,
+                    value=val,
+                    string_value=str_val,
+                    type_name=t_name,
+                )
+            return cls.malformed(raw, str(raw))
+        if raw is None:
+            return cls.null()
+        if isinstance(raw, bool):
+            return cls.valid(raw, "True" if raw else "False", "Boolean")
+        if isinstance(raw, (int, float)):
+            return cls.valid(raw, str(raw), "Integer" if isinstance(raw, int) else "Float")
+        if isinstance(raw, list):
+            return cls.valid(raw, ",".join(str(x) for x in raw), "Array")
+        if isinstance(raw, str):
+            return cls.valid(raw, raw, "String")
+        return cls.valid(raw, str(raw), type(raw).__name__)
+
+
 class SecurityStatus(BaseModel):
     status: str = Field(
         description="One of: 'in_process_only', 'os_policy_not_configured', 'os_policy_unverified', 'os_policy_active'"
@@ -72,7 +185,30 @@ class SecurityStatus(BaseModel):
     details: str
 
 
+_CIM_FILTER_MAP: dict[str, str] = {
+    "program": "program_field",
+    "package": "package_field",
+    "local_address": "local_address_field",
+    "remote_address": "remote_address_field",
+    "protocol": "protocol_field",
+    "local_port": "local_port_field",
+    "remote_port": "remote_port_field",
+    "icmp_type": "icmp_type_field",
+    "dynamic_target": "dynamic_target_field",
+    "service": "service_field",
+    "interface_alias": "interface_alias_field",
+    "interface_type": "interface_type_field",
+    "authentication": "authentication_field",
+    "encryption": "encryption_field",
+    "override_block_rules": "override_block_rules_field",
+    "local_user": "local_user_field",
+    "remote_user": "remote_user_field",
+    "remote_machine": "remote_machine_field",
+}
+
+
 class FirewallRuleInfo(BaseModel):
+    """Complete representation of a Windows Firewall rule across all 18 NetSecurity filter properties."""
     name: str = ""
     display_name: str = ""
     group: str = ""
@@ -80,34 +216,130 @@ class FirewallRuleInfo(BaseModel):
     enabled: bool = False
     direction: str = ""
     action: str = ""
-    profiles: str = ""
-    program: Optional[str] = None
-    local_address: Optional[str] = None
-    remote_address: Optional[str] = None
-    protocol: Optional[str] = None
-    local_port: Optional[str] = None
-    remote_port: Optional[str] = None
-    service: Optional[str] = None
-    interface_alias: Optional[str] = None
-    interface_type: Optional[str] = None
-    authentication: Optional[str] = None
-    encryption: Optional[str] = None
-    override_block_rules: Optional[Any] = None
-    local_user: Optional[str] = None
-    remote_user: Optional[str] = None
-    remote_machine: Optional[str] = None
+    profiles: Optional[str] = None
+
+    # Category 1: Application Filter (MSFT_NetFirewallRuleFilterByApplication)
+    program_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    package_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
+    # Category 2: Address Filter (MSFT_NetFirewallRuleFilterByAddress)
+    local_address_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    remote_address_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
+    # Category 3: Port Filter (MSFT_NetFirewallRuleFilterByPort)
+    protocol_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    local_port_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    remote_port_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    icmp_type_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    dynamic_target_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
+    # Category 4: Service Filter (MSFT_NetFirewallRuleFilterByService)
+    service_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
+    # Category 5: Interface Filter (MSFT_NetFirewallRuleFilterByInterface)
+    interface_alias_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
+    # Category 6: Interface Type Filter (MSFT_NetFirewallRuleFilterByInterfaceType)
+    interface_type_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
+    # Category 7: Security Filter (MSFT_NetFirewallRuleFilterBySecurity)
+    authentication_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    encryption_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    override_block_rules_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    local_user_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    remote_user_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+    remote_machine_field: CimFieldRecord = Field(default_factory=CimFieldRecord.missing)
+
     raw_properties: dict[str, Any] = Field(default_factory=dict)
 
     def __init__(self, **data: Any):
-        # Support deprecated plural keyword arguments if singular is not provided
-        if "local_users" in data and "local_user" not in data:
-            data["local_user"] = data.pop("local_users")
-        if "remote_users" in data and "remote_user" not in data:
-            data["remote_user"] = data.pop("remote_users")
-        if "remote_machines" in data and "remote_machine" not in data:
-            data["remote_machine"] = data.pop("remote_machines")
+        # Convert any scalar or field kwargs into CimFieldRecord instances
+        for prop_name, field_name in _CIM_FILTER_MAP.items():
+            if field_name in data:
+                data[field_name] = CimFieldRecord.from_raw(data[field_name])
+            elif prop_name in data:
+                val = data.pop(prop_name)
+                data[field_name] = CimFieldRecord.from_raw(val)
+            else:
+                data[field_name] = CimFieldRecord.missing()
         super().__init__(**data)
 
+    # Property accessors for callers and existing code
+    @property
+    def program(self) -> Optional[str]:
+        return self.program_field.string_value if self.program_field.exists and not self.program_field.is_null else None
+
+    @property
+    def package(self) -> Optional[str]:
+        return self.package_field.string_value if self.package_field.exists and not self.package_field.is_null else None
+
+    @property
+    def local_address(self) -> Optional[str]:
+        return self.local_address_field.string_value if self.local_address_field.exists and not self.local_address_field.is_null else None
+
+    @property
+    def remote_address(self) -> Optional[str]:
+        return self.remote_address_field.string_value if self.remote_address_field.exists and not self.remote_address_field.is_null else None
+
+    @property
+    def protocol(self) -> Optional[str]:
+        return self.protocol_field.string_value if self.protocol_field.exists and not self.protocol_field.is_null else None
+
+    @property
+    def local_port(self) -> Optional[str]:
+        return self.local_port_field.string_value if self.local_port_field.exists and not self.local_port_field.is_null else None
+
+    @property
+    def remote_port(self) -> Optional[str]:
+        return self.remote_port_field.string_value if self.remote_port_field.exists and not self.remote_port_field.is_null else None
+
+    @property
+    def icmp_type(self) -> Optional[str]:
+        return self.icmp_type_field.string_value if self.icmp_type_field.exists and not self.icmp_type_field.is_null else None
+
+    @property
+    def dynamic_target(self) -> Optional[str]:
+        return self.dynamic_target_field.string_value if self.dynamic_target_field.exists and not self.dynamic_target_field.is_null else None
+
+    @property
+    def service(self) -> Optional[str]:
+        return self.service_field.string_value if self.service_field.exists and not self.service_field.is_null else None
+
+    @property
+    def interface_alias(self) -> Optional[str]:
+        return self.interface_alias_field.string_value if self.interface_alias_field.exists and not self.interface_alias_field.is_null else None
+
+    @property
+    def interface_type(self) -> Optional[str]:
+        return self.interface_type_field.string_value if self.interface_type_field.exists and not self.interface_type_field.is_null else None
+
+    @property
+    def authentication(self) -> Optional[str]:
+        return self.authentication_field.string_value if self.authentication_field.exists and not self.authentication_field.is_null else None
+
+    @property
+    def encryption(self) -> Optional[str]:
+        return self.encryption_field.string_value if self.encryption_field.exists and not self.encryption_field.is_null else None
+
+    @property
+    def override_block_rules(self) -> Any:
+        if not self.override_block_rules_field.exists or self.override_block_rules_field.is_null:
+            return None
+        return self.override_block_rules_field.value
+
+    @property
+    def local_user(self) -> Optional[str]:
+        return self.local_user_field.string_value if self.local_user_field.exists and not self.local_user_field.is_null else None
+
+    @property
+    def remote_user(self) -> Optional[str]:
+        return self.remote_user_field.string_value if self.remote_user_field.exists and not self.remote_user_field.is_null else None
+
+    @property
+    def remote_machine(self) -> Optional[str]:
+        return self.remote_machine_field.string_value if self.remote_machine_field.exists and not self.remote_machine_field.is_null else None
+
+    # Read-only plural aliases retained strictly for backward compatibility
     @property
     def local_users(self) -> Optional[str]:
         return self.local_user
@@ -134,7 +366,7 @@ class FirewallRuleInfo(BaseModel):
         profiles: str = "Domain,Private,Public",
         **overrides: Any,
     ) -> FirewallRuleInfo:
-        """Creates a FirewallRuleInfo instance with all 7 filter categories positively verified as unrestricted."""
+        """Creates a FirewallRuleInfo instance with all 18 filter properties across all 7 categories positively verified as unrestricted."""
         kwargs: dict[str, Any] = {
             "name": name,
             "display_name": display_name,
@@ -144,32 +376,45 @@ class FirewallRuleInfo(BaseModel):
             "direction": direction,
             "action": action,
             "profiles": profiles,
-            "program": program,
-            "local_address": "Any",
-            "remote_address": "Any",
-            "protocol": "Any",
-            "local_port": "Any",
-            "remote_port": "Any",
-            "service": "Any",
-            "interface_alias": "Any",
-            "interface_type": "Any",
-            "authentication": "NotRequired",
-            "encryption": "NotRequired",
-            "override_block_rules": False,
-            "local_user": "Any",
-            "remote_user": "Any",
-            "remote_machine": "Any",
+            "program_field": CimFieldRecord.valid(program, program, "String"),
+            "package_field": CimFieldRecord.null("Null"),
+            "local_address_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "remote_address_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "protocol_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "local_port_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "remote_port_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "icmp_type_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "dynamic_target_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "service_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "interface_alias_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "interface_type_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "authentication_field": CimFieldRecord.valid("NotRequired", "NotRequired", "String"),
+            "encryption_field": CimFieldRecord.valid("NotRequired", "NotRequired", "String"),
+            "override_block_rules_field": CimFieldRecord.valid(False, "False", "Boolean"),
+            "local_user_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "remote_user_field": CimFieldRecord.valid("Any", "Any", "String"),
+            "remote_machine_field": CimFieldRecord.valid("Any", "Any", "String"),
         }
-        kwargs.update(overrides)
+        for k, v in overrides.items():
+            field_name = _CIM_FILTER_MAP.get(k, k)
+            if field_name in kwargs or field_name.endswith("_field"):
+                kwargs[field_name] = CimFieldRecord.from_raw(v) if not isinstance(v, CimFieldRecord) else v
+            else:
+                kwargs[k] = v
         return cls(**kwargs)
 
 
 class FirewallQueryResult(BaseModel):
+    """Structured result returned by Windows Firewall policy inspections."""
+    schema_version: int = 1
     success: bool
     inspection_complete: bool
     rules: list[FirewallRuleInfo] = Field(default_factory=list)
+    bypass_rules: list[dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
+    errors: list[str] = Field(default_factory=list)
     policy_store: Optional[str] = None
+    profiles: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def is_admin() -> bool:
@@ -217,7 +462,6 @@ def validate_pe_structure(file_path: Path) -> Tuple[bool, str]:
             if dos_header[:2] != b"MZ":
                 return False, f"Missing DOS executable signature (got {dos_header[:2]!r}, expected b'MZ')."
 
-            # Read 32-bit unsigned little-endian integer at offset 0x3C
             pe_offset = int.from_bytes(dos_header[0x3C:0x40], byteorder="little", signed=False)
 
             if pe_offset < 0x40:
@@ -259,7 +503,6 @@ def is_safe_target_executable(path: Path | str) -> Tuple[bool, str]:
     if not path_str:
         return False, "Executable path cannot be empty."
 
-    # Prevent command/path injection characters
     if any(c in path_str for c in "\r\n\t;\"'|&><`"):
         return False, "Executable path contains invalid or dangerous control characters."
 
@@ -287,7 +530,6 @@ def is_safe_target_executable(path: Path | str) -> Tuple[bool, str]:
             "Refusing to create a system-wide OS firewall rule against shared development tooling."
         )
 
-    # Strictly require dedicated deployment binary name
     if file_name != EXPECTED_EXECUTABLE_NAME:
         return (
             False,
@@ -295,7 +537,6 @@ def is_safe_target_executable(path: Path | str) -> Tuple[bool, str]:
             "Arbitrary executables are strictly rejected."
         )
 
-    # Structural Windows PE format validation
     pe_valid, pe_reason = validate_pe_structure(resolved)
     if not pe_valid:
         return False, pe_reason
@@ -369,12 +610,16 @@ def is_tsukiko_owned_rule(
     if rule.group.strip().lower() != RULE_GROUPING.lower():
         return (
             False,
+            f"Rule '{rule.display_name}' exists but lacks verified Tsukiko ownership markers "
+            f"(Grouping '{RULE_GROUPING}' and marker '{RULE_OWNERSHIP_MARKER}'). "
             f"Rule grouping mismatch: got '{rule.group}', expected '{RULE_GROUPING}'."
         )
 
     if RULE_OWNERSHIP_MARKER.lower() not in rule.description.lower():
         return (
             False,
+            f"Rule '{rule.display_name}' exists but lacks verified Tsukiko ownership markers "
+            f"(Grouping '{RULE_GROUPING}' and marker '{RULE_OWNERSHIP_MARKER}'). "
             f"Rule description lacks required Tsukiko ownership marker '{RULE_OWNERSHIP_MARKER}'."
         )
 
@@ -397,29 +642,51 @@ def validate_firewall_filters(
     rule: FirewallRuleInfo,
     expected_exe: Path | str,
 ) -> Tuple[bool, str]:
-    """Validates that all 7 filter categories on a candidate firewall rule ensure a complete,
-    unrestricted outbound block for the target executable.
+    """Validates that all 18 filter properties across all 7 NetSecurity categories ensure
+    a complete, unrestricted outbound block for the target executable.
 
     Enforces:
-    1. Application filter: Must match the normalized target executable path. Wildcards and empty values rejected.
-    2. Address filter: LocalAddress and RemoteAddress must cover 'Any' (no specific IPs, subnets, or ranges).
-    3. Port & protocol filter: Protocol, LocalPort, and RemotePort must cover 'Any' (no port or protocol limits).
-    4. Service filter: Must apply to all services ('Any' or empty).
-    5. Interface filter: Must apply to all interfaces ('Any' or empty).
-    6. Interface-type filter: Must apply to all interface types ('Any' or empty).
-    7. Security filter: Must require no IPsec authentication, encryption, or user/machine restrictions,
-       and OverrideBlockRules must be explicitly verified as False.
+    1. Application filter:
+       - Program: Must match normalized target executable path. Wildcards and empty values rejected.
+       - Package: Must be null, empty, or 'Any' (unrestricted Win32). Specific package SIDs fail closed.
+    2. Address filter:
+       - LocalAddress: Must be 'Any' or unrestricted. Specific IPs/ranges fail closed.
+       - RemoteAddress: Must be 'Any' or unrestricted. Specific IPs/ranges fail closed.
+    3. Port & protocol filter:
+       - Protocol: Must be 'Any' (or '0' / '256'). Specific protocols (e.g. TCP, UDP) fail closed.
+       - LocalPort: Must be 'Any' or unrestricted. Specific ports fail closed.
+       - RemotePort: Must be 'Any' or unrestricted. Specific ports fail closed.
+       - IcmpType: Must be 'Any' or unrestricted. Specific ICMP types (e.g. 8) fail closed.
+       - DynamicTarget: Must be 'Any', '0', or unrestricted. Specific dynamic targets fail closed.
+    4. Service filter:
+       - Service: Must apply to all services ('Any' or empty).
+    5. Interface filter:
+       - InterfaceAlias: Must apply to all interfaces ('Any' or empty).
+    6. Interface-type filter:
+       - InterfaceType: Must apply to all interface types ('Any', '0', or empty).
+    7. Security filter:
+       - Authentication: Must be explicitly 'NotRequired' (or 'No' / '0').
+       - Encryption: Must be explicitly 'NotRequired' (or 'No' / '0').
+       - OverrideBlockRules: Must be explicitly verified as boolean False.
+       - LocalUser: Must apply to all users ('Any' or empty).
+       - RemoteUser: Must apply to all remote users ('Any' or empty).
+       - RemoteMachine: Must apply to all remote machines ('Any' or empty).
 
     Fail-closed semantics:
-    - Missing properties (None) fail closed.
-    - Null properties fail closed.
+    - Missing properties fail closed.
+    - Null properties fail closed (except where null is the documented Windows representation
+      of unrestricted Win32 binary, e.g. Package).
     - Restrictive or unrecognized values fail closed.
-    - OverrideBlockRules=True or malformed fails closed.
+    - Malformed values fail closed.
     """
-    # 1. Application filter
-    if rule.program is None:
+    # -------------------------------------------------------------
+    # Category 1: Application filter
+    # -------------------------------------------------------------
+    if rule.program_field.state == CimFieldState.MISSING or rule.program_field.is_null:
         return False, "Application filter is missing or null. A dedicated executable path is required."
-    if rule.program.strip() in ("*", "Any", ""):
+    if rule.program_field.state == CimFieldState.MALFORMED:
+        return False, "Application filter has malformed Program property."
+    if rule.program is None or rule.program.strip() in ("*", "Any", ""):
         return False, "Application filter is empty or wildcard. A dedicated executable path is required."
     try:
         expected_norm = Path(expected_exe).resolve()
@@ -429,95 +696,169 @@ def validate_firewall_filters(
     except Exception as e:
         return False, f"Could not compare application filter paths: {e}"
 
-    # Helper for address, port, service, and interface properties:
-    # Requires non-None presence and explicit membership in allowed unrestricted tokens.
-    def check_unrestricted(val: Optional[str], prop_name: str, extra_allowed: tuple[str, ...] = ()) -> Tuple[bool, str]:
-        if val is None:
-            return False, f"Filter property '{prop_name}' is missing or null (cannot be verified as unrestricted)."
-        clean = val.strip().lower()
+    # Package: standard Win32 binary is null, empty, or 'Any'
+    if rule.package_field.state == CimFieldState.MISSING:
+        return False, "Application filter missing Package property."
+    if rule.package_field.state == CimFieldState.MALFORMED:
+        return False, "Application filter has malformed Package property."
+    if rule.package_field.state != CimFieldState.NULL:
+        pkg_val = str(rule.package_field.value or "").strip().lower()
+        if pkg_val not in ("", "any", "*"):
+            return False, f"Application filter restricts package: '{rule.package_field.string_value}'."
+
+    # -------------------------------------------------------------
+    # Helper for generic unrestricted field checks
+    # -------------------------------------------------------------
+    def check_field_unrestricted(
+        field: CimFieldRecord,
+        prop_label: str,
+        extra_allowed: tuple[str, ...] = (),
+    ) -> Tuple[bool, str]:
+        if field.state == CimFieldState.MISSING or field.is_null:
+            return False, f"Filter property '{prop_label}' is missing or null (cannot be verified as unrestricted)."
+        if field.state == CimFieldState.MALFORMED:
+            return False, f"Filter property '{prop_label}' has malformed value."
+        clean = (field.string_value or "").strip().lower()
         allowed = ("", "any", "*", *extra_allowed)
         if clean not in allowed:
-            return False, f"{prop_name} filter is restricted: '{val}' (must be Any or unrestricted)."
+            return False, f"{prop_label} filter is restricted: '{field.string_value}' (must be Any or unrestricted)."
         return True, ""
 
-    # 2. Address filter
-    ok, err = check_unrestricted(rule.local_address, "Local address")
+    # -------------------------------------------------------------
+    # Category 2: Address filter
+    # -------------------------------------------------------------
+    ok, err = check_field_unrestricted(rule.local_address_field, "Local address")
     if not ok:
         return False, err
-    ok, err = check_unrestricted(rule.remote_address, "Remote address")
-    if not ok:
-        return False, err
-
-    # 3. Port & protocol filter
-    ok, err = check_unrestricted(rule.protocol, "Protocol", extra_allowed=("0", "256"))
-    if not ok:
-        return False, err
-    ok, err = check_unrestricted(rule.local_port, "Local port")
-    if not ok:
-        return False, err
-    ok, err = check_unrestricted(rule.remote_port, "Remote port")
+    ok, err = check_field_unrestricted(rule.remote_address_field, "Remote address")
     if not ok:
         return False, err
 
-    # 4. Service filter
-    ok, err = check_unrestricted(rule.service, "Service")
+    # -------------------------------------------------------------
+    # Category 3: Port & protocol filter
+    # -------------------------------------------------------------
+    ok, err = check_field_unrestricted(rule.protocol_field, "Protocol", extra_allowed=("0", "256"))
+    if not ok:
+        return False, err
+    ok, err = check_field_unrestricted(rule.local_port_field, "Local port")
+    if not ok:
+        return False, err
+    ok, err = check_field_unrestricted(rule.remote_port_field, "Remote port")
     if not ok:
         return False, err
 
-    # 5. Interface filter
-    ok, err = check_unrestricted(rule.interface_alias, "Interface")
+    # IcmpType
+    if rule.icmp_type_field.state == CimFieldState.MISSING:
+        return False, "Port filter missing IcmpType property."
+    if rule.icmp_type_field.is_null:
+        return False, "Port filter missing or null IcmpType property."
+    if rule.icmp_type_field.state == CimFieldState.MALFORMED:
+        return False, "Port filter has malformed IcmpType property."
+    icmp_val = (rule.icmp_type or "").strip().lower()
+    if icmp_val not in ("", "any", "*"):
+        return False, f"Port filter restricts ICMP type: '{rule.icmp_type}'."
+
+    # DynamicTarget
+    if rule.dynamic_target_field.state == CimFieldState.MISSING:
+        return False, "Port filter missing DynamicTarget property."
+    if rule.dynamic_target_field.is_null:
+        return False, "Port filter missing or null DynamicTarget property."
+    if rule.dynamic_target_field.state == CimFieldState.MALFORMED:
+        return False, "Port filter has malformed DynamicTarget property."
+    dyn_val = (rule.dynamic_target or "").strip().lower()
+    if dyn_val not in ("", "any", "*", "0"):
+        return False, f"Port filter restricts dynamic target: '{rule.dynamic_target}'."
+
+    # -------------------------------------------------------------
+    # Category 4: Service filter
+    # -------------------------------------------------------------
+    ok, err = check_field_unrestricted(rule.service_field, "Service")
     if not ok:
         return False, err
 
-    # 6. Interface-type filter
-    ok, err = check_unrestricted(rule.interface_type, "Interface type")
+    # -------------------------------------------------------------
+    # Category 5: Interface filter
+    # -------------------------------------------------------------
+    ok, err = check_field_unrestricted(rule.interface_alias_field, "Interface")
     if not ok:
         return False, err
 
-    # 7. Security filter
-    # Authentication must be explicitly NotRequired
-    if rule.authentication is None:
+    # -------------------------------------------------------------
+    # Category 6: Interface-type filter
+    # -------------------------------------------------------------
+    ok, err = check_field_unrestricted(rule.interface_type_field, "Interface type", extra_allowed=("0",))
+    if not ok:
+        return False, err
+
+    # -------------------------------------------------------------
+    # Category 7: Security filter
+    # -------------------------------------------------------------
+    # Authentication
+    if rule.authentication_field.state == CimFieldState.MISSING or rule.authentication_field.is_null:
         return False, "Security filter missing or null Authentication property (must be explicitly NotRequired)."
-    if rule.authentication.strip().lower() not in ("notrequired", "no"):
+    if rule.authentication_field.state == CimFieldState.MALFORMED:
+        return False, "Security filter has malformed Authentication property."
+    auth_val = (rule.authentication or "").strip().lower()
+    if auth_val not in ("notrequired", "no", "0"):
         return False, f"Security filter requires authentication: '{rule.authentication}' (must be NotRequired)."
 
-    # Encryption must be explicitly NotRequired
-    if rule.encryption is None:
+    # Encryption
+    if rule.encryption_field.state == CimFieldState.MISSING or rule.encryption_field.is_null:
         return False, "Security filter missing or null Encryption property (must be explicitly NotRequired)."
-    if rule.encryption.strip().lower() not in ("notrequired", "no"):
+    if rule.encryption_field.state == CimFieldState.MALFORMED:
+        return False, "Security filter has malformed Encryption property."
+    enc_val = (rule.encryption or "").strip().lower()
+    if enc_val not in ("notrequired", "no", "0"):
         return False, f"Security filter requires encryption: '{rule.encryption}' (must be NotRequired)."
 
-    # OverrideBlockRules must be explicitly verified as False
+    # OverrideBlockRules: strictly boolean False
+    if rule.override_block_rules_field.state == CimFieldState.MISSING or rule.override_block_rules_field.is_null:
+        return False, "Security filter missing or null OverrideBlockRules property (must be explicitly False)."
+    if rule.override_block_rules_field.state == CimFieldState.MALFORMED:
+        return False, f"Security filter has malformed OverrideBlockRules value: {rule.override_block_rules_field.value!r} (must be boolean False)."
     if rule.override_block_rules is True:
         return False, "Security filter has OverrideBlockRules enabled (must be False). Outbound block can be bypassed."
-    if rule.override_block_rules is None:
-        return False, "Security filter missing or null OverrideBlockRules property (must be explicitly False)."
     if rule.override_block_rules is not False:
         return False, f"Security filter has malformed OverrideBlockRules value: {rule.override_block_rules!r} (must be boolean False)."
 
-    # LocalUser must be unrestricted
-    if rule.local_user is None:
+    # LocalUser: singular CIM property
+    if rule.local_user_field.state == CimFieldState.MISSING or rule.local_user_field.is_null:
         return False, "Security filter missing or null LocalUser property (must be unrestricted Any)."
-    if rule.local_user.strip().lower() not in ("", "any", "*"):
+    if rule.local_user_field.state == CimFieldState.MALFORMED:
+        return False, "Security filter has malformed LocalUser property."
+    usr_val = (rule.local_user or "").strip().lower()
+    if usr_val not in ("", "any", "*"):
         return False, f"Security filter restricts local users: '{rule.local_user}'."
 
-    # RemoteUser must be unrestricted
-    if rule.remote_user is None:
+    # RemoteUser: singular CIM property
+    if rule.remote_user_field.state == CimFieldState.MISSING or rule.remote_user_field.is_null:
         return False, "Security filter missing or null RemoteUser property (must be unrestricted Any)."
-    if rule.remote_user.strip().lower() not in ("", "any", "*"):
+    if rule.remote_user_field.state == CimFieldState.MALFORMED:
+        return False, "Security filter has malformed RemoteUser property."
+    rusr_val = (rule.remote_user or "").strip().lower()
+    if rusr_val not in ("", "any", "*"):
         return False, f"Security filter restricts remote users: '{rule.remote_user}'."
 
-    # RemoteMachine must be unrestricted
-    if rule.remote_machine is None:
+    # RemoteMachine: singular CIM property
+    if rule.remote_machine_field.state == CimFieldState.MISSING or rule.remote_machine_field.is_null:
         return False, "Security filter missing or null RemoteMachine property (must be unrestricted Any)."
-    if rule.remote_machine.strip().lower() not in ("", "any", "*"):
+    if rule.remote_machine_field.state == CimFieldState.MALFORMED:
+        return False, "Security filter has malformed RemoteMachine property."
+    rmach_val = (rule.remote_machine or "").strip().lower()
+    if rmach_val not in ("", "any", "*"):
         return False, f"Security filter restricts remote machines: '{rule.remote_machine}'."
 
     return True, "All 7 outbound filter categories positively verified as unrestricted."
 
 
 def parse_netsh_rule_blocks(output: str) -> list[FirewallRuleInfo]:
-    """Parses netsh advfirewall show rule text output into FirewallRuleInfo objects."""
+    """Parses netsh advfirewall show rule text output into FirewallRuleInfo objects.
+
+    Deprecated / Degraded:
+    netsh cannot inspect the complete 18-property NetSecurity CIM filter schema.
+    This function is retained solely for legacy text output parsing and must NOT be used
+    to declare os_policy_active.
+    """
     rules: list[FirewallRuleInfo] = []
     blocks = re.split(r"(?=^\s*Rule Name:\s*)", output, flags=re.MULTILINE)
     for block in blocks:
@@ -560,34 +901,40 @@ def parse_netsh_rule_blocks(output: str) -> list[FirewallRuleInfo]:
 def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
     """Parses JSON rule objects from PowerShell into FirewallRuleInfo list.
 
-    Distinguishes:
-    - Explicitly verified unrestricted values ('Any', 'NotRequired', False).
-    - Explicitly verified restrictive values ('192.168.1.1', 'Required', True).
-    - Missing properties (None in FirewallRuleInfo).
-    - Null properties (None in FirewallRuleInfo).
-    - Malformed values preserved for validator rejection.
+    Enforces:
+    - SchemaVersion check when response envelope is present (must equal 1).
+    - Rejects null or non-list Rules property in envelope.
+    - Lossless deserialization of structured CimFieldRecord representations.
+    - Strict singular NetSecurity property names (LocalUser, RemoteUser, RemoteMachine).
+      Deprecated plural property names in incoming payloads do NOT map to singular fields and fail closed.
+    - Preserves field-state distinctions: VALID, NULL, MISSING, MALFORMED.
     """
     if not data:
         return []
+
     if isinstance(data, dict):
+        if "SchemaVersion" in data and data["SchemaVersion"] != 1:
+            raise FirewallParseError(f"Unsupported schema version: {data['SchemaVersion']} (expected 1).")
+
         if "Rules" in data:
             raw_list = data["Rules"]
+            if raw_list is None:
+                raise FirewallParseError("Rules property is missing or null in response envelope.")
             if not isinstance(raw_list, list):
-                raw_list = [raw_list] if isinstance(raw_list, dict) else []
+                raise FirewallParseError(f"Rules property must be a list, got {type(raw_list).__name__}.")
         elif "Success" in data and "InspectionComplete" in data:
-            # Envelope missing Rules list
-            return []
+            raise FirewallParseError("Incomplete response envelope: Rules property is missing.")
         else:
             raw_list = [data]
     elif isinstance(data, list):
         raw_list = data
     else:
-        return []
+        raise FirewallParseError(f"Expected JSON object or list of rules, got {type(data).__name__}.")
 
     rules: list[FirewallRuleInfo] = []
     for r in raw_list:
         if not isinstance(r, dict):
-            continue
+            raise FirewallParseError(f"Rule entry must be a dictionary, got {type(r).__name__}.")
 
         name = str(r["Name"]).strip() if "Name" in r and r["Name"] is not None else ""
         if not name and "RuleName" in r and r["RuleName"] is not None:
@@ -602,44 +949,56 @@ def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
         enabled = bool(enabled_val) if not isinstance(enabled_val, (int, str)) else str(enabled_val).lower() in ("1", "true")
         direction = str(r["Direction"]).strip() if "Direction" in r and r["Direction"] is not None else ""
         action = str(r["Action"]).strip() if "Action" in r and r["Action"] is not None else ""
-        profiles = str(r["Profiles"]).strip() if "Profiles" in r and r["Profiles"] is not None else ""
+        profiles = str(r["Profiles"]).strip() if "Profiles" in r and r["Profiles"] is not None else None
 
-        program = str(r["Program"]).strip() if "Program" in r and r["Program"] is not None else None
-        local_address = str(r["LocalAddress"]).strip() if "LocalAddress" in r and r["LocalAddress"] is not None else None
-        remote_address = str(r["RemoteAddress"]).strip() if "RemoteAddress" in r and r["RemoteAddress"] is not None else None
-        protocol = str(r["Protocol"]).strip() if "Protocol" in r and r["Protocol"] is not None else None
-        local_port = str(r["LocalPort"]).strip() if "LocalPort" in r and r["LocalPort"] is not None else None
-        remote_port = str(r["RemotePort"]).strip() if "RemotePort" in r and r["RemotePort"] is not None else None
-        service = str(r["Service"]).strip() if "Service" in r and r["Service"] is not None else None
-        interface_alias = str(r["InterfaceAlias"]).strip() if "InterfaceAlias" in r and r["InterfaceAlias"] is not None else None
-        interface_type = str(r["InterfaceType"]).strip() if "InterfaceType" in r and r["InterfaceType"] is not None else None
-        authentication = str(r["Authentication"]).strip() if "Authentication" in r and r["Authentication"] is not None else None
-        encryption = str(r["Encryption"]).strip() if "Encryption" in r and r["Encryption"] is not None else None
+        # Extract 18 CIM filter fields with explicit presence checking
+        cim_kwargs: dict[str, CimFieldRecord] = {}
+        cim_names = [
+            ("Program", "program_field"),
+            ("Package", "package_field"),
+            ("LocalAddress", "local_address_field"),
+            ("RemoteAddress", "remote_address_field"),
+            ("Protocol", "protocol_field"),
+            ("LocalPort", "local_port_field"),
+            ("RemotePort", "remote_port_field"),
+            ("IcmpType", "icmp_type_field"),
+            ("DynamicTarget", "dynamic_target_field"),
+            ("Service", "service_field"),
+            ("InterfaceAlias", "interface_alias_field"),
+            ("InterfaceType", "interface_type_field"),
+            ("Authentication", "authentication_field"),
+            ("Encryption", "encryption_field"),
+            ("OverrideBlockRules", "override_block_rules_field"),
+            ("LocalUser", "local_user_field"),
+            ("RemoteUser", "remote_user_field"),
+            ("RemoteMachine", "remote_machine_field"),
+        ]
 
-        # OverrideBlockRules: strictly boolean
-        if "OverrideBlockRules" not in r:
-            override_block_rules = None
-        else:
-            raw_obr = r["OverrideBlockRules"]
-            if raw_obr is None:
-                override_block_rules = None
-            elif isinstance(raw_obr, bool):
-                override_block_rules = raw_obr
-            elif isinstance(raw_obr, str) and raw_obr.strip().lower() in ("true", "1"):
-                override_block_rules = True
-            elif isinstance(raw_obr, str) and raw_obr.strip().lower() in ("false", "0"):
-                override_block_rules = False
-            elif isinstance(raw_obr, (int, float)) and raw_obr == 0:
-                override_block_rules = False
-            elif isinstance(raw_obr, (int, float)) and raw_obr == 1:
-                override_block_rules = True
+        for json_key, attr_name in cim_names:
+            if json_key in r:
+                val = r[json_key]
+                if val is None:
+                    cim_kwargs[attr_name] = CimFieldRecord.null()
+                elif isinstance(val, dict) and ("State" in val or "state" in val):
+                    cim_kwargs[attr_name] = CimFieldRecord.from_raw(val)
+                elif json_key == "OverrideBlockRules":
+                    if isinstance(val, bool):
+                        cim_kwargs[attr_name] = CimFieldRecord.valid(val, "True" if val else "False", "Boolean")
+                    elif isinstance(val, str) and val.strip().lower() in ("false", "0"):
+                        cim_kwargs[attr_name] = CimFieldRecord.valid(False, "False", "Boolean")
+                    elif isinstance(val, str) and val.strip().lower() in ("true", "1"):
+                        cim_kwargs[attr_name] = CimFieldRecord.valid(True, "True", "Boolean")
+                    elif isinstance(val, (int, float)) and val == 0:
+                        cim_kwargs[attr_name] = CimFieldRecord.valid(False, "False", "Boolean")
+                    elif isinstance(val, (int, float)) and val == 1:
+                        cim_kwargs[attr_name] = CimFieldRecord.valid(True, "True", "Boolean")
+                    else:
+                        cim_kwargs[attr_name] = CimFieldRecord.malformed(val, str(val))
+                else:
+                    cim_kwargs[attr_name] = CimFieldRecord.from_raw(val)
             else:
-                override_block_rules = raw_obr  # preserve malformed value for validator rejection
-
-        # Exact singular Microsoft NetSecurity CIM properties
-        local_user = str(r["LocalUser"]).strip() if "LocalUser" in r and r["LocalUser"] is not None else None
-        remote_user = str(r["RemoteUser"]).strip() if "RemoteUser" in r and r["RemoteUser"] is not None else None
-        remote_machine = str(r["RemoteMachine"]).strip() if "RemoteMachine" in r and r["RemoteMachine"] is not None else None
+                # Strictly missing: do not map plural substitutes like LocalUsers
+                cim_kwargs[attr_name] = CimFieldRecord.missing()
 
         rules.append(FirewallRuleInfo(
             name=name,
@@ -650,39 +1009,173 @@ def parse_powershell_rules_json(data: Any) -> list[FirewallRuleInfo]:
             direction=direction,
             action=action,
             profiles=profiles,
-            program=program,
-            local_address=local_address,
-            remote_address=remote_address,
-            protocol=protocol,
-            local_port=local_port,
-            remote_port=remote_port,
-            service=service,
-            interface_alias=interface_alias,
-            interface_type=interface_type,
-            authentication=authentication,
-            encryption=encryption,
-            override_block_rules=override_block_rules,
-            local_user=local_user,
-            remote_user=remote_user,
-            remote_machine=remote_machine,
             raw_properties=dict(r),
+            **cim_kwargs,
         ))
     return rules
+
+
+# =====================================================================
+# PowerShell Script Snippets
+# =====================================================================
+
+PS_CIM_SERIALIZER_SNIPPET = """
+function Get-CimFieldRecord($Obj, $PropName) {
+    if ($null -eq $Obj) {
+        return [PSCustomObject]@{
+            State = "PROPERTY_MISSING"
+            Exists = $false
+            IsNull = $true
+            Value = $null
+            StringValue = $null
+            Type = "None"
+        }
+    }
+    $prop = $Obj.PSObject.Properties[$PropName]
+    if ($null -eq $prop) {
+        return [PSCustomObject]@{
+            State = "PROPERTY_MISSING"
+            Exists = $false
+            IsNull = $true
+            Value = $null
+            StringValue = $null
+            Type = "None"
+        }
+    }
+    $val = $prop.Value
+    if ($null -eq $val) {
+        return [PSCustomObject]@{
+            State = "PROPERTY_PRESENT_WITH_NULL"
+            Exists = $true
+            IsNull = $true
+            Value = $null
+            StringValue = $null
+            Type = "Null"
+        }
+    }
+    if ($val -is [System.Array]) {
+        $strVal = ($val | ForEach-Object { [string]$_ }) -join ','
+        return [PSCustomObject]@{
+            State = "PROPERTY_PRESENT_WITH_VALID_VALUE"
+            Exists = $true
+            IsNull = $false
+            Value = @($val)
+            StringValue = $strVal
+            Type = "Array"
+        }
+    }
+    if ($val -is [bool]) {
+        return [PSCustomObject]@{
+            State = "PROPERTY_PRESENT_WITH_VALID_VALUE"
+            Exists = $true
+            IsNull = $false
+            Value = [bool]$val
+            StringValue = if ($val) { "True" } else { "False" }
+            Type = "Boolean"
+        }
+    }
+    if ($val -is [int] -or $val -is [long] -or $val -is [byte]) {
+        return [PSCustomObject]@{
+            State = "PROPERTY_PRESENT_WITH_VALID_VALUE"
+            Exists = $true
+            IsNull = $false
+            Value = [int]$val
+            StringValue = [string]$val
+            Type = "Integer"
+        }
+    }
+    return [PSCustomObject]@{
+        State = "PROPERTY_PRESENT_WITH_VALID_VALUE"
+        Exists = $true
+        IsNull = $false
+        Value = [string]$val
+        StringValue = [string]$val
+        Type = "String"
+    }
+}
+
+function Get-RuleCimRecord($r) {
+    $apps = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $r)
+    if ($apps.Count -ne 1) { throw "Application filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($apps.Count)" }
+    $app = $apps[0]
+
+    $addrs = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r)
+    if ($addrs.Count -ne 1) { throw "Address filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($addrs.Count)" }
+    $addr = $addrs[0]
+
+    $ports = @(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r)
+    if ($ports.Count -ne 1) { throw "Port filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($ports.Count)" }
+    $port = $ports[0]
+
+    $svcs = @(Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $r)
+    if ($svcs.Count -ne 1) { throw "Service filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($svcs.Count)" }
+    $svc = $svcs[0]
+
+    $ifaces = @(Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $r)
+    if ($ifaces.Count -ne 1) { throw "Interface filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($ifaces.Count)" }
+    $iface = $ifaces[0]
+
+    $iftypes = @(Get-NetFirewallInterfaceTypeFilter -AssociatedNetFirewallRule $r)
+    if ($iftypes.Count -ne 1) { throw "InterfaceType filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($iftypes.Count)" }
+    $iftype = $iftypes[0]
+
+    $secs = @(Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $r)
+    if ($secs.Count -ne 1) { throw "Security filter association integrity failure for rule '$($r.Name)': expected 1 filter object, got $($secs.Count)" }
+    $sec = $secs[0]
+
+    $profStr = if ($r.Profile -is [System.Array]) { ($r.Profile | ForEach-Object { [string]$_ }) -join ',' } elseif ($null -ne $r.Profile) { [string]$r.Profile } else { "" }
+
+    return [PSCustomObject]@{
+        Name = [string]$r.Name
+        DisplayName = [string]$r.DisplayName
+        Group = [string]$r.DisplayGroup
+        Description = [string]$r.Description
+        Enabled = [bool]$r.Enabled
+        Direction = [string]$r.Direction
+        Action = [string]$r.Action
+        Profiles = $profStr
+        Program = Get-CimFieldRecord $app "Program"
+        Package = Get-CimFieldRecord $app "Package"
+        LocalAddress = Get-CimFieldRecord $addr "LocalAddress"
+        RemoteAddress = Get-CimFieldRecord $addr "RemoteAddress"
+        Protocol = Get-CimFieldRecord $port "Protocol"
+        LocalPort = Get-CimFieldRecord $port "LocalPort"
+        RemotePort = Get-CimFieldRecord $port "RemotePort"
+        IcmpType = Get-CimFieldRecord $port "IcmpType"
+        DynamicTarget = Get-CimFieldRecord $port "DynamicTarget"
+        Service = Get-CimFieldRecord $svc "Service"
+        InterfaceAlias = Get-CimFieldRecord $iface "InterfaceAlias"
+        InterfaceType = Get-CimFieldRecord $iftype "InterfaceType"
+        Authentication = Get-CimFieldRecord $sec "Authentication"
+        Encryption = Get-CimFieldRecord $sec "Encryption"
+        OverrideBlockRules = Get-CimFieldRecord $sec "OverrideBlockRules"
+        LocalUser = Get-CimFieldRecord $sec "LocalUser"
+        RemoteUser = Get-CimFieldRecord $sec "RemoteUser"
+        RemoteMachine = Get-CimFieldRecord $sec "RemoteMachine"
+    }
+}
+"""
 
 
 def query_matching_firewall_rules(
     rule_identifier: Optional[str] = None,
     policy_store: str = "PersistentStore",
 ) -> FirewallQueryResult:
-    """Queries candidate firewall rules matching rule_identifier or Tsukiko identity.
+    """Queries candidate firewall rules matching rule_identifier or Tsukiko identity using PowerShell NetSecurity.
 
     Distinguishes:
     - Confirmed absence: success=True, inspection_complete=True, rules=[]
     - Confirmed presence: success=True, inspection_complete=True, rules=[...]
     - Inspection failure: success=False, inspection_complete=False, rules=[], error=...
+
+    Fail-closed policy:
+    netsh is NOT used to evaluate or declare security status because it cannot inspect the complete
+    18-property NetSecurity CIM filter schema. If PowerShell or NetSecurity is unavailable, this
+    function strictly fails closed with success=False, inspection_complete=False.
     """
     if platform.system() != "Windows":
         return FirewallQueryResult(
+            schema_version=1,
             success=True,
             inspection_complete=True,
             rules=[],
@@ -691,22 +1184,19 @@ def query_matching_firewall_rules(
         )
 
     ps_path = shutil.which("powershell") or shutil.which("powershell.exe")
-    netsh_path = shutil.which("netsh")
-
-    if not ps_path and not netsh_path:
+    if not ps_path:
         return FirewallQueryResult(
+            schema_version=1,
             success=False,
             inspection_complete=False,
             rules=[],
-            error="Neither PowerShell nor netsh is available on system PATH",
+            error="PowerShell is not available on PATH. PowerShell NetSecurity is required for complete firewall inspection.",
             policy_store=policy_store,
         )
 
     target_id = (rule_identifier or DEFAULT_RULE_NAME).strip()
 
-    # 1. Preferred inspection: PowerShell NetSecurity
-    if ps_path:
-        ps_script = """
+    ps_script = PS_CIM_SERIALIZER_SNIPPET + """
 $store = $env:TSUKIKO_POLICY_STORE
 $ruleId = $env:TSUKIKO_TARGET_RULE_NAME
 $group = $env:TSUKIKO_TARGET_GROUP
@@ -717,236 +1207,164 @@ try {
     $rules = @(Get-NetFirewallRule -PolicyStore $store | Where-Object {
         $_.Name -eq $ruleId -or $_.DisplayName -eq $ruleId -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $group
     } | ForEach-Object {
-        $r = $_
-        $app = $r | Get-NetFirewallApplicationFilter
-        $addr = $r | Get-NetFirewallAddressFilter
-        $port = $r | Get-NetFirewallPortFilter
-        $svc = $r | Get-NetFirewallServiceFilter
-        $iface = $r | Get-NetFirewallInterfaceFilter
-        $iftype = $r | Get-NetFirewallInterfaceTypeFilter
-        $sec = $r | Get-NetFirewallSecurityFilter
-        [PSCustomObject]@{
-            Name = [string]$r.Name
-            DisplayName = [string]$r.DisplayName
-            Group = [string]$r.DisplayGroup
-            Description = [string]$r.Description
-            Enabled = [bool]$r.Enabled
-            Direction = [string]$r.Direction
-            Action = [string]$r.Action
-            Profiles = [string]($r.Profile -join ',')
-            Program = [string]$app.Program
-            LocalAddress = [string]($addr.LocalAddress -join ',')
-            RemoteAddress = [string]($addr.RemoteAddress -join ',')
-            Protocol = [string]$port.Protocol
-            LocalPort = [string]($port.LocalPort -join ',')
-            RemotePort = [string]($port.RemotePort -join ',')
-            Service = [string]$svc.Service
-            InterfaceAlias = [string]($iface.InterfaceAlias -join ',')
-            InterfaceType = [string]$iftype.InterfaceType
-            Authentication = [string]$sec.Authentication
-            Encryption = [string]$sec.Encryption
-            OverrideBlockRules = [bool]$sec.OverrideBlockRules
-            LocalUser = [string]$sec.LocalUser
-            RemoteUser = [string]$sec.RemoteUser
-            RemoteMachine = [string]$sec.RemoteMachine
-        }
+        Get-RuleCimRecord $_
     })
     [PSCustomObject]@{
+        SchemaVersion = 1
         Success = $true
         InspectionComplete = $true
+        PolicyStore = $store
         Rules = $rules
-        Error = $null
-    } | ConvertTo-Json -Depth 5
+        BypassRules = @()
+        Errors = @()
+    } | ConvertTo-Json -Depth 6
 } catch {
     [PSCustomObject]@{
+        SchemaVersion = 1
         Success = $false
         InspectionComplete = $false
+        PolicyStore = $store
         Rules = @()
-        Error = $_.Exception.Message
+        BypassRules = @()
+        Errors = @($_.Exception.Message)
     } | ConvertTo-Json -Depth 3
     exit 1
 }
 """
-        env = os.environ.copy()
-        env["TSUKIKO_POLICY_STORE"] = policy_store
-        env["TSUKIKO_TARGET_RULE_NAME"] = target_id
-        env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
-        env["TSUKIKO_STABLE_RULE_ID"] = STABLE_RULE_ID
+    env = os.environ.copy()
+    env["TSUKIKO_POLICY_STORE"] = policy_store
+    env["TSUKIKO_TARGET_RULE_NAME"] = target_id
+    env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
+    env["TSUKIKO_STABLE_RULE_ID"] = STABLE_RULE_ID
 
-        try:
-            res = subprocess.run(
-                [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
-            )
-            # If the command output was mocked with netsh output
-            if "Rule Name:" in res.stdout or "No rules match" in res.stdout:
-                if "No rules match" in res.stdout:
-                    return FirewallQueryResult(
-                        success=True,
-                        inspection_complete=True,
-                        rules=[],
-                        policy_store=policy_store,
-                    )
-                parsed = parse_netsh_rule_blocks(res.stdout)
-                return FirewallQueryResult(
-                    success=True,
-                    inspection_complete=True,
-                    rules=parsed,
-                    policy_store=policy_store,
-                )
+    try:
+        res = subprocess.run(
+            [ps_path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
 
-            if res.returncode != 0:
-                err_msg = ""
-                if res.stdout.strip():
-                    try:
-                        err_data = json.loads(res.stdout.strip())
-                        if isinstance(err_data, dict) and err_data.get("Error"):
+        if res.returncode != 0:
+            err_msg = ""
+            if res.stdout.strip():
+                try:
+                    err_data = json.loads(res.stdout.strip())
+                    if isinstance(err_data, dict):
+                        errors = err_data.get("Errors") or []
+                        if errors:
+                            err_msg = "; ".join(str(e) for e in errors)
+                        elif err_data.get("Error"):
                             err_msg = str(err_data["Error"]).strip()
-                    except Exception:
-                        pass
-                if not err_msg:
-                    err_msg = res.stderr.strip() or res.stdout.strip() or f"PowerShell exited with code {res.returncode}"
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error=f"PowerShell inspection failed (exit code {res.returncode}): {err_msg}",
-                    policy_store=policy_store,
-                )
-
-            raw_out = res.stdout.strip()
-            if not raw_out:
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error="PowerShell query returned empty standard output; missing response envelope.",
-                    policy_store=policy_store,
-                )
-
-            try:
-                data = json.loads(raw_out)
-            except Exception as json_err:
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error=f"Malformed PowerShell JSON output: {json_err}",
-                    policy_store=policy_store,
-                )
-
-            if not isinstance(data, dict):
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error="PowerShell response envelope is missing (expected JSON object).",
-                    policy_store=policy_store,
-                )
-
-            if "Success" not in data or "InspectionComplete" not in data or "Rules" not in data:
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error="Incomplete PowerShell response envelope: missing required fields.",
-                    policy_store=policy_store,
-                )
-
-            if data.get("Success") is not True or data.get("InspectionComplete") is not True:
-                err_detail = data.get("Error") or "Inspection not marked complete by PowerShell."
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error=f"PowerShell query reported failure: {err_detail}",
-                    policy_store=policy_store,
-                )
-
-            raw_rules = data.get("Rules", [])
-            parsed_rules = parse_powershell_rules_json(raw_rules)
+                except Exception:
+                    pass
+            if not err_msg:
+                err_msg = res.stderr.strip() or res.stdout.strip() or f"PowerShell exited with code {res.returncode}"
             return FirewallQueryResult(
-                success=True,
-                inspection_complete=True,
-                rules=parsed_rules,
-                policy_store=policy_store,
-            )
-        except subprocess.TimeoutExpired:
-            return FirewallQueryResult(
+                schema_version=1,
                 success=False,
                 inspection_complete=False,
                 rules=[],
-                error="PowerShell query timed out while inspecting firewall rules",
-                policy_store=policy_store,
-            )
-        except Exception as e:
-            return FirewallQueryResult(
-                success=False,
-                inspection_complete=False,
-                rules=[],
-                error=f"PowerShell query invocation failed: {e}",
+                error=f"PowerShell inspection failed (exit code {res.returncode}): {err_msg}",
+                errors=[err_msg],
                 policy_store=policy_store,
             )
 
-    # 2. Netsh fallback
-    if netsh_path:
+        raw_out = res.stdout.strip()
+        if not raw_out:
+            return FirewallQueryResult(
+                schema_version=1,
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error="PowerShell query returned empty standard output; missing response envelope.",
+                policy_store=policy_store,
+            )
+
         try:
-            res = subprocess.run(
-                [netsh_path, "advfirewall", "firewall", "show", "rule", f"name={target_id}", "verbose"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if "No rules match" in res.stdout:
-                return FirewallQueryResult(
-                    success=True,
-                    inspection_complete=True,
-                    rules=[],
-                    policy_store=policy_store,
-                )
-            if res.returncode == 0:
-                parsed = parse_netsh_rule_blocks(res.stdout)
-                return FirewallQueryResult(
-                    success=True,
-                    inspection_complete=True,
-                    rules=parsed,
-                    policy_store=policy_store,
-                )
-            else:
-                return FirewallQueryResult(
-                    success=False,
-                    inspection_complete=False,
-                    rules=[],
-                    error=f"netsh inspection failed (exit code {res.returncode}): {res.stderr or res.stdout}",
-                    policy_store=policy_store,
-                )
-        except subprocess.TimeoutExpired:
+            data = json.loads(raw_out)
+        except Exception as json_err:
             return FirewallQueryResult(
+                schema_version=1,
                 success=False,
                 inspection_complete=False,
                 rules=[],
-                error="netsh query timed out",
-                policy_store=policy_store,
-            )
-        except Exception as e:
-            return FirewallQueryResult(
-                success=False,
-                inspection_complete=False,
-                rules=[],
-                error=f"netsh invocation failed: {e}",
+                error=f"Malformed PowerShell JSON output: {json_err}",
                 policy_store=policy_store,
             )
 
-    return FirewallQueryResult(
-        success=False,
-        inspection_complete=False,
-        rules=[],
-        error="Unknown query failure",
-        policy_store=policy_store,
-    )
+        if not isinstance(data, dict):
+            return FirewallQueryResult(
+                schema_version=1,
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error="PowerShell response envelope is missing (expected JSON object).",
+                policy_store=policy_store,
+            )
+
+        if "Success" not in data or "InspectionComplete" not in data or "Rules" not in data:
+            return FirewallQueryResult(
+                schema_version=1,
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error="Incomplete PowerShell response envelope: missing required fields.",
+                policy_store=policy_store,
+            )
+
+        if data.get("Success") is not True or data.get("InspectionComplete") is not True:
+            err_detail = "; ".join(data.get("Errors", [])) or data.get("Error") or "Inspection not marked complete by PowerShell."
+            return FirewallQueryResult(
+                schema_version=data.get("SchemaVersion", 1),
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error=f"PowerShell query reported failure: {err_detail}",
+                errors=data.get("Errors", [err_detail]),
+                policy_store=policy_store,
+            )
+
+        try:
+            parsed_rules = parse_powershell_rules_json(data)
+        except FirewallParseError as parse_err:
+            return FirewallQueryResult(
+                schema_version=data.get("SchemaVersion", 1),
+                success=False,
+                inspection_complete=False,
+                rules=[],
+                error=f"PowerShell rules parsing failed: {parse_err}",
+                errors=[str(parse_err)],
+                policy_store=policy_store,
+            )
+
+        return FirewallQueryResult(
+            schema_version=data.get("SchemaVersion", 1),
+            success=True,
+            inspection_complete=True,
+            rules=parsed_rules,
+            bypass_rules=data.get("BypassRules", []),
+            policy_store=policy_store,
+        )
+    except subprocess.TimeoutExpired:
+        return FirewallQueryResult(
+            schema_version=1,
+            success=False,
+            inspection_complete=False,
+            rules=[],
+            error="PowerShell query timed out while inspecting firewall rules",
+            policy_store=policy_store,
+        )
+    except Exception as e:
+        return FirewallQueryResult(
+            schema_version=1,
+            success=False,
+            inspection_complete=False,
+            rules=[],
+            error=f"PowerShell query invocation failed: {e}",
+            policy_store=policy_store,
+        )
 
 
 def verify_effective_firewall_policy(
@@ -959,7 +1377,9 @@ def verify_effective_firewall_policy(
     1. PowerShell is available and executable.
     2. ActiveStore firewall profiles (Domain, Private, Public) are all Enabled.
     3. ActiveStore profile policy permits local firewall rules (AllowLocalFirewallRules is True).
-    4. An active rule matching Tsukiko ownership exists in ActiveStore:
+    4. ActiveStore has NO conflicting Outbound Allow rules targeting the dedicated executable
+       where OverrideBlockRules is True (bypass evaluation).
+    5. An active rule matching Tsukiko ownership exists in ActiveStore:
        - DisplayName == 'Tsukiko Outbound Privacy Boundary' OR Name == 'Tsukiko_Privacy_Outbound_Block'
        - Group == 'Tsukiko Desktop Companion'
        - Description contains '[Tsukiko-Privacy-Core:Outbound-Block]'
@@ -968,7 +1388,7 @@ def verify_effective_firewall_policy(
        - Enabled is True
        - Program matches normalized executable_path
        - Profiles covers all network profiles (Domain,Private,Public or Any)
-    5. All 7 outbound filter categories are positively verified as unrestricted.
+    6. All 18 filter properties across all 7 NetSecurity categories are positively verified as unrestricted.
     """
     if platform.system() != "Windows":
         return False, "Windows Firewall effective policy verification is only available on Windows."
@@ -982,64 +1402,67 @@ def verify_effective_firewall_policy(
     except Exception as e:
         return False, f"Invalid target executable path: {e}"
 
-    ps_script = """
+    ps_script = PS_CIM_SERIALIZER_SNIPPET + """
 $targetRuleName = $env:TSUKIKO_TARGET_RULE_NAME
 $targetGroup = $env:TSUKIKO_TARGET_GROUP
 $stableId = $env:TSUKIKO_STABLE_RULE_ID
+$targetExe = $env:TSUKIKO_TARGET_EXE
 $ErrorActionPreference = 'Stop'
+
 try {
     $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Select-Object Name, Enabled, AllowLocalFirewallRules)
+
     $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {
         $_.DisplayName -eq $targetRuleName -or $_.Name -eq $targetRuleName -or $_.Name -eq $stableId -or $_.DisplayGroup -eq $targetGroup
     } | ForEach-Object {
-        $r = $_
-        $app = $r | Get-NetFirewallApplicationFilter
-        $addr = $r | Get-NetFirewallAddressFilter
-        $port = $r | Get-NetFirewallPortFilter
-        $svc = $r | Get-NetFirewallServiceFilter
-        $iface = $r | Get-NetFirewallInterfaceFilter
-        $iftype = $r | Get-NetFirewallInterfaceTypeFilter
-        $sec = $r | Get-NetFirewallSecurityFilter
-        [PSCustomObject]@{
-            Name = [string]$r.Name
-            DisplayName = [string]$r.DisplayName
-            Group = [string]$r.DisplayGroup
-            Description = [string]$r.Description
-            Enabled = [bool]$r.Enabled
-            Direction = [string]$r.Direction
-            Action = [string]$r.Action
-            Profiles = [string]($r.Profile -join ',')
-            Program = [string]$app.Program
-            LocalAddress = [string]($addr.LocalAddress -join ',')
-            RemoteAddress = [string]($addr.RemoteAddress -join ',')
-            Protocol = [string]$port.Protocol
-            LocalPort = [string]($port.LocalPort -join ',')
-            RemotePort = [string]($port.RemotePort -join ',')
-            Service = [string]$svc.Service
-            InterfaceAlias = [string]($iface.InterfaceAlias -join ',')
-            InterfaceType = [string]$iftype.InterfaceType
-            Authentication = [string]$sec.Authentication
-            Encryption = [string]$sec.Encryption
-            OverrideBlockRules = [bool]$sec.OverrideBlockRules
-            LocalUser = [string]$sec.LocalUser
-            RemoteUser = [string]$sec.RemoteUser
-            RemoteMachine = [string]$sec.RemoteMachine
-        }
+        Get-RuleCimRecord $_
     })
+
+    # ActiveStore Outbound Allow Bypass evaluation:
+    # Query any active Outbound Allow rules targeting the dedicated executable with OverrideBlockRules == $true
+    $bypassRules = @()
+    if ($targetExe) {
+        $matchingApps = @(Get-NetFirewallApplicationFilter -PolicyStore ActiveStore -Program $targetExe -ErrorAction SilentlyContinue)
+        if ($matchingApps.Count -gt 0) {
+            $candidateRules = @($matchingApps | Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+            foreach ($cr in $candidateRules) {
+                if (($cr.Enabled -eq $true -or $cr.Enabled -eq 1) -and
+                    ($cr.Direction -eq 'Outbound' -or $cr.Direction -eq 2 -or $cr.Direction -eq 'Out') -and
+                    ($cr.Action -eq 'Allow' -or $cr.Action -eq 2)) {
+                    $secFilters = @(Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $cr -ErrorAction SilentlyContinue)
+                    if ($secFilters.Count -gt 0 -and ($secFilters[0].OverrideBlockRules -eq $true -or $secFilters[0].OverrideBlockRules -eq 1)) {
+                        $bypassRules += [PSCustomObject]@{
+                            Name = [string]$cr.Name
+                            DisplayName = [string]$cr.DisplayName
+                            Program = $targetExe
+                            OverrideBlockRules = $true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     [PSCustomObject]@{
+        SchemaVersion = 1
         Success = $true
         InspectionComplete = $true
+        PolicyStore = "ActiveStore"
         Profiles = $profiles
         Rules = $rules
-        Error = $null
-    } | ConvertTo-Json -Depth 5
+        BypassRules = $bypassRules
+        Errors = @()
+    } | ConvertTo-Json -Depth 6
 } catch {
     [PSCustomObject]@{
+        SchemaVersion = 1
         Success = $false
         InspectionComplete = $false
+        PolicyStore = "ActiveStore"
         Profiles = @()
         Rules = @()
-        Error = $_.Exception.Message
+        BypassRules = @()
+        Errors = @($_.Exception.Message)
     } | ConvertTo-Json -Depth 3
     exit 1
 }
@@ -1048,6 +1471,7 @@ try {
     env["TSUKIKO_TARGET_RULE_NAME"] = rule_name
     env["TSUKIKO_TARGET_GROUP"] = RULE_GROUPING
     env["TSUKIKO_STABLE_RULE_ID"] = STABLE_RULE_ID
+    env["TSUKIKO_TARGET_EXE"] = str(resolved_exe)
 
     try:
         res = subprocess.run(
@@ -1062,8 +1486,12 @@ try {
             if res.stdout.strip():
                 try:
                     err_data = json.loads(res.stdout.strip())
-                    if isinstance(err_data, dict) and err_data.get("Error"):
-                        err = str(err_data["Error"]).strip()
+                    if isinstance(err_data, dict):
+                        errors = err_data.get("Errors") or []
+                        if errors:
+                            err = "; ".join(str(e) for e in errors)
+                        elif err_data.get("Error"):
+                            err = str(err_data["Error"]).strip()
                 except Exception:
                     pass
             if not err:
@@ -1086,8 +1514,11 @@ try {
             return False, "Incomplete ActiveStore response envelope: missing Success/InspectionComplete."
 
         if data.get("Success") is not True or data.get("InspectionComplete") is not True:
-            err_detail = data.get("Error") or "ActiveStore inspection failed."
+            err_detail = "; ".join(data.get("Errors", [])) or data.get("Error") or "ActiveStore inspection failed."
             return False, f"ActiveStore inspection failed: {err_detail}"
+
+        if data.get("SchemaVersion", 1) != 1:
+            return False, f"Unsupported ActiveStore schema version: {data.get('SchemaVersion')}"
 
         # 1. Verify Profiles in ActiveStore
         profiles_raw = data.get("Profiles", [])
@@ -1116,9 +1547,23 @@ try {
         if missing_profiles:
             return False, f"ActiveStore profile information missing required profiles: {sorted(missing_profiles)}."
 
-        # 2. Verify Rules in ActiveStore
-        rules_raw = data.get("Rules", [])
-        rules = parse_powershell_rules_json(rules_raw)
+        # 2. Check Outbound Allow Bypass Rules
+        bypass_rules = data.get("BypassRules", [])
+        if bypass_rules:
+            first_bypass = bypass_rules[0]
+            bp_name = first_bypass.get("DisplayName") or first_bypass.get("Name") or "Unknown Rule"
+            return (
+                False,
+                f"Conflicting outbound bypass Allow rule '{bp_name}' with OverrideBlockRules=True "
+                f"detected in ActiveStore for target executable '{resolved_exe}'. Outbound block is overridden."
+            )
+
+        # 3. Verify Rules in ActiveStore
+        try:
+            rules = parse_powershell_rules_json(data)
+        except FirewallParseError as parse_err:
+            return False, f"ActiveStore rule parsing failed: {parse_err}"
+
         if not rules:
             return False, f"Rule '{rule_name}' does not exist in ActiveStore effective policy."
 
@@ -1161,101 +1606,61 @@ try {
 def verify_firewall_rule(
     executable_path: Path | str,
     rule_name: str = DEFAULT_RULE_NAME,
+    policy_store: str = "PersistentStore",
 ) -> Tuple[bool, str]:
     """Verifies that an existing persistent Windows Firewall rule protects the specified executable.
 
-    Validates:
-    1. Rule exists and query succeeds.
-    2. Rule ownership: Grouping matches 'Tsukiko Desktop Companion' and Description contains '[Tsukiko-Privacy-Core:Outbound-Block]'.
-    3. Rule is Enabled (Yes).
-    4. Direction is Outbound (Out).
-    5. Action is Block.
-    6. Program exactly matches normalized executable path.
-    7. Profiles explicitly covers all network profiles (Domain,Private,Public or Any).
+    Unified with PowerShell NetSecurity:
+    Queries policy_store via query_matching_firewall_rules, verifies rule ownership,
+    enabled status, direction=Outbound, action=Block, profile coverage, and all 18
+    NetSecurity filter properties via validate_firewall_filters.
     """
     if platform.system() != "Windows":
         return False, "Windows Firewall verification is only available on Windows."
-
-    netsh_path = shutil.which("netsh")
-    if not netsh_path:
-        return False, "netsh utility not found on system PATH."
 
     try:
         resolved_exe = Path(executable_path).resolve()
     except Exception:
         return False, "Invalid executable path provided for verification."
 
-    try:
-        res = subprocess.run(
-            [netsh_path, "advfirewall", "firewall", "show", "rule", f"name={rule_name}", "verbose"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if res.returncode != 0 or "No rules match" in res.stdout:
-            return False, f"Rule '{rule_name}' does not exist in Windows Firewall."
+    query_res = query_matching_firewall_rules(rule_identifier=rule_name, policy_store=policy_store)
+    if not query_res.success or not query_res.inspection_complete:
+        return False, f"Rule verification failed due to inspection failure: {query_res.error}"
 
-        output = res.stdout
+    if not query_res.rules:
+        return False, f"Rule '{rule_name}' does not exist in Windows Firewall {policy_store}."
 
-        # 1. Rule ownership verification
-        grouping_match = re.search(r"^\s*Grouping:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
-        description_match = re.search(r"^\s*Description:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
+    for r in query_res.rules:
+        is_owned, own_reason = is_tsukiko_owned_rule(r, expected_exe=resolved_exe)
+        if not is_owned:
+            continue
 
-        has_group = bool(grouping_match and RULE_GROUPING.lower() in grouping_match.group(1).lower())
-        has_marker = bool(description_match and RULE_OWNERSHIP_MARKER.lower() in description_match.group(1).lower())
-
-        if not (has_group and has_marker):
-            return (
-                False,
-                f"Rule '{rule_name}' exists but lacks verified Tsukiko ownership markers "
-                f"(Grouping '{RULE_GROUPING}' and marker '{RULE_OWNERSHIP_MARKER}'). "
-                "Foreign or unrelated rules with the Tsukiko name prefix are rejected."
-            )
-
-        # 2. Enabled
-        enabled_match = re.search(r"^\s*Enabled:\s*(Yes|True)\b", output, re.IGNORECASE | re.MULTILINE)
-        if not enabled_match:
+        if not r.enabled:
             return False, "Rule exists but is not Enabled."
 
-        # 3. Direction Out
-        direction_match = re.search(r"^\s*Direction:\s*(Out)\b", output, re.IGNORECASE | re.MULTILINE)
-        if not direction_match:
+        if r.direction.lower() not in ("outbound", "out", "2"):
             return False, "Rule exists but Direction is not Outbound."
 
-        # 4. Action Block
-        action_match = re.search(r"^\s*Action:\s*(Block)\b", output, re.IGNORECASE | re.MULTILINE)
-        if not action_match:
+        if r.action.lower() not in ("block", "2"):
             return False, "Rule exists but Action is not Block."
 
-        # 5. Program matches exact normalized executable path
-        program_match = re.search(r"^\s*Program:\s*(.+)$", output, re.IGNORECASE | re.MULTILINE)
-        if not program_match:
-            return False, "Rule exists but specifies no Program filter."
-
-        rule_program = program_match.group(1).strip()
-        try:
-            resolved_rule_program = Path(rule_program).resolve()
-        except Exception:
-            resolved_rule_program = Path(rule_program)
-
-        if resolved_rule_program != resolved_exe:
-            return (
-                False,
-                f"Rule program mismatch: rule targets '{resolved_rule_program}', expected '{resolved_exe}'."
-            )
-
-        # 6. Fail-closed Profiles verification
-        profiles_match = re.search(r"^[^\S\r\n]*Profiles:[^\S\r\n]*(.*)$", output, re.IGNORECASE | re.MULTILINE)
-        raw_profiles = profiles_match.group(1).strip() if profiles_match else None
-        prof_ok, prof_msg = validate_firewall_profiles(raw_profiles)
+        prof_ok, prof_msg = validate_firewall_profiles(r.profiles)
         if not prof_ok:
-            return False, prof_msg
+            return False, f"Rule profile validation failed: {prof_msg}"
+
+        flt_ok, flt_msg = validate_firewall_filters(r, resolved_exe)
+        if not flt_ok:
+            return False, f"Rule filter validation failed: {flt_msg}"
 
         return True, "Firewall rule verified: Active, Outbound, Block, matching target executable, Tsukiko owned."
-    except subprocess.TimeoutExpired:
-        return False, "Query timed out while inspecting Windows Firewall rules."
-    except Exception as e:
-        return False, f"Verification failed due to system query error: {e}"
+
+    # If rules were returned but none belonged to Tsukiko
+    first_rule = query_res.rules[0]
+    is_owned, own_err = is_tsukiko_owned_rule(first_rule, expected_exe=resolved_exe)
+    if not is_owned:
+        return False, own_err
+
+    return False, f"Rule '{rule_name}' does not match verified Tsukiko outbound blocking criteria."
 
 
 def get_security_status(
@@ -1381,7 +1786,7 @@ def create_firewall_rule(
       - Refuses if conflicting foreign rule exists.
       - Refuses if ambiguous Tsukiko rules exist.
     - Creation uses PowerShell New-NetFirewallRule with explicit immutable Name.
-    - Post-creation verification re-queries policy store to confirm rule presence and all 7 filter categories.
+    - Post-creation verification re-queries policy store to confirm rule presence and all 18 filter properties.
     """
     if not user_authorized:
         return False, "Explicit user authorization is required before modifying Windows Firewall rules."
@@ -1528,7 +1933,6 @@ def remove_firewall_rule(
     if not is_admin():
         return False, "Administrator elevation required. Please run from an elevated administrator prompt."
 
-    # Enumerate all matching candidates from policy_store
     query_res = query_matching_firewall_rules(rule_identifier=clean_name, policy_store=policy_store)
     if not query_res.success or not query_res.inspection_complete:
         return False, f"Cannot safely inspect firewall rules for deletion due to inspection failure: {query_res.error}"
@@ -1536,7 +1940,6 @@ def remove_firewall_rule(
     if not query_res.rules:
         return False, f"Rule '{rule_name}' does not exist in Windows Firewall {policy_store}."
 
-    # Inspect ownership of each candidate
     owned_candidates = [c for c in query_res.rules if is_tsukiko_owned_rule(c)[0]]
 
     if len(owned_candidates) == 0:
@@ -1547,7 +1950,6 @@ def remove_firewall_rule(
             "Foreign rules will not be deleted."
         )
 
-    # Distinguish legacy rules from rules with exact stable identifier
     legacy_candidates = [c for c in owned_candidates if c.name.lower() != STABLE_RULE_ID.lower()]
     stable_candidates = [c for c in owned_candidates if c.name.lower() == STABLE_RULE_ID.lower()]
 

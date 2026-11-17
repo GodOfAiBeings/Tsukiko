@@ -160,6 +160,57 @@ An independent security review identified three remaining defects in NetSecurity
 
 ---
 
+### Definitive Phase 1 Security Closure: Full NetSecurity CIM Filter Coverage, Lossless Serialization, and Independent Verification (2026-11-17)
+
+A comprehensive architectural audit closed all remaining edge cases in the Windows Firewall subsystem, completing Phase 1 security hardening and elevating the automated test suite to 241 collected items (237 passed, 4 skipped on Windows; all 241 passing on Linux):
+
+1. **Complete 18-Property NetSecurity CIM Filter Schema (`app/core/privacy/windows_firewall.py`):**
+   - **Coverage**: Extended filter schema across all 7 categories from 15 to 18 properties:
+     - Application (2): `Program`, `Package`
+     - Address (2): `LocalAddress`, `RemoteAddress`
+     - Port (5): `Protocol`, `LocalPort`, `RemotePort`, `IcmpType`, `DynamicTarget`
+     - Service (1): `Service`
+     - Interface (1): `InterfaceAlias`
+     - InterfaceType (1): `InterfaceType`
+     - Security (6): `Authentication`, `Encryption`, `OverrideBlockRules`, `LocalUser`, `RemoteUser`, `RemoteMachine`
+   - **Semantics**: Unpackaged Win32 binary (`tsukiko.exe`) requires `Package` null/empty. Restrictive AppContainer package SIDs are rejected. `IcmpType` and `DynamicTarget` require `Any` (or `0`). `OverrideBlockRules` requires strictly boolean `False`.
+   - **Tests**: `tests/test_windows_firewall.py` (complete 18-property matrix and rejection tests).
+
+2. **Lossless CIM Field State Serialization (`Get-CimFieldRecord` & `CimFieldRecord`):**
+   - **Architecture**: Replaced fragile PowerShell string casting (`[string]`, `[bool]`) with structured field-state records distinguishing:
+     - `PROPERTY_PRESENT_WITH_VALID_VALUE`
+     - `PROPERTY_PRESENT_WITH_NULL`
+     - `PROPERTY_MISSING`
+     - `PROPERTY_PRESENT_WITH_MALFORMED_VALUE`
+   - Preserves exact CIM types without loss. Deserializes into typed `CimFieldRecord` in Python.
+   - **Tests**: `tests/test_windows_firewall.py::test_envelope_missing_or_null_rules_fails_closed`, field-state deserialization tests.
+
+3. **CIM Filter Association Integrity (`Count -eq 1`):**
+   - PowerShell inspection verifies that each of the 7 associated filter cmdlets returns exactly 1 associated CIM filter object per rule (`Count -eq 1`). Any mismatch immediately triggers inspection failure and fails closed.
+   - **Tests**: `tests/test_windows_firewall.py::test_filter_association_count_mismatch_fails_closed`.
+
+4. **Versioned JSON Envelope (`SchemaVersion: 1`):**
+   - Envelope enforces `SchemaVersion: 1`, `Success`, `InspectionComplete`, `PolicyStore`, `Profiles`, `Rules`, `BypassRules`, and `Errors`.
+   - Unsupported schema versions or missing fields fail closed immediately.
+   - **Tests**: `tests/test_windows_firewall.py::test_envelope_unsupported_schema_version_fails_closed`.
+
+5. **ActiveStore Conflicting Bypass Evaluation (`OverrideBlockRules == True`):**
+   - ActiveStore inspection queries Outbound Allow rules targeting `tsukiko.exe` where `OverrideBlockRules` is `$true` (which would override blocking rules).
+   - If present, populated in `BypassRules`, and `verify_effective_firewall_policy()` rejects `os_policy_active`.
+   - **Tests**: `tests/test_windows_firewall.py::test_activestore_bypass_outbound_allow_override_block_rules_rejects`.
+
+6. **Removal of Incomplete Netsh Fallbacks:**
+   - Removed netsh fallback for rule queries and policy verification. Netsh cannot inspect CIM filter objects or ActiveStore effective policy. If NetSecurity is unavailable, queries fail closed (`success=False`), mapping directly to `os_policy_unverified`.
+   - **Tests**: `tests/test_windows_firewall.py::test_query_matching_firewall_rules_without_powershell_fails_closed`, `test_security_status_fails_closed_to_os_policy_unverified_when_powershell_unavailable`.
+
+7. **Unified Rule Verification (`verify_firewall_rule`):**
+   - Refactored `verify_firewall_rule()` to use `query_matching_firewall_rules(policy_store=policy_store)`, verifying rule ownership, active profiles, and all 18 CIM filter properties across all 7 categories.
+
+8. **Enhanced 5-Stage Read-Only Smoke Test (`scripts/verify_windows_firewall_inspection.py`):**
+   - Validates ActiveStore profiles, retrieves real rules, verifies 26 required fields (8 rule fields + 18 CIM filter fields), checks boolean serialization, and runs 11 synthetic parser rejection tests. Strictly read-only on live Windows host.
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -168,11 +219,11 @@ An independent security review identified three remaining defects in NetSecurity
 | Model Memory Footprint Estimator | **Implemented & Tested** | Accurately factors in GGUF weight size, context KV cache, and runtime overhead with approximate labeling. |
 | Pydantic Settings & YAML Loader | **Implemented & Tested** | Type-safe configuration with typed environment variable overrides. |
 | Strict Privacy Contract & Socket Guard | **Implemented & Tested** | Enforces zero telemetry, zero cloud fallback, and full low-level socket/DNS interception with atomic rollback, numeric loopback enforcement, socket family restriction, and native `sendmsg` testing. |
-| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, all 7 filter category verification with exact CIM properties, exact stable-name creation/deletion via PowerShell, fail-closed JSON envelopes, and honest structured query inspection. |
+| Windows Firewall Policy Manager | **Implemented & Tested** | Refuses shared python interpreter rules; provides dedicated binary rules with 5-point structural PE validation, fail-closed profile checking, complete 18-property NetSecurity CIM filter schema across all 7 categories, lossless `CimFieldRecord` serialization, filter association integrity (`Count -eq 1`), ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`), exact stable-name creation/deletion via PowerShell, fail-closed versioned JSON envelopes (`SchemaVersion: 1`), and honest structured query inspection. |
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 221 unit, regression, packaging, and integration tests (217 passed, 4 skipped on Windows; all 221 passed on Linux). |
+| Automated Pytest Test Suite | **Implemented & Tested** | 241 unit, regression, packaging, and integration tests (237 passed, 4 skipped on Windows; all 241 passed on Linux). |
 | Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with 5-stage read-only ActiveStore inspection). |
 | PySide6 Desktop Companion UI | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting approval. |
 | llama.cpp Local Brain Engine | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No models downloaded yet. |

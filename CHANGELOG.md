@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.4] - Phase 1 Final Security Hardening - 2026-11-16
+## [0.1.5] - Definitive Phase 1 Security Closure - 2026-11-17
+
+### Added
+- **Full 18-Property NetSecurity CIM Filter Schema (`app/core/privacy/windows_firewall.py`)**:
+  - Expanded filter validation across all 7 categories from 15 to 18 properties:
+    - Application (2): `Program`, `Package`
+    - Address (2): `LocalAddress`, `RemoteAddress`
+    - Port (5): `Protocol`, `LocalPort`, `RemotePort`, `IcmpType`, `DynamicTarget`
+    - Service (1): `Service`
+    - Interface (1): `InterfaceAlias`
+    - InterfaceType (1): `InterfaceType`
+    - Security (6): `Authentication`, `Encryption`, `OverrideBlockRules`, `LocalUser`, `RemoteUser`, `RemoteMachine`
+  - Unpackaged Win32 binaries require `Package` to be null/empty; restrictive AppContainer package SIDs are rejected.
+  - `IcmpType` and `DynamicTarget` require unrestricted `Any` (or `0`).
+- **Lossless PowerShell-to-Python Field-State Serialization (`Get-CimFieldRecord`, `CimFieldRecord`)**:
+  - Replaced lossy PowerShell string casting with structured field-state records distinguishing:
+    - `PROPERTY_PRESENT_WITH_VALID_VALUE`
+    - `PROPERTY_PRESENT_WITH_NULL`
+    - `PROPERTY_MISSING`
+    - `PROPERTY_PRESENT_WITH_MALFORMED_VALUE`
+  - Preserves exact CIM types and maps directly into typed `CimFieldRecord` models in Python.
+- **CIM Filter Association Integrity (`Count -eq 1`)**:
+  - PowerShell inspection confirms that each of the 7 associated filter cmdlets returns exactly 1 associated CIM filter object per rule (`Count -eq 1`). Any association count mismatch immediately fails closed.
+- **Strict Versioned JSON Envelope (`SchemaVersion: 1`)**:
+  - Response envelope enforces `SchemaVersion: 1`, `Success`, `InspectionComplete`, `PolicyStore`, `Profiles`, `Rules`, `BypassRules`, and `Errors`. Unsupported schema versions fail closed.
+- **ActiveStore Conflicting Bypass Evaluation (`OverrideBlockRules == True`)**:
+  - ActiveStore inspection queries Outbound Allow rules targeting `tsukiko.exe` where `OverrideBlockRules` is `$true`. If present, populated in `BypassRules` and rejected from `os_policy_active`.
+- **Elimination of Incomplete Fallbacks**:
+  - Removed netsh fallback for rule queries and policy verification. Netsh cannot inspect CIM filter objects or ActiveStore effective policy. If NetSecurity is unavailable, queries fail closed (`success=False`), mapping directly to `os_policy_unverified`.
+- **Unified Rule Verification (`verify_firewall_rule`)**:
+  - Refactored `verify_firewall_rule()` to query the policy store via NetSecurity and validate rule ownership, active profiles, and all 18 CIM filter properties.
+- **Enhanced 5-Stage Read-Only Smoke Test (`scripts/verify_windows_firewall_inspection.py`)**:
+  - Validates ActiveStore profiles, retrieves real rules, verifies 26 required fields (8 rule + 18 filter fields), checks boolean serialization, and runs 11 synthetic parser rejection tests. Strictly read-only on live Windows host.
+- **Expanded Test Suite (`tests/test_windows_firewall.py`)**:
+  - Added 18-property parameterized matrix tests and 8 integration tests covering bypass rules, filter association count mismatches, envelope schema versions, missing/null rules, PowerShell absence, and restrictive package/icmp/dynamic targets.
+  - Total test suite expanded to 241 collected items (237 passed, 4 skipped on Windows; all 241 passed on Linux).
 
 ### Added
 - **Exact NetSecurity CIM Security Filter Properties (`app/core/privacy/windows_firewall.py`)**:

@@ -24,6 +24,9 @@ from app.core.privacy.windows_firewall import (
     RULE_GROUPING,
     RULE_OWNERSHIP_MARKER,
     STABLE_RULE_ID,
+    CimFieldRecord,
+    CimFieldState,
+    FirewallParseError,
     FirewallQueryResult,
     FirewallRuleInfo,
     SecurityStatus,
@@ -283,19 +286,14 @@ def test_validate_firewall_profiles_any():
 
 
 def test_verify_firewall_rule_rejects_missing_profiles_field(temp_dir):
-    """Persistent rule verification fails if output has no Profiles line."""
+    """Persistent rule verification fails if output has no Profiles property."""
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    output = (
-        f"Rule Name: {DEFAULT_RULE_NAME}\n"
-        f"Grouping: {RULE_GROUPING}\n"
-        f"Description: {RULE_OWNERSHIP_MARKER} Offline privacy boundary\n"
-        f"Enabled: Yes\n"
-        f"Direction: Out\n"
-        f"Action: Block\n"
-        f"Program: {dedicated.resolve()}\n"
-    )
+    output = _make_powershell_query_json(rules=[{
+        "Program": str(dedicated.resolve()),
+        "Profiles": None,
+    }])
     with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output)):
         ok, reason = verify_firewall_rule(dedicated)
         assert ok is False
@@ -307,16 +305,10 @@ def test_verify_firewall_rule_rejects_empty_profiles_field(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    output = (
-        f"Rule Name: {DEFAULT_RULE_NAME}\n"
-        f"Grouping: {RULE_GROUPING}\n"
-        f"Description: {RULE_OWNERSHIP_MARKER} Offline privacy boundary\n"
-        f"Profiles: \n"
-        f"Enabled: Yes\n"
-        f"Direction: Out\n"
-        f"Action: Block\n"
-        f"Program: {dedicated.resolve()}\n"
-    )
+    output = _make_powershell_query_json(rules=[{
+        "Program": str(dedicated.resolve()),
+        "Profiles": "",
+    }])
     with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output)):
         ok, reason = verify_firewall_rule(dedicated)
         assert ok is False
@@ -328,16 +320,10 @@ def test_verify_firewall_rule_rejects_incomplete_profiles(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    output = (
-        f"Rule Name: {DEFAULT_RULE_NAME}\n"
-        f"Grouping: {RULE_GROUPING}\n"
-        f"Description: {RULE_OWNERSHIP_MARKER} Offline privacy boundary\n"
-        f"Profiles: Public\n"
-        f"Enabled: Yes\n"
-        f"Direction: Out\n"
-        f"Action: Block\n"
-        f"Program: {dedicated.resolve()}\n"
-    )
+    output = _make_powershell_query_json(rules=[{
+        "Program": str(dedicated.resolve()),
+        "Profiles": "Public",
+    }])
     with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output)):
         ok, reason = verify_firewall_rule(dedicated)
         assert ok is False
@@ -354,7 +340,10 @@ def _make_powershell_activestore_json(
     success: bool = True,
     inspection_complete: bool = True,
     error: str | None = None,
+    errors: list[str] | None = None,
+    bypass_rules: list[dict] | None = None,
     raw_rules: bool = False,
+    schema_version: int = 1,
 ) -> str:
     """Helper to generate mock PowerShell ActiveStore JSON payload with response envelope."""
     if profiles_status is None:
@@ -379,11 +368,14 @@ def _make_powershell_activestore_json(
                     "Action": "Block",
                     "Profiles": "Domain,Private,Public",
                     "Program": "C:\\Tsukiko\\tsukiko.exe",
+                    "Package": None,
                     "LocalAddress": "Any",
                     "RemoteAddress": "Any",
                     "Protocol": "Any",
                     "LocalPort": "Any",
                     "RemotePort": "Any",
+                    "IcmpType": "Any",
+                    "DynamicTarget": "Any",
                     "Service": "Any",
                     "InterfaceAlias": "Any",
                     "InterfaceType": "Any",
@@ -398,10 +390,14 @@ def _make_powershell_activestore_json(
                 merged.update(r)
                 full_rules.append(merged)
     return json.dumps({
+        "SchemaVersion": schema_version,
         "Success": success,
         "InspectionComplete": inspection_complete,
+        "PolicyStore": "ActiveStore",
         "Profiles": profiles_status,
         "Rules": full_rules,
+        "BypassRules": bypass_rules or [],
+        "Errors": errors if errors is not None else ([error] if error else []),
         "Error": error,
     })
 
@@ -411,7 +407,11 @@ def _make_powershell_query_json(
     success: bool = True,
     inspection_complete: bool = True,
     error: str | None = None,
+    errors: list[str] | None = None,
+    bypass_rules: list[dict] | None = None,
     raw_rules: bool = False,
+    policy_store: str = "PersistentStore",
+    schema_version: int = 1,
 ) -> str:
     """Helper to generate mock PowerShell query JSON payload with response envelope."""
     full_rules = []
@@ -430,11 +430,14 @@ def _make_powershell_query_json(
                     "Action": "Block",
                     "Profiles": "Domain,Private,Public",
                     "Program": "C:\\Tsukiko\\tsukiko.exe",
+                    "Package": None,
                     "LocalAddress": "Any",
                     "RemoteAddress": "Any",
                     "Protocol": "Any",
                     "LocalPort": "Any",
                     "RemotePort": "Any",
+                    "IcmpType": "Any",
+                    "DynamicTarget": "Any",
                     "Service": "Any",
                     "InterfaceAlias": "Any",
                     "InterfaceType": "Any",
@@ -449,9 +452,13 @@ def _make_powershell_query_json(
                 merged.update(r)
                 full_rules.append(merged)
     return json.dumps({
+        "SchemaVersion": schema_version,
         "Success": success,
         "InspectionComplete": inspection_complete,
+        "PolicyStore": policy_store,
         "Rules": full_rules,
+        "BypassRules": bypass_rules or [],
+        "Errors": errors if errors is not None else ([error] if error else []),
         "Error": error,
     })
 
@@ -1097,23 +1104,19 @@ def test_verify_firewall_rule_matches_all_properties(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    mock_netsh_output = (
-        f"Rule Name:                            {DEFAULT_RULE_NAME}\n"
-        f"----------------------------------------------------------------------\n"
-        f"Enabled:                              Yes\n"
-        f"Direction:                            Out\n"
-        f"Profiles:                             Domain,Private,Public\n"
-        f"Grouping:                             {RULE_GROUPING}\n"
-        f"LocalIP:                              Any\n"
-        f"RemoteIP:                             Any\n"
-        f"Protocol:                             Any\n"
-        f"Edge traversal:                       No\n"
-        f"Action:                               Block\n"
-        f"Program:                              {dedicated.resolve()}\n"
-        f"Description:                          {RULE_OWNERSHIP_MARKER} Offline privacy boundary\n"
-    )
+    mock_json = _make_powershell_query_json(rules=[{
+        "Name": STABLE_RULE_ID,
+        "DisplayName": DEFAULT_RULE_NAME,
+        "Group": RULE_GROUPING,
+        "Description": f"{RULE_OWNERSHIP_MARKER} Offline privacy boundary",
+        "Enabled": True,
+        "Direction": "Outbound",
+        "Action": "Block",
+        "Profiles": "Domain,Private,Public",
+        "Program": str(dedicated.resolve()),
+    }])
     mock_proc = subprocess.CompletedProcess(
-        args=["netsh"], returncode=0, stdout=mock_netsh_output, stderr=""
+        args=["powershell"], returncode=0, stdout=mock_json, stderr=""
     )
     with patch("subprocess.run", return_value=mock_proc):
         verified, reason = verify_firewall_rule(dedicated, rule_name=DEFAULT_RULE_NAME)
@@ -1126,17 +1129,18 @@ def test_verify_firewall_rule_rejects_unowned_or_foreign_rule(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    unowned_output = (
-        f"Rule Name:                            {DEFAULT_RULE_NAME}\n"
-        f"Enabled:                              Yes\n"
-        f"Direction:                            Out\n"
-        f"Profiles:                             Domain,Private,Public\n"
-        f"Grouping:                             \n"
-        f"Action:                               Block\n"
-        f"Program:                              {dedicated.resolve()}\n"
-        f"Description:                          Unrelated custom rule\n"
-    )
-    mock_proc = subprocess.CompletedProcess(args=["netsh"], returncode=0, stdout=unowned_output, stderr="")
+    unowned_json = _make_powershell_query_json(rules=[{
+        "Name": DEFAULT_RULE_NAME,
+        "DisplayName": DEFAULT_RULE_NAME,
+        "Group": "",
+        "Description": "Unrelated custom rule",
+        "Enabled": True,
+        "Direction": "Outbound",
+        "Action": "Block",
+        "Profiles": "Domain,Private,Public",
+        "Program": str(dedicated.resolve()),
+    }])
+    mock_proc = subprocess.CompletedProcess(args=["powershell"], returncode=0, stdout=unowned_json, stderr="")
     with patch("subprocess.run", return_value=mock_proc):
         verified, reason = verify_firewall_rule(dedicated, rule_name=DEFAULT_RULE_NAME)
         assert verified is False
@@ -1148,31 +1152,24 @@ def test_verify_firewall_rule_rejects_mismatched_properties(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    base_header = (
-        f"Rule Name: {DEFAULT_RULE_NAME}\n"
-        f"Grouping: {RULE_GROUPING}\n"
-        f"Description: {RULE_OWNERSHIP_MARKER} Boundary\n"
-        f"Profiles: Domain,Private,Public\n"
-    )
-
     # 1. Action is Allow instead of Block
-    output_allow = f"{base_header}Enabled: Yes\nDirection: Out\nAction: Allow\nProgram: {dedicated.resolve()}\n"
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output_allow)):
+    json_allow = _make_powershell_query_json(rules=[{"Action": "Allow", "Program": str(dedicated.resolve())}])
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=json_allow)):
         assert verify_firewall_rule(dedicated, rule_name=DEFAULT_RULE_NAME)[0] is False
 
     # 2. Direction is In instead of Out
-    output_in = f"{base_header}Enabled: Yes\nDirection: In\nAction: Block\nProgram: {dedicated.resolve()}\n"
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output_in)):
+    json_in = _make_powershell_query_json(rules=[{"Direction": "In", "Program": str(dedicated.resolve())}])
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=json_in)):
         assert verify_firewall_rule(dedicated, rule_name=DEFAULT_RULE_NAME)[0] is False
 
     # 3. Enabled is No
-    output_disabled = f"{base_header}Enabled: No\nDirection: Out\nAction: Block\nProgram: {dedicated.resolve()}\n"
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output_disabled)):
+    json_disabled = _make_powershell_query_json(rules=[{"Enabled": False, "Program": str(dedicated.resolve())}])
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=json_disabled)):
         assert verify_firewall_rule(dedicated, rule_name=DEFAULT_RULE_NAME)[0] is False
 
     # 4. Program mismatch
-    output_mismatched_exe = f"{base_header}Enabled: Yes\nDirection: Out\nAction: Block\nProgram: C:\\other\\app.exe\n"
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=output_mismatched_exe)):
+    json_mismatched_exe = _make_powershell_query_json(rules=[{"Program": "C:\\other\\app.exe"}])
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=json_mismatched_exe)):
         verified, reason = verify_firewall_rule(dedicated, rule_name=DEFAULT_RULE_NAME)
         assert verified is False
         assert "Rule program mismatch" in reason
@@ -1228,7 +1225,9 @@ def test_security_status_os_policy_not_configured(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout="No rules match")):
+    empty_json = _make_powershell_query_json(rules=[])
+    with patch("app.core.privacy.windows_firewall.verify_effective_firewall_policy", return_value=(False, "Rule does not exist")), \
+         patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=empty_json)):
         status = get_security_status(dedicated)
         assert status.status == "os_policy_not_configured"
         assert status.is_dedicated_binary is True
@@ -1240,21 +1239,24 @@ def test_security_status_os_policy_unverified(temp_dir):
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    mismatched_output = (
-        f"Rule Name: {DEFAULT_RULE_NAME}\n"
-        f"Grouping: {RULE_GROUPING}\n"
-        f"Description: {RULE_OWNERSHIP_MARKER} Test\n"
-        f"Profiles: Domain,Private,Public\n"
-        f"Enabled: Yes\nDirection: Out\nAction: Block\nProgram: {dedicated.resolve()}\n"
-    )
-    # verify_effective_firewall_policy fails (returns False), but verify_firewall_rule or candidates succeed
+    persistent_json = _make_powershell_query_json(rules=[{
+        "Name": DEFAULT_RULE_NAME,
+        "DisplayName": DEFAULT_RULE_NAME,
+        "Group": RULE_GROUPING,
+        "Description": f"{RULE_OWNERSHIP_MARKER} Test",
+        "Profiles": "Domain,Private,Public",
+        "Enabled": True,
+        "Direction": "Outbound",
+        "Action": "Block",
+        "Program": str(dedicated.resolve()),
+    }])
     with patch("app.core.privacy.windows_firewall.verify_effective_firewall_policy", return_value=(False, "ActiveStore query failed")), \
-         patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mismatched_output)):
+         patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=persistent_json)):
         status = get_security_status(dedicated)
         assert status.status == "os_policy_unverified"
         assert status.is_dedicated_binary is True
         assert status.rule_exists is True
-        assert "ActiveStore query failed" in status.details or "could not establish" in status.details
+        assert "ActiveStore query failed" in status.details or "could not be established" in status.details
 
 
 def test_security_status_os_policy_active(temp_dir):
@@ -1652,11 +1654,14 @@ def test_defect_a_override_block_rules_null_rejected(temp_dir):
 
     raw_json = {
         "Program": str(dedicated),
+        "Package": None,
         "LocalAddress": "Any",
         "RemoteAddress": "Any",
         "Protocol": "Any",
         "LocalPort": "Any",
         "RemotePort": "Any",
+        "IcmpType": "Any",
+        "DynamicTarget": "Any",
         "Service": "Any",
         "InterfaceAlias": "Any",
         "InterfaceType": "Any",
@@ -1683,11 +1688,14 @@ def test_defect_a_override_block_rules_malformed_rejected(temp_dir):
     for malformed in ["not_a_boolean", "maybe", 42]:
         raw_json = {
             "Program": str(dedicated),
+            "Package": None,
             "LocalAddress": "Any",
             "RemoteAddress": "Any",
             "Protocol": "Any",
             "LocalPort": "Any",
             "RemotePort": "Any",
+            "IcmpType": "Any",
+            "DynamicTarget": "Any",
             "Service": "Any",
             "InterfaceAlias": "Any",
             "InterfaceType": "Any",
@@ -1753,11 +1761,14 @@ def test_defect_a_missing_security_filter_properties_rejected(temp_dir, sec_fiel
 
     full_dict = {
         "Program": str(dedicated),
+        "Package": None,
         "LocalAddress": "Any",
         "RemoteAddress": "Any",
         "Protocol": "Any",
         "LocalPort": "Any",
         "RemotePort": "Any",
+        "IcmpType": "Any",
+        "DynamicTarget": "Any",
         "Service": "Any",
         "InterfaceAlias": "Any",
         "InterfaceType": "Any",
@@ -1783,11 +1794,14 @@ def test_defect_a_plural_property_names_rejected(temp_dir):
 
     plural_only_dict = {
         "Program": str(dedicated),
+        "Package": None,
         "LocalAddress": "Any",
         "RemoteAddress": "Any",
         "Protocol": "Any",
         "LocalPort": "Any",
         "RemotePort": "Any",
+        "IcmpType": "Any",
+        "DynamicTarget": "Any",
         "Service": "Any",
         "InterfaceAlias": "Any",
         "InterfaceType": "Any",
@@ -1817,11 +1831,14 @@ def test_defect_a_plural_property_names_rejected(temp_dir):
 
 FILTER_PROPERTY_MATRIX = [
     ("Program", "C:\\test\\valid.exe", "", "*"),
+    ("Package", None, "Microsoft.WindowsStore_8wekyb3d8bbwe", "S-1-15-2-1"),
     ("LocalAddress", "Any", "192.168.1.1", "10.0.0.0/8"),
     ("RemoteAddress", "Any", "8.8.8.8", "172.16.0.0/12"),
     ("Protocol", "Any", "TCP", "UDP"),
     ("LocalPort", "Any", "80", "443"),
     ("RemotePort", "Any", "8080", "53"),
+    ("IcmpType", "Any", "8", "Echo"),
+    ("DynamicTarget", "Any", "WifiDirectPrinting", "ProximityBySharing"),
     ("Service", "Any", "Spooler", "Dhcp"),
     ("InterfaceAlias", "Any", "Ethernet 1", "Wi-Fi"),
     ("InterfaceType", "Any", "Wireless", "RemoteAccess"),
@@ -1842,11 +1859,14 @@ def test_defect_b_parameterized_filter_matrix_explicit_unrestricted(temp_dir, pr
 
     full_dict = {
         "Program": str(dedicated),
+        "Package": None,
         "LocalAddress": "Any",
         "RemoteAddress": "Any",
         "Protocol": "Any",
         "LocalPort": "Any",
         "RemotePort": "Any",
+        "IcmpType": "Any",
+        "DynamicTarget": "Any",
         "Service": "Any",
         "InterfaceAlias": "Any",
         "InterfaceType": "Any",
@@ -1871,28 +1891,32 @@ def test_defect_b_parameterized_filter_matrix_restrictive_rejected(temp_dir, pro
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
-    full_dict = {
-        "Program": str(dedicated),
-        "LocalAddress": "Any",
-        "RemoteAddress": "Any",
-        "Protocol": "Any",
-        "LocalPort": "Any",
-        "RemotePort": "Any",
-        "Service": "Any",
-        "InterfaceAlias": "Any",
-        "InterfaceType": "Any",
-        "Authentication": "NotRequired",
-        "Encryption": "NotRequired",
-        "OverrideBlockRules": False,
-        "LocalUser": "Any",
-        "RemoteUser": "Any",
-        "RemoteMachine": "Any",
-    }
-    full_dict[prop_name] = restrictive_val
-    rules = parse_powershell_rules_json(full_dict)
-    assert len(rules) == 1
-    ok, msg = validate_firewall_filters(rules[0], dedicated)
-    assert ok is False, f"Expected rejection for restrictive {prop_name}={restrictive_val}, but passed!"
+    for val in [restrictive_val, alt_restrictive]:
+        full_dict = {
+            "Program": str(dedicated),
+            "Package": None,
+            "LocalAddress": "Any",
+            "RemoteAddress": "Any",
+            "Protocol": "Any",
+            "LocalPort": "Any",
+            "RemotePort": "Any",
+            "IcmpType": "Any",
+            "DynamicTarget": "Any",
+            "Service": "Any",
+            "InterfaceAlias": "Any",
+            "InterfaceType": "Any",
+            "Authentication": "NotRequired",
+            "Encryption": "NotRequired",
+            "OverrideBlockRules": False,
+            "LocalUser": "Any",
+            "RemoteUser": "Any",
+            "RemoteMachine": "Any",
+        }
+        full_dict[prop_name] = val
+        rules = parse_powershell_rules_json(full_dict)
+        assert len(rules) == 1
+        ok, msg = validate_firewall_filters(rules[0], dedicated)
+        assert ok is False, f"Expected rejection for restrictive {prop_name}={val!r}, but passed!"
 
 
 @pytest.mark.parametrize("prop_name,unrestricted_val,restrictive_val,alt_restrictive", FILTER_PROPERTY_MATRIX)
@@ -1903,11 +1927,14 @@ def test_defect_b_parameterized_filter_matrix_missing_rejected(temp_dir, prop_na
 
     full_dict = {
         "Program": str(dedicated),
+        "Package": None,
         "LocalAddress": "Any",
         "RemoteAddress": "Any",
         "Protocol": "Any",
         "LocalPort": "Any",
         "RemotePort": "Any",
+        "IcmpType": "Any",
+        "DynamicTarget": "Any",
         "Service": "Any",
         "InterfaceAlias": "Any",
         "InterfaceType": "Any",
@@ -1927,17 +1954,20 @@ def test_defect_b_parameterized_filter_matrix_missing_rejected(temp_dir, prop_na
 
 @pytest.mark.parametrize("prop_name,unrestricted_val,restrictive_val,alt_restrictive", FILTER_PROPERTY_MATRIX)
 def test_defect_b_parameterized_filter_matrix_null_rejected(temp_dir, prop_name, unrestricted_val, restrictive_val, alt_restrictive):
-    """Null (None) property in JSON must never manufacture default and must fail verification closed."""
+    """Null (None) property in JSON: Package=None is valid unrestricted for Win32; all other 17 properties fail closed."""
     dedicated = temp_dir / "tsukiko.exe"
     _create_mock_pe_executable(dedicated)
 
     full_dict = {
         "Program": str(dedicated),
+        "Package": None,
         "LocalAddress": "Any",
         "RemoteAddress": "Any",
         "Protocol": "Any",
         "LocalPort": "Any",
         "RemotePort": "Any",
+        "IcmpType": "Any",
+        "DynamicTarget": "Any",
         "Service": "Any",
         "InterfaceAlias": "Any",
         "InterfaceType": "Any",
@@ -1952,7 +1982,10 @@ def test_defect_b_parameterized_filter_matrix_null_rejected(temp_dir, prop_name,
     rules = parse_powershell_rules_json(full_dict)
     assert len(rules) == 1
     ok, msg = validate_firewall_filters(rules[0], dedicated)
-    assert ok is False, f"Expected rejection when {prop_name} is null, but passed!"
+    if prop_name == "Package":
+        assert ok is True, f"Expected Package=None to pass for standard Win32 binary, got error: {msg}"
+    else:
+        assert ok is False, f"Expected rejection when {prop_name} is null, but passed!"
 
 
 # =====================================================================
@@ -2089,4 +2122,148 @@ def test_defect_c_remove_firewall_rule_refuses_when_post_deletion_incomplete():
         assert ok is False
         assert "post-deletion inspection failed" in reason
         assert "PowerShell execution timeout" in reason
+
+
+# =====================================================================
+# 15. Complete NetSecurity CIM Filter Schema & Bypass Evaluation Tests
+# =====================================================================
+
+def test_activestore_bypass_outbound_allow_override_block_rules_rejects(temp_dir):
+    """When ActiveStore contains an Outbound Allow rule with OverrideBlockRules=True, effective policy fails closed."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    mock_json = _make_powershell_activestore_json(
+        rules=[{
+            "Name": STABLE_RULE_ID,
+            "DisplayName": DEFAULT_RULE_NAME,
+            "Program": str(dedicated.resolve()),
+        }],
+        bypass_rules=[{
+            "Name": "Admin_Bypass_Allow",
+            "DisplayName": "Admin Bypass Allow",
+            "Program": str(dedicated.resolve()),
+            "OverrideBlockRules": True,
+        }],
+    )
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=mock_json)):
+        ok, reason = verify_effective_firewall_policy(dedicated)
+        assert ok is False
+        assert "Conflicting outbound bypass Allow rule 'Admin Bypass Allow'" in reason
+        assert "OverrideBlockRules=True detected in ActiveStore" in reason
+
+
+def test_filter_association_count_mismatch_fails_closed():
+    """When any associated filter cmdlet returns != 1 object, PowerShell query fails closed."""
+    mock_fail = subprocess.CompletedProcess(
+        args=["powershell"],
+        returncode=1,
+        stdout=json.dumps({
+            "SchemaVersion": 1,
+            "Success": False,
+            "InspectionComplete": False,
+            "Rules": [],
+            "BypassRules": [],
+            "Errors": ["Application filter association integrity failure for rule 'TestRule': expected 1 filter object, got 2"],
+        }),
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_fail):
+        res = query_matching_firewall_rules(DEFAULT_RULE_NAME)
+        assert res.success is False
+        assert res.inspection_complete is False
+        assert "association integrity failure" in res.error
+
+
+def test_envelope_unsupported_schema_version_fails_closed():
+    """Unsupported SchemaVersion (e.g. 2 or 0) raises FirewallParseError / fails closed."""
+    bad_schema_json = json.dumps({
+        "SchemaVersion": 2,
+        "Success": True,
+        "InspectionComplete": True,
+        "Rules": [],
+    })
+    with pytest.raises(FirewallParseError) as exc:
+        parse_powershell_rules_json(json.loads(bad_schema_json))
+    assert "Unsupported schema version: 2" in str(exc.value)
+
+    mock_proc = subprocess.CompletedProcess(args=["powershell"], returncode=0, stdout=bad_schema_json)
+    with patch("subprocess.run", return_value=mock_proc):
+        res = query_matching_firewall_rules(DEFAULT_RULE_NAME)
+        assert res.success is False
+        assert res.inspection_complete is False
+        assert "Unsupported schema version" in res.error
+
+
+def test_envelope_missing_or_null_rules_fails_closed():
+    """Null or non-list Rules property in envelope fails closed."""
+    null_rules = json.dumps({
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "Rules": None,
+    })
+    with pytest.raises(FirewallParseError) as exc:
+        parse_powershell_rules_json(json.loads(null_rules))
+    assert "Rules property is missing or null" in str(exc.value)
+
+    invalid_type_rules = json.dumps({
+        "SchemaVersion": 1,
+        "Success": True,
+        "InspectionComplete": True,
+        "Rules": "invalid_not_a_list",
+    })
+    with pytest.raises(FirewallParseError) as exc:
+        parse_powershell_rules_json(json.loads(invalid_type_rules))
+    assert "Rules property must be a list" in str(exc.value)
+
+
+def test_query_matching_firewall_rules_without_powershell_fails_closed():
+    """When PowerShell is not available, query_matching_firewall_rules strictly fails closed (no netsh fallback)."""
+    with patch("shutil.which", return_value=None):
+        res = query_matching_firewall_rules(DEFAULT_RULE_NAME)
+        assert res.success is False
+        assert res.inspection_complete is False
+        assert "PowerShell is not available on PATH" in res.error
+
+
+def test_security_status_fails_closed_to_os_policy_unverified_when_powershell_unavailable(temp_dir):
+    """When PowerShell is unavailable, security status reports os_policy_unverified."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    with patch("shutil.which", return_value=None):
+        status = get_security_status(dedicated)
+        assert status.status == "os_policy_unverified"
+        assert status.is_dedicated_binary is True
+        assert status.rule_exists is False
+        assert "inspection failed" in status.details
+
+
+def test_validate_firewall_filters_rejects_restricted_package(temp_dir):
+    """Reject AppContainer package restriction on standard Win32 binary."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    r = FirewallRuleInfo.create_unrestricted(program=str(dedicated), package="Microsoft.WindowsStore_8wekyb3d8bbwe")
+    ok, msg = validate_firewall_filters(r, dedicated)
+    assert ok is False
+    assert "restricts package" in msg
+
+
+def test_validate_firewall_filters_rejects_restricted_icmp_and_dynamic_target(temp_dir):
+    """Reject restrictive IcmpType or DynamicTarget."""
+    dedicated = temp_dir / "tsukiko.exe"
+    _create_mock_pe_executable(dedicated)
+
+    r1 = FirewallRuleInfo.create_unrestricted(program=str(dedicated), icmp_type="8")
+    ok, msg = validate_firewall_filters(r1, dedicated)
+    assert ok is False
+    assert "restricts ICMP type" in msg
+
+    r2 = FirewallRuleInfo.create_unrestricted(program=str(dedicated), dynamic_target="WifiDirectPrinting")
+    ok, msg = validate_firewall_filters(r2, dedicated)
+    assert ok is False
+    assert "restricts dynamic target" in msg
+
 

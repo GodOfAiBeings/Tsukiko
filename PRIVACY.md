@@ -16,7 +16,7 @@ Tsukiko is built with a zero-trust, privacy-first architecture. This document de
 | **Deterministic Fail-Closed DNS** | **Implemented & Tested** | `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, and `getnameinfo` fail closed on all external destinations. No unrestricted fallback queries. | `tests/test_privacy_enforcement.py::test_localhost_deterministic_dns_resolution`, `test_external_dns_requests_strictly_blocked` |
 | **Windows Firewall Rule Ownership & Safe Deletion** | **Implemented & Tested** | Unique rule identity (`Tsukiko Outbound Privacy Boundary`), Stable ID (`Tsukiko_Privacy_Outbound_Block`), Grouping (`Tsukiko Desktop Companion`), and Description marker (`[Tsukiko-Privacy-Core:Outbound-Block]`). Enumerates multiple rules, safely deletes single owned rules, refuses foreign deletion, and halts on ambiguous candidates. | `tests/test_windows_firewall.py` (Safe Deletion & Ownership tests) |
 | **Fail-Closed Firewall Profile Validation** | **Implemented & Tested** | `validate_firewall_profiles()` strictly fails closed on missing, empty, unknown, or partial profiles. Only `Any` or `Domain,Private,Public` are accepted. | `tests/test_windows_firewall.py` (Profile Validation tests) |
-| **ActiveStore Effective Policy Verification** | **Implemented & Tested** | `verify_effective_firewall_policy()` inspects PowerShell NetSecurity ActiveStore view. Verifies all profiles are enabled, local rule merging is permitted (`AllowLocalFirewallRules`), and effective Outbound Block rule is active. | `tests/test_windows_firewall.py` (ActiveStore tests) |
+| **ActiveStore Effective Policy Verification** | **Implemented & Tested** | `verify_effective_firewall_policy()` inspects PowerShell NetSecurity ActiveStore view. Verifies all profiles are enabled, local rule merging is permitted (`AllowLocalFirewallRules`), effective Outbound Block rule is active with all 18 CIM filter properties unrestricted, and no conflicting bypass Outbound Allow rules (`OverrideBlockRules=True`) exist. | `tests/test_windows_firewall.py` (ActiveStore & Bypass tests) |
 | **Windows PE Binary Structure Validation** | **Implemented & Tested** | `validate_pe_structure()` verifies minimum 64-byte DOS header, `MZ` magic, 32-bit `e_lfanew` offset at `0x3C`, bounds `0x40 <= pe_offset <= file_size - 4`, and `PE\0\0` signature. | `tests/test_windows_firewall.py` (PE Structure tests) |
 | **Native sendmsg Communication (where supported)** | **Implemented & Tested** | Real TCP and UDP `sendmsg` data exchange on loopback, and strict rejection of external destinations on supported platforms (Linux), with clean test skipping on Windows. | `tests/test_privacy_enforcement.py::test_real_connected_tcp_sendmsg`, `test_real_udp_explicit_destination_sendmsg`, `test_real_sendmsg_rejects_external_destination` |
 | **Persistent Guard Lifecycle & Atomic Rollback** | **Implemented & Tested** | Offline guard installs atomically with rollback on failure. Protection persists for process lifetime; orchestrator `stop()` does not disable it. | `tests/test_privacy_enforcement.py::test_guard_activation_failure_atomic_rollback` |
@@ -86,17 +86,38 @@ Tsukiko strictly validates network profiles and distinguishes persistent rules f
   * Only rules explicitly covering `Any` or all three profiles (`Domain,Private,Public`) are accepted.
 * **ActiveStore Effective Policy (`verify_effective_firewall_policy`):**
   * Queries PowerShell NetSecurity `ActiveStore` policy store via static script using process environment variables.
+  * Enforces versioned JSON response envelope (`SchemaVersion: 1`, `PolicyStore`, `BypassRules`, `Errors`).
   * Verifies all three network profiles (`Domain`, `Private`, `Public`) are enabled in ActiveStore.
   * Verifies local firewall rule merging is allowed (`AllowLocalFirewallRules` is true) and not blocked by corporate GPO.
   * Confirms that an effective Outbound Block rule exists in ActiveStore, is enabled, outbound, blocking, covers all profiles, and matches the target binary.
-  * Verifies all 7 outbound filter categories are unrestricted (`validate_firewall_filters`):
-    1. **Application Filter (`Get-NetFirewallApplicationFilter`)**: Matches the dedicated deployment binary path (`tsukiko.exe`). Wildcards and empty targets are rejected.
-    2. **Address Filter (`Get-NetFirewallAddressFilter`)**: Both `LocalAddress` and `RemoteAddress` cover `Any`. Any specific IP, subnet, or keyword restriction is rejected.
-    3. **Port & Protocol Filter (`Get-NetFirewallPortFilter`)**: `Protocol`, `LocalPort`, and `RemotePort` cover `Any`. Port or protocol limits fail verification.
-    4. **Service Filter (`Get-NetFirewallServiceFilter`)**: Applies to all services (`Any`).
-    5. **Interface Filter (`Get-NetFirewallInterfaceFilter`)**: Applies to all interfaces (`Any`).
-    6. **Interface-Type Filter (`Get-NetFirewallInterfaceTypeFilter`)**: Applies to all interface types (`Any`).
-    7. **Security Filter (`Get-NetFirewallSecurityFilter`)**: Requires no authentication (`NotRequired`), encryption (`NotRequired`), explicit boolean verification that `OverrideBlockRules` is `False` (blocking rules cannot be bypassed), and unrestricted user/machine scopes (`LocalUser`, `RemoteUser`, and `RemoteMachine` covering `Any`). Rejects missing, null, unrecognized, or legacy plural properties.
+  * Evaluates ActiveStore for conflicting Outbound Allow bypass rules: checks for active Outbound Allow rules targeting `tsukiko.exe` where `OverrideBlockRules` is `$true`. If present, reports bypass conflict and rejects `os_policy_active`.
+  * Verifies all 18 outbound filter properties across all 7 categories are unrestricted (`validate_firewall_filters`):
+    1. **Application Filter (`Get-NetFirewallApplicationFilter`)**:
+       - `Program`: Matches the dedicated deployment binary path (`tsukiko.exe`). Wildcards and empty targets are rejected.
+       - `Package`: Unrestricted for Win32 unpackaged binaries requires null/empty package SID. Restrictive AppContainer package SIDs are rejected.
+    2. **Address Filter (`Get-NetFirewallAddressFilter`)**:
+       - `LocalAddress`: Covers `Any`. Any specific IP, subnet, or keyword restriction is rejected.
+       - `RemoteAddress`: Covers `Any`. Any specific IP, subnet, or keyword restriction is rejected.
+    3. **Port & Protocol Filter (`Get-NetFirewallPortFilter`)**:
+       - `Protocol`: Covers `Any`.
+       - `LocalPort`: Covers `Any`.
+       - `RemotePort`: Covers `Any`.
+       - `IcmpType`: Covers `Any` (or `0`). Restrictive ICMP type filters are rejected.
+       - `DynamicTarget`: Covers `Any`. Dynamic targets (e.g., ProximityBySharing, WifiDirect) are rejected.
+    4. **Service Filter (`Get-NetFirewallServiceFilter`)**:
+       - `Service`: Applies to all services (`Any`).
+    5. **Interface Filter (`Get-NetFirewallInterfaceFilter`)**:
+       - `InterfaceAlias`: Applies to all interfaces (`Any`).
+    6. **Interface-Type Filter (`Get-NetFirewallInterfaceTypeFilter`)**:
+       - `InterfaceType`: Applies to all interface types (`Any`).
+    7. **Security Filter (`Get-NetFirewallSecurityFilter`)**:
+       - `Authentication`: Requires `NotRequired`.
+       - `Encryption`: Requires `NotRequired`.
+       - `OverrideBlockRules`: Explicit boolean verification that `OverrideBlockRules` is strictly `False` (blocking rules cannot be bypassed).
+       - `LocalUser`: Covers `Any`.
+       - `RemoteUser`: Covers `Any`.
+       - `RemoteMachine`: Covers `Any`.
+  * Rejects missing, null, unrecognized, or legacy plural properties.
 
 ### D. Rule Ownership Identity, Safe Deletion & Query Results
 Tsukiko enforces a unique, documented rule ownership and query mechanism:
@@ -112,16 +133,25 @@ Tsukiko enforces a unique, documented rule ownership and query mechanism:
   * Foreign rules sharing the name prefix or display name are rejected and will never be deleted.
   * If multiple rules claim Tsukiko ownership, deletion halts with an ambiguous identity error requiring operator intervention.
   * Creation refuses to proceed if pre-creation inspection fails or if a conflicting foreign rule already exists.
-* **PowerShell Fail-Closed Response Envelope:**
+* **Lossless CIM Serialization & Association Integrity:**
+  * Inspection scripts query CIM objects using `Get-CimFieldRecord` helper, outputting structured records with explicit state:
+    - `PROPERTY_PRESENT_WITH_VALID_VALUE`
+    - `PROPERTY_PRESENT_WITH_NULL`
+    - `PROPERTY_MISSING`
+    - `PROPERTY_PRESENT_WITH_MALFORMED_VALUE`
+  * Eliminates lossy conversions (`[string]`, `[bool]`) in PowerShell that previously collapsed `$null` into empty strings or booleans into strings.
+  * Association integrity check confirms exactly 1 associated CIM filter object per category (`Count -eq 1`). Multiple or missing associated filter objects trigger immediate failure.
+* **PowerShell Fail-Closed Response Envelope (`SchemaVersion: 1`):**
   * Inspection scripts execute under `$ErrorActionPreference = 'Stop'` without `-ErrorAction SilentlyContinue`. Cmdlet failures, missing modules, or CIM filter errors trigger the catch handler, emit a structured error envelope, and terminate with exit code 1.
-  * Output is wrapped in a structured envelope: `{ "Success": bool, "InspectionComplete": bool, "Rules": [...], "Error": string|null }`.
-  * Python query handlers require both `Success=True` and `InspectionComplete=True`. Truncated output, empty stdout, malformed JSON, or missing envelope fields strictly fail closed (`success=False, inspection_complete=False`).
+  * Output is wrapped in a versioned envelope: `{ "SchemaVersion": 1, "Success": bool, "InspectionComplete": bool, "PolicyStore": string, "Profiles": [...], "Rules": [...], "BypassRules": [...], "Errors": [...] }`.
+  * Python query handlers require `SchemaVersion == 1`, `Success=True`, and `InspectionComplete=True`. Truncated output, empty stdout, malformed JSON, or missing envelope fields strictly fail closed (`success=False, inspection_complete=False`).
   * Empty output or query errors are never conflated with confirmed absence.
   * Pre-creation inspection requires complete, successful inspection before allowing rule creation; post-deletion verification requires complete, successful re-inspection to confirm rule elimination.
 * **Strict Missing-Value Semantics & Fail-Closed Parsing:**
   * The parser never manufactures unrestricted defaults (`"Any"`, `"NotRequired"`, `False`) when properties are missing or null.
-  * Distinguishes: (1) Explicitly verified unrestricted values, (2) Explicitly verified restrictive values, (3) Missing values (`None`), (4) Null values (`None`), and (5) Malformed values.
-  * Missing or null properties across all 14 filter properties in all 7 categories fail verification closed.
+  * All 18 required filter properties across all 7 categories are deserialized into typed `CimFieldRecord` models and validated with fail-closed semantics.
+* **No Incomplete Fallbacks:**
+  * `netsh advfirewall` is strictly prohibited from declaring complete inspection or evaluating security status. If PowerShell NetSecurity cmdlets are unavailable, queries fail closed (`success=False`), mapping directly to `os_policy_unverified`.
 * **Structured Query Result (`FirewallQueryResult`):**
   * Queries return a structured `FirewallQueryResult` distinguishing:
     * **Confirmed Absence**: `success=True`, `inspection_complete=True`, `rules=[]` (supports `os_policy_not_configured`).
