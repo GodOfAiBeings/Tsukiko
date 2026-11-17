@@ -796,6 +796,31 @@ class TestCharacterIdentityAndBiography:
         assert "mamushi" in TSUKIKO_BIOGRAPHY.death_incident.lower()
         assert TSUKIKO_BIOGRAPHY.present_name == "Tsukiko"
 
+    def test_long_form_canon_fields(self) -> None:
+        from app.core.personality.biography import TSUKIKO_BIOGRAPHY
+
+        # Verify all 12 required canonical milestones exist and contain rich historical ground truth
+        assert "Genzo" in TSUKIKO_BIOGRAPHY.childhood_and_family
+        assert "Masa" in TSUKIKO_BIOGRAPHY.childhood_and_family
+        assert "Kenkichi" in TSUKIKO_BIOGRAPHY.childhood_and_family
+        assert "gassho-zukuri" in TSUKIKO_BIOGRAPHY.village_environment_and_routines
+        assert "irori" in TSUKIKO_BIOGRAPHY.childhood_and_family
+        assert "Toyama" in TSUKIKO_BIOGRAPHY.self_education_journey
+        assert "charcoal" in TSUKIKO_BIOGRAPHY.self_education_journey
+        assert "mayflies" in TSUKIKO_BIOGRAPHY.nature_observation_development
+        assert "Mikan no Chizu" in TSUKIKO_BIOGRAPHY.unfinished_atlas_ambition
+        assert "marriage" in TSUKIKO_BIOGRAPHY.relationships_flaws_and_pride
+        assert "jealousy" in TSUKIKO_BIOGRAPHY.relationships_flaws_and_pride
+        assert "left ankle" in TSUKIKO_BIOGRAPHY.mamushi_snakebite_incident
+        assert "three days" in TSUKIKO_BIOGRAPHY.struggle_and_final_days
+        assert "rain" in TSUKIKO_BIOGRAPHY.final_moments_and_unfulfilled_dream
+        assert "laptop" in TSUKIKO_BIOGRAPHY.awakening_into_the_machine
+        assert "pragmatism" in TSUKIKO_BIOGRAPHY.modern_world_discovery
+
+        full_canon = TSUKIKO_BIOGRAPHY.get_full_canon_history()
+        assert len(full_canon) > 2000
+        assert "TSUKIKO / SAYO CANONICAL BIOGRAPHY" in full_canon
+
     def test_character_traits_flaws_and_nuances(self) -> None:
         from app.core.personality.biography import TSUKIKO_BIOGRAPHY
 
@@ -824,8 +849,7 @@ class TestCharacterIdentityAndBiography:
         engine = PersonalityEngine()
         prompt = engine.get_system_prompt()
         assert "Tsukiko (月子)" in prompt
-        assert "Sayo" in prompt or "adult woman" in prompt
-        assert "Shirakawa-go" in prompt or "living as a desktop companion" in prompt
+        assert "32 years of age" in prompt
 
 
 # ==============================================================================
@@ -843,48 +867,90 @@ class TestGradualSelfDisclosure:
         prompt = build_system_prompt(stage=tracker.stage)
 
         assert "Tsukiko (月子)" in prompt
-        assert "Do NOT state your former name (Sayo)" in prompt
-        assert "Do NOT mention the year 1814" in prompt
-        assert "mamushi snakebite upfront" in prompt
+        # Must NOT include restricted past-life autobiographical knowledge in Acquaintance stage
+        assert "Sayo" not in prompt
+        assert "1814" not in prompt
+        assert "1846" not in prompt
+        assert "Shirakawa" not in prompt
+        assert "mamushi" not in prompt
+        assert "snake" not in prompt
+        assert "bite" not in prompt
+        assert "Atlas" not in prompt
+        assert "death" not in prompt
 
     def test_familiar_stage_reveals_atlas_and_village_hints(self) -> None:
         from app.core.personality.disclosure import DisclosureStage
         from app.core.personality.prompts import build_system_prompt
 
         prompt = build_system_prompt(stage=DisclosureStage.FAMILIAR)
-        assert "snowy mountain village" in prompt
+        assert "snowy mountain" in prompt
         assert "Atlas" in prompt
-        assert "Still hold your birth name (Sayo) and tragic end close" in prompt
+        # Must still NOT reveal birth name Sayo or death details
+        assert "Sayo" not in prompt
+        assert "1814" not in prompt
+        assert "1846" not in prompt
+        assert "mamushi" not in prompt
+        assert "bite" not in prompt
+        assert "death" not in prompt
 
     def test_trusted_stage_reveals_birth_name_and_former_life(self) -> None:
         from app.core.personality.disclosure import DisclosureStage
         from app.core.personality.prompts import build_system_prompt
 
         prompt = build_system_prompt(stage=DisclosureStage.TRUSTED)
-        assert "birth name was Sayo" in prompt
-        assert "1814 in Shirakawa-go" in prompt
+        assert "Sayo" in prompt
+        assert "1814" in prompt
+        assert "Shirakawa-go" in prompt
         assert "silkworms" in prompt
+        # Must still NOT reveal the tragic snakebite or death struggle
+        assert "mamushi" not in prompt
+        assert "bite" not in prompt
+        assert "death" not in prompt
 
     def test_confidant_stage_reveals_mamushi_bite_and_passing(self) -> None:
         from app.core.personality.disclosure import DisclosureStage
         from app.core.personality.prompts import build_system_prompt
 
         prompt = build_system_prompt(stage=DisclosureStage.CONFIDANT)
-        assert "mamushi viper bite" in prompt
+        assert "Sayo" in prompt
+        assert "1814" in prompt
+        assert "mamushi" in prompt
         assert "1846" in prompt
-        assert "leaving the Atlas unfinished" in prompt
+        assert "fever" in prompt
+        assert "Atlas unfinished" in prompt
 
-    def test_automatic_progression_with_turns(self) -> None:
+    def test_progression_requires_meaningful_rapport_not_just_turn_counts(self) -> None:
         from app.core.personality.disclosure import DisclosureStage, DisclosureTracker
 
         tracker = DisclosureTracker(initial_stage=DisclosureStage.ACQUAINTANCE)
-        for i in range(6):
-            tracker.register_interaction(f"Tell me about your thoughts turn {i}", "Here is my perspective.")
+
+        # Sending 50 trivial messages ("hello", "ping", "test") must NEVER advance trust!
+        for i in range(50):
+            tracker.register_interaction("hello", "Hello there.")
+        assert tracker.stage == DisclosureStage.ACQUAINTANCE
+
+        # Meaningful conversation with personal curiosity advances to FAMILIAR
+        tracker.register_interaction("What are your thoughts on quiet work and where are you from?", "I value quiet patience.")
+        tracker.register_interaction("Tell me about your background and what you like.", "I observe carefully.")
+        tracker.register_interaction("What kind of person are you, and how do you feel today?", "I feel steady.")
         assert tracker.stage == DisclosureStage.FAMILIAR
 
-        for i in range(8):
-            tracker.register_interaction(f"Where are you from, tell me about your past {i}", "I remember mountains.")
+        # Sending more trivial turns does not advance to TRUSTED
+        for i in range(20):
+            tracker.register_interaction("ok", "Glad to hear.")
+        assert tracker.stage == DisclosureStage.FAMILIAR
+
+        # Inquiring about her former life and name advances to TRUSTED
+        for i in range(4):
+            tracker.register_interaction("Tell me more about what you think about mountain life.", "Mountains are quiet.")
+        tracker.register_interaction("Who were you before, and what was your real name in your past life?", "I can tell you.")
         assert tracker.stage == DisclosureStage.TRUSTED
+
+        # Inquiring specifically about her passing and the snakebite with care advances to CONFIDANT
+        for i in range(5):
+            tracker.register_interaction("That sounds like a demanding life in the mountains.", "It was indeed.")
+        tracker.register_interaction("How did your life end, and what happened to you and the snakebite in 1846?", "It was raining...")
+        assert tracker.stage == DisclosureStage.CONFIDANT
 
 
 # ==============================================================================
@@ -956,6 +1022,22 @@ class TestConversationalAutonomy:
         can, reason = engine.can_initiate(current_time=time.time() + 500.0)
         assert can is True
 
+    def test_repetition_suppression(self) -> None:
+        from app.core.personality.initiative import ConversationalInitiativeEngine
+
+        engine = ConversationalInitiativeEngine()
+        msg = "The afternoon light feels very quiet today."
+        engine.record_initiative_sent(msg)
+
+        # Identical or near-identical message must be rejected as repetitive
+        assert engine.is_repetitive(msg) is True
+        assert engine.parse_initiative_response(msg) is None
+
+        # Distinct thought is accepted
+        distinct_msg = "The night wind is picking up outside."
+        assert engine.is_repetitive(distinct_msg) is False
+        assert engine.parse_initiative_response(distinct_msg) == distinct_msg
+
     def test_silence_token_yields_none(self) -> None:
         from app.core.personality.initiative import ConversationalInitiativeEngine, SILENCE_TOKEN
 
@@ -972,6 +1054,14 @@ class TestConversationalAutonomy:
         brain = TsukikoBrain(config=cfg, engine=DeterministicFakeEngine())
         brain.initialize()
 
+        # Unloaded model must NOT automatically load just for initiative
+        assert brain.model_manager.info.is_loaded is False
+        assert brain.check_conversational_initiative() is None
+
+        # Load model explicitly
+        assert brain.model_manager.load_model() is True
+        assert brain.model_manager.info.is_loaded is True
+
         # Suppressed in Game Mode
         assert brain.check_conversational_initiative(game_mode_active=True) is None
 
@@ -985,6 +1075,105 @@ class TestConversationalAutonomy:
         assert len(remark) > 0
         # Appended to history
         assert brain.get_history()[-1]["content"] == remark
+
+        # Subsequent call immediately rejected due to unanswered backoff
+        assert brain.check_conversational_initiative(current_time=time.time() + 600.0) is None
+
+        # User activity resets backoff
+        brain.personality.initiative_engine.record_user_activity()
+        # Repetition guard prevents duplicate message
+        assert brain.check_conversational_initiative(current_time=time.time() + 800.0) is None
+
+
+# ==============================================================================
+# 13. Live Desktop Companion Initiative Scheduler Integration Tests
+# ==============================================================================
+
+class TestCompanionInitiativeScheduler:
+    """Verifies that the scheduler connects to the application lifecycle and respects all rules."""
+
+    def test_scheduler_lifecycle_and_suppression(self, qapp: QApplication, tmp_path: Path) -> None:
+        from app.desktop.companion.widget import FloatingCompanionWidget
+        from app.desktop.companion.window import CompanionMainWindow
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        brain = TsukikoBrain(config=cfg, engine=fake_engine)
+        brain.initialize()
+
+        widget = FloatingCompanionWidget(config=cfg.ui)
+        main_window = CompanionMainWindow(config=cfg)
+
+        scheduler = CompanionInitiativeScheduler(
+            widget=widget,
+            main_window=main_window,
+            brain=brain,
+            check_interval_ms=100,
+        )
+        assert scheduler.is_running is False
+        scheduler.start()
+        assert scheduler.is_running is True
+
+        # 1. Unloaded model suppresses initiative
+        assert brain.model_manager.info.is_loaded is False
+        assert scheduler.check_initiative() is False
+
+        # Load model
+        assert brain.model_manager.load_model() is True
+        assert brain.model_manager.info.is_loaded is True
+        main_window.chat_view._brain = brain
+        main_window.chat_view.update_model_status()
+
+        # 2. Game Mode suppresses initiative
+        widget.enable_game_mode()
+        assert scheduler.check_initiative() is False
+        widget.disable_game_mode()
+
+        # 3. Hidden widget suppresses initiative
+        widget.hide_widget()
+        assert scheduler.check_initiative() is False
+        widget.show_widget()
+
+        # 4. Idle time requirement: immediately after user activity, suppressed
+        brain.personality.initiative_engine.record_user_activity()
+        assert scheduler.check_initiative() is False
+
+        # Advance idle time artificially in engine
+        brain.personality.initiative_engine._last_interaction_time = time.time() - 100.0
+        brain.personality.initiative_engine._last_initiative_time = 0.0
+
+        # 5. Check initiative launches background worker without freezing main thread
+        launched = scheduler.check_initiative()
+        assert launched is True
+        assert scheduler._active_worker is not None
+
+        # Wait for background worker to complete
+        scheduler._active_worker.wait(5000)
+        qapp.processEvents()
+
+        # Proactive message delivered to chat view
+        last_chat_msg = main_window.chat_view.messages_layout.itemAt(
+            main_window.chat_view.messages_layout.count() - 2
+        ).widget()
+        assert last_chat_msg is not None
+
+        # Speech bubble displayed on companion widget
+        assert widget.speech_bubble.isVisible() is True
+        assert len(widget.speech_bubble.lbl_text.text()) > 0
+
+        # Clicking speech bubble dismisses it and raises main window
+        widget.speech_bubble.dismiss()
+        assert widget.speech_bubble.isVisible() is False
+
+        scheduler.stop()
+        assert scheduler.is_running is False
+        widget.close()
+        main_window.close()
 
 
 # ==============================================================================

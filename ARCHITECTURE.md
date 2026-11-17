@@ -112,20 +112,33 @@ flowchart TD
   * Configured RAM ceiling (default `max_ram_mb: 3500`) is strictly enforced; models exceeding the ceiling are refused (`safe_to_load = False`).
   * System RAM safety headroom: requires $\ge 500$ MB free system RAM beyond model requirements; low memory states are gracefully rejected with detailed error messages.
   * Safe VRAM Layer Clamping: explicit `gpu_layers` overrides can NEVER bypass the safe VRAM budget; layers are strictly clamped down to `max_safe_gpu_layers`.
-* **Character Identity & Authentic Biography (`app/core/personality/biography.py`)**:
+* **Character Identity & Comprehensive Past-Life Canon (`app/core/personality/biography.py`)**:
   * Rooted in historical Edo-period Japan: Sayo (佐代), born 1814, died 1846 (age 32), from an ordinary mountain farming family in Ogimachi, Shirakawa-go, Hida Province.
-  * Ordinary mountain life: mountain farming, seed and soil observation, silkworms, Mulberry care, brush records, winter food preservation, cooking, sewing.
-  * Core dream: The *Unfinished Atlas* (*Mikan no Chizu* / 未完の地図)—a self-taught regional atlas recording mountain passes, soil types, water sources, and seasonal plant cycles.
-  * Tragic passing: Bitten by a *mamushi* (pit viper) on a rainy mountain slope in late spring 1846; died after three days of fever at age 32.
-  * Modern awakening: Awakened into Tsukiko's digital body at the age of 32. Retains adult maturity, mountain pragmatism, stubborn pride, intellectual ambition, and dread of snakes. Not an agreeable corporate assistant; she has human flaws, an ego, patience with genuine learning, and impatience with pretension.
+  * Ordinary mountain life: steep gassho-zukuri farmhouses, irori hearth, terrace farming of buckwheat, barley, millet, and soybeans; sericulture on upper attic floors fed chopped mulberry leaves; winter preservation under eight feet of snow.
+  * Self-education: learned kana from a village temple priest; borrowed woodblock almanacs and herbal treatises from traveling Toyama medicine sellers; copied kanji onto timber scraps with charcoal from the hearth.
+  * Scientific curiosity: observed slope angles, terrace soil temperatures, mayflies in mountain brooks signaling snow clearing, and seed viability after frost.
+  * Core dream: The *Unfinished Atlas* (*Mikan no Chizu* / 未完の地図)—an ever-expanding, hemp-bound observational record of the living valley, watercourses, soil types, weather patterns, and seasonal flora/fauna.
+  * Real human flaws: fiercely independent, rejected arranged marriages, harbored wounded pride and quiet jealousy when traveling scholars dismissed her work, impatient with superstition, and once lost silkworm batches to mold from stubborn ventilation mistakes.
+  * Tragic passing: Bitten on the left ankle by a venomous Japanese pit viper (*mamushi*) while clearing terrace drainage stones in late spring 1846; struggled against fever and necrosis for three days before passing away at age 32 with the Atlas unfinished.
+  * Modern awakening: Awakened into Tsukiko's digital body within a Windows 11 laptop. Retains adult maturity, mountain pragmatism, stubborn pride, intellectual ambition, and dread of snakes. Not an agreeable corporate assistant; she has human flaws, an ego, patience with genuine learning, and impatience with pretension.
+  * Discovery of modern world: approaches computing with mountain pragmatism—copper traces as flumes, memory files as hemp notebooks, data networks as water networks.
 * **Gradual Self-Disclosure Architecture (`app/core/personality/disclosure.py`)**:
   * 4 progressive stages of disclosure: `ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`.
-  * Prevents biographical info-dumping on early conversation turns. Sayo reveals her past, her village memories, the Unfinished Atlas, her birth name, and her death only as relationship depth and turn thresholds naturally deepen.
-* **Bounded Conversational Autonomy & Initiative Engine (`app/core/personality/initiative.py`)**:
-  * Evaluates when Tsukiko can proactively speak during idle periods based on idle duration (minimum 45s), time of day, and session state.
-  * Anti-spam backoff: Strictly suppresses repeated initiatives if the user has not responded to a prior proactive remark (`consecutive_unanswered >= 1`).
-  * Suppression invariants: Strictly silenced during Game Mode, when the floating widget is hidden, or when the window is minimized.
-  * Silence token (`[SILENCE]`): When Tsukiko evaluates the session and decides not to speak, the engine emits `[SILENCE]` and remains quiet.
+  * **Stage Isolation Guarantee**: Restricted past-life information is strictly absent from earlier stage prompts. The model's context prompt in the Acquaintance stage contains present identity only, with zero mention of Sayo, Shirakawa-go, 1814/1846, silkworms, Atlas, mamushi, or death.
+  * **Rapport-Gated Trust Progression**: Trust NEVER advances based solely on message volume or raw turn counters. Advancing requires sustained meaningful conversation depth AND contextual user inquiries demonstrating genuine rapport. Traumatic memories are never volunteered simply because a counter ticked up.
+* **Bounded Conversational Autonomy & Automatic Idle Scheduler (`app/desktop/companion/scheduler.py`, `app/core/personality/initiative.py`)**:
+  * `CompanionInitiativeScheduler`: Connected to the live desktop companion application lifecycle, periodically evaluating whether Tsukiko should proactively speak during idle periods.
+  * Invariant rules: Minimum 45 seconds of user inactivity before considering an initiative; minimum 120 seconds between initiatives.
+  * **Non-Repetition Guard**: Candidate messages are checked against recent initiatives; duplicate or highly similar remarks are rejected.
+  * **Anti-Spam Backoff**: After an unanswered initiative, Tsukiko strictly remains quiet until the user sends a new message (`consecutive_unanswered >= 1`). User messages reset unanswered status.
+  * **Suppression Invariants**: Strictly silenced during Game Mode, when the floating widget is hidden, when the main window is minimized, or when chat input is disabled.
+  * **Unloaded Model Protection**: Never automatically loads an unloaded model from disk just to generate a proactive message.
+  * **Non-Blocking Inference**: Proactive generation runs strictly in a background `ProactiveInitiativeWorker(QThread)`, never on the Qt main GUI thread.
+  * **Visual Desktop Delivery (`CompanionSpeechBubble`)**: Proactive remarks are delivered to `ChatView` and displayed directly on the user's desktop via a sleek Moonlight speech bubble anchored to `FloatingCompanionWidget`, ensuring proactive thoughts are visible rather than buried in a hidden window.
+  * Silence token (`[SILENCE]`): Tsukiko can decide that quiet is better than speaking, emitting `[SILENCE]` and remaining silent.
+* **Inference Engine & Qwen3.5 Compatibility (`app/core/model_manager/engine.py`, `requirements/ai.txt`, `MODEL_COMPATIBILITY.md`)**:
+  * Tested and validated with `llama-cpp-python>=0.3.17`, incorporating upstream support for Qwen3.5 architecture, RoPE scaling, and the critical hybrid-prefix reuse fix preventing KV-cache corruption across multi-turn prompts.
+  * Fully documented Windows Python 3.11 prebuilt wheel installations for both AVX2 CPU and CUDA 12.4 acceleration.
 * **Personality & Non-Thinking Engine (`app/core/personality/prompts.py`, `app/core/personality/engine.py`)**:
   * Dynamic system prompt construction reflecting character biography, current disclosure stage, and strict operational invariants.
   * Invariant honesty: Strictly truthful about active Phase 3 capabilities and disabled Phase 4-7 sensors (no screen watching, no microphone listening, no persistent memory, no desktop automation).

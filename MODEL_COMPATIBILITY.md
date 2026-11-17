@@ -59,12 +59,12 @@ For a 2B–3B parameter instruction-tuned model within Tsukiko's 2,800 MB safe V
 
 ## 4. Inference Engine Installation Procedures
 
-Inference libraries are kept completely optional and decoupled from base dependencies. The core application runs cleanly in headless and UI modes without `llama-cpp-python`. Tested with `llama-cpp-python>=0.3.4` (verified compatibility with Qwen2.5/Qwen3.5 architectures).
+Inference libraries are kept completely optional and decoupled from base dependencies. The core application runs cleanly in headless and UI modes without `llama-cpp-python`. Tested with `llama-cpp-python>=0.3.17`, which incorporates the upstream fixes for Qwen3.5 architecture, RoPE scaling, and the hybrid-prefix reuse fix (ensuring prompt prefix reuse does not corrupt KV cache across turns).
 
 ### Option A: Optimized CPU-Only Runtime (Default Fallback)
 For lightweight CPU execution using AVX2 instructions:
 ```powershell
-pip install "llama-cpp-python>=0.3.4" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 ```
 
 ### Option B: CUDA 12.x Hardware-Accelerated Runtime (RTX 3050 Laptop)
@@ -74,7 +74,7 @@ For GPU offloading via NVIDIA CUDA:
 nvidia-smi
 
 # Install prebuilt CUDA 12.4 wheel
-pip install "llama-cpp-python>=0.3.4" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 ```
 
 > [!IMPORTANT]

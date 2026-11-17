@@ -76,6 +76,8 @@ def test_wheel_build_and_contents(temp_dir):
         assert "app/core/personality/biography.py" in names
         assert "app/core/personality/disclosure.py" in names
         assert "app/core/personality/initiative.py" in names
+        assert "app/desktop/companion/scheduler.py" in names
+        assert "app/desktop/companion/bubble.py" in names
 
         # Must declare tsukiko console entry point
         entry_points = [n for n in names if n.endswith("entry_points.txt")]

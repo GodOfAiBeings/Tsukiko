@@ -162,6 +162,9 @@ class ChatView(QWidget):
     cancellation, clear conversation, and accurate model lifecycle status.
     """
 
+    if HAS_PYSIDE6:
+        message_sent = Signal(str)
+
     def __init__(
         self,
         brain: Optional[Any] = None,
@@ -401,6 +404,11 @@ class ChatView(QWidget):
 
         self._last_user_message = text
         self.input_field.clear()
+
+        # Emit message sent and reset unanswered initiative status / idle timer
+        self.message_sent.emit(text)
+        if self._brain and hasattr(self._brain, "personality"):
+            self._brain.personality.initiative_engine.record_user_activity()
 
         # Add user message bubble
         user_bubble = MessageBubble(text, sender="user")

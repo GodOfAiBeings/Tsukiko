@@ -5,12 +5,13 @@ conversations without waiting for user input, bringing up grounded observations,
 seasonal changes, or reflections on recent session discussions.
 
 Strict Boundary Invariants:
-1. Anti-Spam: Never spams repetitive greetings ("Hello?", "Are you there?").
+1. Anti-Spam & Non-Repetition: Never spams repetitive greetings or duplicate remarks.
 2. Silence by Choice: The model can choose to respond with [SILENCE] when quiet is best.
 3. Strict Backoff: If a previous proactive message went unanswered, Tsukiko remains silent.
 4. Cooldown Enforcement: Minimum 120 seconds between proactive initiatives.
-5. Game Mode & Hidden State Suppression: Strictly 0 initiatives during gaming or hidden mode.
-6. Available Signals Only: Uses only in-memory session history, time of day, and idle duration.
+5. Idle Requirement: Minimum 45 seconds of user inactivity before considering an initiative.
+6. Game Mode & Hidden State Suppression: Strictly 0 initiatives during gaming or hidden mode.
+7. Available Signals Only: Uses only in-memory session history, time of day, and idle duration.
    Zero claims of seeing outside apps, screen contents, or OS activities.
 """
 
@@ -43,6 +44,7 @@ class ConversationalInitiativeEngine:
         self._last_initiative_time = 0.0
         self._consecutive_unanswered = 0
         self._enabled = True
+        self._recent_initiatives: List[str] = []
 
     @property
     def is_enabled(self) -> bool:
@@ -56,6 +58,10 @@ class ConversationalInitiativeEngine:
     def consecutive_unanswered(self) -> int:
         return self._consecutive_unanswered
 
+    @property
+    def recent_initiatives(self) -> List[str]:
+        return list(self._recent_initiatives)
+
     def record_user_activity(self) -> None:
         """Called whenever the user types or interacts, resetting idle timer and unanswered counter."""
         self._last_interaction_time = time.time()
@@ -65,12 +71,36 @@ class ConversationalInitiativeEngine:
         """Called when an assistant response finishes in normal dialogue."""
         self._last_interaction_time = time.time()
 
-    def record_initiative_sent(self) -> None:
+    def record_initiative_sent(self, text: str = "") -> None:
         """Called when a proactive message is successfully delivered."""
         now = time.time()
         self._last_initiative_time = now
         self._last_interaction_time = now
         self._consecutive_unanswered += 1
+        if text.strip():
+            self._recent_initiatives.append(text.strip())
+            if len(self._recent_initiatives) > 10:
+                self._recent_initiatives.pop(0)
+
+    def is_repetitive(self, candidate: str) -> bool:
+        """Checks if the candidate remark repeats or closely mirrors recent proactive messages."""
+        cand_norm = candidate.lower().strip()
+        if not cand_norm:
+            return True
+
+        cand_tokens = set(cand_norm.split())
+        for recent in self._recent_initiatives:
+            recent_norm = recent.lower().strip()
+            if cand_norm == recent_norm:
+                return True
+            recent_tokens = set(recent_norm.split())
+            if cand_tokens and recent_tokens:
+                intersection = cand_tokens.intersection(recent_tokens)
+                union = cand_tokens.union(recent_tokens)
+                jaccard = len(intersection) / len(union)
+                if jaccard > 0.75:
+                    return True
+        return False
 
     def can_initiate(
         self,
@@ -96,11 +126,11 @@ class ConversationalInitiativeEngine:
         if time_since_initiative < self.cooldown_seconds:
             return False, f"Cooldown active ({int(self.cooldown_seconds - time_since_initiative)}s remaining)."
 
-        # Check consecutive unanswered limit
+        # Check consecutive unanswered limit (must remain quiet after unanswered initiative)
         if self._consecutive_unanswered >= self.max_consecutive_unanswered:
             return False, "User did not reply to previous initiative; remaining quiet."
 
-        # Check idle duration from last interaction
+        # Check idle duration from last interaction (minimum 45s of user inactivity)
         idle_duration = now - self._last_interaction_time
         if idle_duration < self.min_idle_seconds:
             return False, f"User was recently active ({int(idle_duration)}s < {int(self.min_idle_seconds)}s)."
@@ -149,11 +179,14 @@ class ConversationalInitiativeEngine:
         return messages
 
     def parse_initiative_response(self, response_text: str) -> Optional[str]:
-        """Parses model response. Returns None if model chose silence."""
+        """Parses model response. Returns None if model chose silence or is repetitive."""
         cleaned = response_text.strip()
         if not cleaned:
             return None
         if SILENCE_TOKEN.lower() in cleaned.lower():
             logger.debug("Model chose silence for conversational initiative.")
+            return None
+        if self.is_repetitive(cleaned):
+            logger.debug(f"Initiative candidate rejected as repetitive: {cleaned[:30]}...")
             return None
         return cleaned

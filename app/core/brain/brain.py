@@ -201,18 +201,25 @@ class TsukikoBrain:
                 logger.debug(f"Conversational initiative suppressed: {reason}")
                 return None
 
+            # Do NOT automatically load an unloaded model just to generate a proactive message
+            if not self.model_manager.info.is_loaded:
+                logger.debug("Conversational initiative skipped: model is not currently loaded in memory.")
+                return None
+
             prompt_messages = self.personality.initiative_engine.build_initiative_prompt(self._history)
 
             # If model engine is DeterministicFakeEngine (testing):
             if isinstance(self.model_manager.engine, DeterministicFakeEngine):
                 candidate = "The afternoon light feels very quiet today. How is your work progressing?"
-                clean_candidate = self.personality.clean_response(candidate)
+                remark = self.personality.initiative_engine.parse_initiative_response(candidate)
+                if not remark:
+                    return None
+                clean_candidate = self.personality.clean_response(remark)
+                if not clean_candidate:
+                    return None
                 self._history.append({"role": "assistant", "content": clean_candidate})
-                self.personality.initiative_engine.record_initiative_sent()
+                self.personality.initiative_engine.record_initiative_sent(clean_candidate)
                 return clean_candidate
-
-            if not self.model_manager.info.is_loaded:
-                return None
 
             try:
                 raw_response = self.model_manager.generate(
@@ -229,7 +236,7 @@ class TsukikoBrain:
                     return None
 
                 self._history.append({"role": "assistant", "content": clean_remark})
-                self.personality.initiative_engine.record_initiative_sent()
+                self.personality.initiative_engine.record_initiative_sent(clean_remark)
                 logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
                 return clean_remark
             except Exception as e:

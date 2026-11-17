@@ -60,13 +60,13 @@ The resource allocator computes safe VRAM budgets according to three honest stat
 
 ## 4. Running the Test Suite
 
-Execute the complete automated test suite (394 test items: 390 passed, 4 Unix-specific skipped on Windows; 392 passed, 2 skipped on Linux):
+Execute the complete automated test suite (397 test items: 393 passed, 4 Unix-specific skipped on Windows; 395 passed, 2 skipped on Linux):
 ```powershell
 pytest -v
 ```
 
 ### Key Test Modules
-* [`tests/test_local_brain.py`](tests/test_local_brain.py): Comprehensive verification of the Phase 3 local AI brain subsystem: pure-Python binary GGUF parser and metadata validation, ModelManager 9-state lifecycle machine, safe RAM/VRAM offload calculations, headroom preservation, insufficient memory rejection, engine abstraction, non-thinking personality prompts and reasoning token stripping, temporary in-memory history pruning, ChatWorker QThread streaming, cancellation, error bubbles with retry, clear chat, Settings card model loading/unloading, SystemStatus telemetry, character identity (Sayo, 1814-1846, Ogimachi, Unfinished Atlas, snake dread, practical craft), 4-stage gradual self-disclosure (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`), bounded conversational autonomy/initiative with anti-spam backoff, reentrant reload safety without deadlocks, and zero-telemetry offline invariants (51 tests).
+* [`tests/test_local_brain.py`](tests/test_local_brain.py): Comprehensive verification of the Phase 3 local AI brain subsystem: pure-Python binary GGUF parser and metadata validation, ModelManager 9-state lifecycle machine, safe RAM/VRAM offload calculations, headroom preservation, insufficient memory rejection, engine abstraction, non-thinking personality prompts and reasoning token stripping, temporary in-memory history pruning, ChatWorker QThread streaming, cancellation, error bubbles with retry, clear chat, Settings card model loading/unloading, SystemStatus telemetry, character identity (12 canonical milestones, Sayo, 1814-1846, Ogimachi, Unfinished Atlas, snake dread, practical craft), 4-stage rapport-gated gradual self-disclosure (`ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`), stage-isolated prompt content, automatic proactive conversation scheduling via `CompanionInitiativeScheduler` and `ProactiveInitiativeWorker(QThread)`, non-repetitive safeguards, silence token handling (`[SILENCE]`), suppression under Game Mode/hidden widget/unloaded model, desktop `CompanionSpeechBubble`, reentrant reload safety without deadlocks, and zero-telemetry offline invariants (54 tests).
 * [`tests/test_desktop_companion.py`](tests/test_desktop_companion.py): Verifies complete Phase 2 PySide6 desktop companion UI: Moonlight theme styling, procedural vector avatar rendering, floating companion widget, compact left menu ordering and locked states, safe fullscreen detection with Win32 ctypes signatures, Game Mode animation suspension without game hooking, system tray recovery and fallback mode, dynamic settings application and YAML persistence, SystemStatusView real hardware telemetry, PrivacyView locked sensors, MemoryView zero-database placeholder, SettingsView validation, and CLI/headless execution (49 tests).
 * [`tests/test_windows_firewall.py`](tests/test_windows_firewall.py): Windows PE structural binary validation, fail-closed profile validation, ActiveStore effective policy inspection, complete 18-property NetSecurity CIM filter verification across all 7 categories, lossless `CimFieldRecord` deserialization, strict CIM field-state invariants, non-null StringValue consistency checks, filter association integrity (`Count -eq 1`), unmanufactured ActiveStore Outbound Allow bypass evaluation (`OverrideBlockRules=True`) with literal wildcard detection across exact executable and all-programs scopes without error suppression, broad type category preservation, precise rule ownership identity, safe deletion by stable internal Name, strict 8-key response envelope validation, and structured query result parsing (224 tests).
 * [`tests/test_privacy_enforcement.py`](tests/test_privacy_enforcement.py): Comprehensive socket, connected UDP, send/sendall/sendmsg, real native sendmsg data exchange, deterministic fail-closed DNS, numeric loopback enforcement, socket family restriction, and real/mock AF_UNIX local IPC tests (22 tests).
@@ -81,8 +81,8 @@ pytest -v
 ## 5. Dual-Platform CI Matrix
 
 Continuous Integration runs on GitHub Actions across two distinct environments:
-1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, full desktop companion UI with offscreen Qt platform, local AI brain verification, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (390 passed, 4 Unix-specific skipped).
-2. **Linux (`ubuntu-latest`)**: Validates full 394-test suite including genuine native `sendmsg` (TCP/UDP) communication, real `AF_UNIX` domain socket IPC, offscreen PySide6 UI, and local AI brain inference abstractions (392 passed, 2 skipped).
+1. **Windows 11 (`windows-latest`)**: Validates Windows environment integration, packaging, wheel installation, out-of-tree CLI execution, full desktop companion UI with offscreen Qt platform, local AI brain verification, and real read-only Windows Firewall ActiveStore policy inspection with all 7 filter cmdlets, 18 CIM filter properties, and 26 schema fields (393 passed, 4 Unix-specific skipped).
+2. **Linux (`ubuntu-latest`)**: Validates full 397-test suite including genuine native `sendmsg` (TCP/UDP) communication, real `AF_UNIX` domain socket IPC, offscreen PySide6 UI, and local AI brain inference abstractions (395 passed, 2 skipped).
 
 ---
 
@@ -148,7 +148,7 @@ A dual-platform CI workflow is established at [`.github/workflows/ci.yml`](.gith
   * Ubuntu Linux (`ubuntu-latest`, Python 3.11 x64).
 * **Pipeline**:
   1. Installs base and developer dependencies.
-  2. Runs full 293-item pytest suite (289 passed, 4 skipped on Windows; 291 passed, 2 skipped on Linux).
+  2. Runs full 397-item pytest suite (393 passed, 4 skipped on Windows; 395 passed, 2 skipped on Linux).
   3. Builds distribution wheel (`tsukiko-*.whl`).
   4. Installs wheel in clean environment and executes `tsukiko --check-hardware` outside source tree.
   5. Windows runner executes read-only ActiveStore inspection verification (`scripts/verify_windows_firewall_inspection.py`).

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] - Phase 3 Final Corrections - 2026-11-18
+
+### Added
+- **Proactive Conversation Scheduler & Desktop Speech Bubble (`app/desktop/companion/scheduler.py`, `app/desktop/companion/bubble.py`)**:
+  - `CompanionInitiativeScheduler`: Lifecycle-connected scheduler evaluating proactive conversational opportunities on an automatic idle timer.
+  - Idle-time and cooldown constraints: Requires $\ge 45$ seconds of user inactivity before evaluating initiative and enforces a 120-second cooldown between remarks.
+  - Anti-spam & silence backoff: After an unanswered initiative, Tsukiko strictly remains quiet (`consecutive_unanswered >= 1`) until the user initiates a new message.
+  - User activity reset: Sending a chat message immediately resets the unanswered counter and restarts the idle timer.
+  - Suppressed conditions: Proactive initiatives are strictly suppressed during Game Mode, hidden widget state, minimized main window, disabled chat view, or when the model is unloaded.
+  - Non-blocking inference: `ProactiveInitiativeWorker(QThread)` offloads prompt evaluation and generation to a background worker so the Qt main GUI thread never freezes.
+  - Zero auto-load invariant: Unloaded models are never loaded automatically to generate a proactive remark.
+  - Desktop Speech Bubble (`CompanionSpeechBubble`): Frameless, semi-translucent Moonlight popover positioned adjacent to the floating avatar so remarks are visible even if the main window is closed or hidden. Auto-dismisses after 15 seconds or on user click (which opens chat).
+  - Evaluated silence (`[SILENCE]`): Respects Tsukiko's choice when she decides silence is preferable to speaking.
+- **Stage-Isolated Character Prompts & Rapport-Gated Disclosure (`app/core/personality/prompts.py`, `app/core/personality/disclosure.py`)**:
+  - Strict stage isolation: The `ACQUAINTANCE` prompt contains present identity (Tsukiko, age 32, observant, calm, practical) ONLY, with zero mention of past-life names, locations, dates, death, or trauma (purged all mentions of Sayo, Shirakawa-go, 1814, 1846, silkworms, Atlas, mamushi, snakebite, or fever).
+  - Gradual self-disclosure gated by genuine conversational rapport: `DisclosureTracker` strictly requires meaningful conversational context and specific inquiries to advance stages. Trivial, repetitive, or empty turn counts (even 50+ turns) remain firmly at `ACQUAINTANCE`.
+- **Long-Form Historical Canon (`app/core/personality/biography.py`)**:
+  - Comprehensive character biography covering all 12 canonical life milestones: childhood/family, village routines and gassho-zukuri architecture, self-education journey, nature observation, Unfinished Atlas ambition, personal flaws/jealousy/pride, life at 32, mamushi snakebite incident, 3-day fever struggle, unfulfilled dream, awakening into the machine, and modern world discovery.
+  - Kept strictly decoupled from stage-restricted system prompts.
+- **Qwen3.5 Upstream Runtime Compatibility (`requirements/ai.txt`, `pyproject.toml`, `MODEL_COMPATIBILITY.md`)**:
+  - Pinned `llama-cpp-python>=0.3.17`, incorporating upstream Qwen3.5 architecture support and the hybrid prefix-reuse fix.
+  - Documented verified Windows Python 3.11 CPU and CUDA 12.4 pre-built wheel indices on the abetlen index.
+
+### Changed
+- Total automated test suite expanded to 397 tests (393 passed, 4 skipped on Windows; 395 passed, 2 skipped on Linux) with 0 failures and 0 errors.
+
+---
+
 ## [0.3.1] - Phase 3 Corrections and Character Identity - 2026-11-18
 
 ### Added

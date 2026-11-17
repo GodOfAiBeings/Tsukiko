@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from app.core.config.settings import UIConfig, get_config
 from app.desktop.companion.avatar import TsukikoAvatarWidget
+from app.desktop.companion.bubble import CompanionSpeechBubble
 from app.desktop.companion.fullscreen import FullscreenDetector, FullscreenEvaluation
 
 logger = logging.getLogger(__name__)
@@ -319,6 +320,10 @@ class FloatingCompanionWidget(QWidget):
         self.menu.hide_widget_requested.connect(self.hide_widget)
         self.menu.exit_requested.connect(self._handle_exit)
 
+        # Proactive speech bubble anchored to the avatar
+        self.speech_bubble = CompanionSpeechBubble()
+        self.speech_bubble.clicked.connect(self._handle_open_main)
+
         self._setup_ui()
         self._position_to_initial_corner()
 
@@ -363,9 +368,22 @@ class FloatingCompanionWidget(QWidget):
     def closeEvent(self, event: Any) -> None:
         self._fullscreen_timer.stop()
         self.avatar.stop_animation()
+        self.hide_speech_bubble()
         if hasattr(self, "menu") and self.menu:
             self.menu.close()
         super().closeEvent(event)
+
+    def show_speech_bubble(self, text: str) -> None:
+        """Displays a proactive speech bubble anchored above/near the companion avatar."""
+        if self._is_hidden or self._is_game_mode:
+            return
+        if hasattr(self, "speech_bubble") and self.speech_bubble:
+            self.speech_bubble.show_message(text, self.pos(), self._size)
+
+    def hide_speech_bubble(self) -> None:
+        """Hides the speech bubble if currently shown."""
+        if hasattr(self, "speech_bubble") and self.speech_bubble:
+            self.speech_bubble.dismiss()
 
     def _check_fullscreen_policy(self) -> FullscreenEvaluation:
         """Inspects foreground window geometry in read-only manner and adjusts always-on-top.
@@ -552,6 +570,7 @@ class FloatingCompanionWidget(QWidget):
         self._is_game_mode = True
         self.avatar.stop_animation()
         self._fullscreen_timer.stop()
+        self.hide_speech_bubble()
         self.hide()
         self.menu.close()
         self.game_mode_activated.emit()
@@ -571,6 +590,7 @@ class FloatingCompanionWidget(QWidget):
         """Hides the floating widget without exiting Tsukiko."""
         logger.info("Hiding Tsukiko companion widget.")
         self._is_hidden = True
+        self.hide_speech_bubble()
         self.menu.close()
         self.hide()
         self.widget_visibility_changed.emit(False)

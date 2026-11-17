@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 try:
     from PySide6.QtWidgets import QApplication
     from app.desktop.companion.avatar import TsukikoAvatarWidget
+    from app.desktop.companion.bubble import CompanionSpeechBubble
     from app.desktop.companion.fullscreen import FullscreenDetector, FullscreenEvaluation
+    from app.desktop.companion.scheduler import CompanionInitiativeScheduler, ProactiveInitiativeWorker
     from app.desktop.companion.theme import MoonlightTheme
     from app.desktop.companion.tray import TsukikoTrayManager
     from app.desktop.companion.widget import CompactCompanionMenu, FloatingCompanionWidget
@@ -23,8 +25,11 @@ try:
 except ImportError:
     HAS_PYSIDE6 = False
     TsukikoAvatarWidget = None  # type: ignore[assignment,misc]
+    CompanionSpeechBubble = None  # type: ignore[assignment,misc]
     FullscreenDetector = None  # type: ignore[assignment,misc]
     FullscreenEvaluation = None  # type: ignore[assignment,misc]
+    CompanionInitiativeScheduler = None  # type: ignore[assignment,misc]
+    ProactiveInitiativeWorker = None  # type: ignore[assignment,misc]
     MoonlightTheme = None  # type: ignore[assignment,misc]
     TsukikoTrayManager = None  # type: ignore[assignment,misc]
     CompactCompanionMenu = None  # type: ignore[assignment,misc]
@@ -34,8 +39,11 @@ except ImportError:
 __all__ = [
     "HAS_PYSIDE6",
     "TsukikoAvatarWidget",
+    "CompanionSpeechBubble",
     "FullscreenDetector",
     "FullscreenEvaluation",
+    "CompanionInitiativeScheduler",
+    "ProactiveInitiativeWorker",
     "MoonlightTheme",
     "TsukikoTrayManager",
     "CompactCompanionMenu",
@@ -82,6 +90,21 @@ def launch_companion(
 
     # Show floating widget
     widget.show()
+
+    # Initialize Proactive Conversational Scheduler
+    brain = getattr(orchestrator, "brain", None) if orchestrator else None
+    initiative_scheduler = CompanionInitiativeScheduler(
+        widget=widget,
+        main_window=main_window,
+        brain=brain,
+    )
+    initiative_scheduler.start()
+    widget.initiative_scheduler = initiative_scheduler  # type: ignore[attr-defined]
+    main_window.initiative_scheduler = initiative_scheduler  # type: ignore[attr-defined]
+
+    # Dismiss speech bubble when user sends a message in chat
+    if hasattr(main_window, "chat_view"):
+        main_window.chat_view.message_sent.connect(lambda _: widget.hide_speech_bubble())
 
     # If system tray is unavailable, show main window at launch with fallback controls
     if not tray_manager.is_available:

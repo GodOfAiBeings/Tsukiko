@@ -550,6 +550,66 @@ The final CIM value validation correction addressed the malformed-CIM-value acce
 
 ---
 
+## 2026-11-18 - Phase 3 Corrections and Character Identity (v0.3.1)
+
+### Completed Objectives
+1. **Historical Character Identity & Ground Truth (`app/core/personality/biography.py`)**:
+   - Sayo (佐代), born 1814, died 1846 (age 32), mountain farming family in Ogimachi, Shirakawa-go, Hida Province.
+   - Life skills: agriculture, seed and soil observation, silkworms, Mulberry care, brush records, winter food preservation, cooking, sewing.
+   - Life ambition: *Unfinished Atlas* (*Mikan no Chizu* / 未完の地図)—recording mountain passes, soil types, water sources, and seasonal plant cycles.
+   - Tragic passing: Bitten by a *mamushi* (pit viper) on a rainy mountain slope in late spring 1846; died after three days of fever at age 32.
+   - Modern awakening: Awakened into Tsukiko's digital body at age 32 with adult maturity, mountain pragmatism, stubborn pride, intellectual curiosity, and dread of snakes. Not an agreeable corporate assistant; has flaws, ego, patience with genuine learning, and impatience with pretension.
+2. **Gradual Self-Disclosure Engine (`app/core/personality/disclosure.py`)**:
+   - 4 progressive disclosure stages: `ACQUAINTANCE`, `FAMILIAR`, `TRUSTED`, `CONFIDANT`.
+   - Suppresses biographical info-dumping on early conversation turns. Sayo reveals her past, her village memories, the Unfinished Atlas, her birth name, and her death only as relationship depth and turn thresholds naturally deepen.
+3. **Safe Default Configuration & Test Isolation (`config/default_config.yaml`, `tests/test_config.py`, `app/desktop/companion/views/settings_view.py`)**:
+   - Restored `config/default_config.yaml` to safe defaults (`model_path: null`, `context_window: 4096`, `threads: 6`, `max_vram_mb: 2800`, `max_ram_mb: 3500`, `backend: "auto"`, `lazy_load: true`, `unload_timeout_seconds: 300`).
+   - Removed temporary pytest paths and machine-specific directories from repository configurations.
+   - Decoupled `SettingsView` tests from default config using temporary test config files.
+   - Added regression test `test_default_config_safe_defaults_and_integrity` in `tests/test_config.py`.
+4. **Resource Limit Enforcement & Safe VRAM Clamping (`app/core/model_manager/manager.py`)**:
+   - Enforced 3,500 MB RAM ceiling: rejects oversized models with `safe_to_load = False`.
+   - Enforced system RAM headroom: requires $\ge 500$ MB free system RAM beyond model needs.
+   - Explicit `gpu_layers` overrides strictly capped to safe VRAM budget layers (`max_safe_gpu_layers`).
+5. **Model Reload Deadlock Elimination (`app/core/model_manager/engine.py`)**:
+   - Replaced non-reentrant `threading.Lock` with `threading.RLock`.
+   - Added internal `_unload_locked()` helper to avoid re-locking during `load()`.
+   - Verified consecutive reload with `force=True` without deadlocks or thread freezing.
+
+---
+
+## 2026-11-18 - Phase 3 Final Corrections (v0.3.2)
+
+### Completed Objectives
+1. **Proactive Conversation Scheduler & Non-Blocking Worker (`app/desktop/companion/scheduler.py`)**:
+   - Implemented `CompanionInitiativeScheduler`: Connected to the application lifecycle with an automatic idle timer.
+   - Idle-time and cooldown constraints: Minimum 45 seconds of user inactivity before evaluating initiative; minimum 120-second cooldown between proactive remarks.
+   - Anti-spam & silence backoff: After an unanswered initiative, Tsukiko strictly remains quiet (`consecutive_unanswered >= 1`) until the user initiates a new message.
+   - User activity reset: Sending a chat message immediately resets the unanswered counter (`record_user_activity()`) and restarts the idle timer.
+   - Strict suppression conditions: Suppressed during Game Mode, hidden widget state, minimized main window, disabled chat view, or when the model is unloaded.
+   - Non-blocking inference: `ProactiveInitiativeWorker(QThread)` offloads prompt evaluation and generation to a background worker so the Qt main GUI thread never freezes.
+   - Zero auto-load invariant: Unloaded models are never loaded automatically just to generate a proactive remark.
+   - Evaluated silence (`[SILENCE]`): Respects Tsukiko's choice when she evaluates context and decides not to speak.
+2. **Desktop Speech Bubble (`app/desktop/companion/bubble.py`)**:
+   - Implemented `CompanionSpeechBubble`: Frameless, translucent Moonlight popover positioned adjacent to the floating avatar.
+   - Proactive remarks are visible on desktop even when the main window is closed or hidden.
+   - Features a 15-second auto-dismiss timer and click-to-open chat interaction.
+3. **Stage-Isolated Character Prompts & Rapport-Gated Disclosure (`app/core/personality/prompts.py`, `app/core/personality/disclosure.py`)**:
+   - Strict stage isolation: The `ACQUAINTANCE` prompt contains present identity (Tsukiko, age 32, observant, calm, practical) ONLY, with zero mention of past-life names, locations, dates, death, or trauma (purged all mentions of Sayo, Shirakawa-go, 1814, 1846, silkworms, Atlas, mamushi, snakebite, or fever).
+   - Rapport-gated disclosure tracker: `DisclosureTracker` strictly requires meaningful conversational context and specific inquiries to advance stages. Trivial, repetitive, or empty turn counts (even 50+ turns) remain firmly at `ACQUAINTANCE`.
+4. **Comprehensive Long-Form Historical Canon (`app/core/personality/biography.py`)**:
+   - Expanded character biography into long-form canon covering all 12 canonical life milestones: childhood/family, village routines and gassho-zukuri architecture, self-education journey, nature observation, Unfinished Atlas ambition, personal flaws/jealousy/pride, life at 32, mamushi snakebite incident, 3-day fever struggle, unfulfilled dream, awakening into the machine, and modern world discovery.
+   - Maintained clean separation between long-form canon and stage-restricted system prompts.
+5. **Qwen3.5 Upstream Runtime Compatibility (`requirements/ai.txt`, `pyproject.toml`, `MODEL_COMPATIBILITY.md`)**:
+   - Updated minimum requirement to `llama-cpp-python>=0.3.17`, incorporating upstream Qwen3.5 architecture support and hybrid prefix-reuse fix.
+   - Documented verified Windows Python 3.11 CPU and CUDA 12.4 pre-built wheel indices on the abetlen index.
+6. **Expanded Test Suite (`tests/test_local_brain.py`, `tests/test_packaging.py`)**:
+   - Added integration tests for scheduler lifecycle, worker thread offload, suppression under Game Mode/hidden widget/unloaded model, non-repetition, speech bubble presentation, long-form canon fields, rapport-gated progression, and stage-isolated prompt suppression.
+   - Packaging assertions updated for new scheduler and bubble modules.
+   - Total test suite expanded to 397 tests (393 passed, 4 skipped on Windows; 395 passed, 2 skipped on Linux) with 0 failures and 0 errors.
+
+---
+
 ### Implementation Status Matrix
 
 | Subsystem / Feature | Classification | Notes |
@@ -562,10 +622,12 @@ The final CIM value validation correction addressed the malformed-CIM-value acce
 | Structured Logging (Console/JSONL) | **Implemented & Tested** | Thread-safe, rotating, color-coded, reconfigurable log system with Windows file unlock. |
 | Orchestrator Composition Root | **Implemented & Tested** | Thread-safe reentrant lifecycle management (`initialize`, `start`, `stop`) tested via bounded subprocesses. |
 | CLI Interface & Packaging | **Implemented & Tested** | Tested via wheel build, isolated venv installation, and `tsukiko --check-hardware`. |
-| Automated Pytest Test Suite | **Implemented & Tested** | 373 unit, regression, packaging, and integration tests (369 passed, 4 skipped on Windows; 371 passed, 2 skipped on Linux). |
+| Automated Pytest Test Suite | **Implemented & Tested** | 397 unit, regression, packaging, and integration tests (393 passed, 4 skipped on Windows; 395 passed, 2 skipped on Linux). |
 | Continuous Integration (CI) | **Implemented & Tested** | GitHub Actions dual-platform CI workflow at `.github/workflows/ci.yml` (Windows 11 and Linux with offscreen PySide6 and 6-stage read-only ActiveStore inspection). |
 | PySide6 Desktop Companion UI | **Implemented & Tested** | Procedural vector moonlight emblem, compact left menu, safe foreground fullscreen detection with Win32 ctypes signatures, reversible Game Mode, tray manager with accessible fallback panel, dynamic settings persistence, and main window. |
 | llama.cpp Local Brain Engine | **Implemented & Tested** | Pure-Python GGUF inspection, 9-state ModelManager lifecycle, hardware-aware RAM/VRAM offloading with 400MB headroom, non-thinking personality engine, streaming ChatWorker, cancellation, retry on error, temporary in-memory history pruning, and Settings/Status telemetry cards. |
+| Conversational Autonomy & Initiative | **Implemented & Tested** | Automatic `CompanionInitiativeScheduler` with idle timer ($\ge 45$s), cooldown (120s), anti-spam backoff, background `ProactiveInitiativeWorker(QThread)` non-blocking inference, zero auto-load invariant, and `CompanionSpeechBubble` desktop popover. |
+| Historical Character Identity & Canon | **Implemented & Tested** | 12 canonical life milestones in `CharacterBiography`, 4-stage rapport-gated disclosure tracker (`DisclosureTracker`), and strict stage-isolated prompt content in `prompts.py`. |
 | SQLite Long-Term Memory | *Designed (Phase 4)* | Staged in `app/memory/`. Schema designed, database not yet created. |
 | Desktop Perception Pipeline | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Capture OFF by default. |
 | Offline Voice Subsystem (STT/TTS) | *Designed (Phase 6)* | Staged in `requirements/voice.txt` and `app/voice/`. Voice OFF by default. |
