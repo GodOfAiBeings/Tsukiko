@@ -60,6 +60,23 @@ def qapp() -> Generator[QApplication, None, None]:
     if app is None:
         app = QApplication(["tsukiko_test", "-platform", "offscreen"])
     yield app
+    if app:
+        for w in app.topLevelWidgets():
+            w.close()
+            w.deleteLater()
+        app.processEvents()
+
+
+@pytest.fixture(autouse=True)
+def clean_qt_widgets(qapp: QApplication) -> Generator[None, None, None]:
+    """Ensure all Qt widgets created during a test are closed and drained."""
+    yield
+    if qapp:
+        for w in list(qapp.topLevelWidgets()):
+            w.close()
+            w.deleteLater()
+        qapp.processEvents()
+        qapp.sendPostedEvents(None, 0)
 
 
 @pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")

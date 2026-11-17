@@ -315,6 +315,12 @@ class FloatingCompanionWidget(QWidget):
         layout.addWidget(self.avatar)
         self.setCursor(Qt.PointingHandCursor)
 
+    def closeEvent(self, event: Any) -> None:
+        self.avatar.stop_animation()
+        if hasattr(self, "menu") and self.menu:
+            self.menu.close()
+        super().closeEvent(event)
+
     def _position_to_initial_corner(self) -> None:
         """Position widget in the configured desktop corner with margins."""
         screen = QGuiApplication.primaryScreen()

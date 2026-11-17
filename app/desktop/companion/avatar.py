@@ -105,6 +105,10 @@ class TsukikoAvatarWidget(QWidget):  # type: ignore[misc]
             self._phase = 0.0
             self.update()
 
+    def closeEvent(self, event: Any) -> None:
+        self.stop_animation()
+        super().closeEvent(event)
+
     def _on_tick(self) -> None:
         # Subtle gentle oscillation (1.5s per cycle)
         speed = 0.08 if self._active else 0.03
