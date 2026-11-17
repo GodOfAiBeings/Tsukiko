@@ -136,11 +136,14 @@ def main(args: list[str] | None = None) -> int:
         return 0
 
     # PySide6 GUI launch
-    # In Phase 2, the Tsukiko Companion Window will be attached here
-    qt_app = QApplication.instance() or QApplication(sys.argv)
+    from app.desktop.companion import launch_companion
+
+    qt_app = QApplication.instance() or QApplication(sys.argv if sys.argv else ["tsukiko"])
     qt_app.aboutToQuit.connect(orchestrator.stop)
     orchestrator.start()
-    logger.info("GUI subsystem initialized. Ready for Phase 2 UI attachment.")
+
+    widget, main_window = launch_companion(config=config, orchestrator=orchestrator)
+    logger.info("Tsukiko Desktop Companion launched in GUI mode.")
 
     # Periodic timer to allow Python signal handlers to process in Qt event loop
     timer = QTimer()

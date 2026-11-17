@@ -107,3 +107,27 @@ flowchart TD
 * Strict permission architecture for future action execution.
 * Model proposals must pass through explicit user confirmation dialogs before execution.
 * Audit trail logged to `logs/tsukiko.jsonl`.
+
+### 3.7 Desktop Companion UI Subsystem (`app/desktop/companion/`)
+* **Floating Companion Widget (`FloatingCompanionWidget`)**:
+  * Frameless, transparent floating Qt window displaying Tsukiko logo/avatar emblem.
+  * Procedural vector rendering (`QPainter`) without VRM, Live2D, 3D character, or GPU engine.
+  * Draggable across display work area with screen boundary clamping.
+  * Left-clicking the logo toggles the compact vertical menu immediately to its left.
+  * Right-clicking also opens the menu.
+  * Never forces itself over fullscreen exclusive games.
+* **Compact Vertical Menu (`CompactCompanionMenu`)**:
+  * Positioned immediately to the left of the floating avatar with screen edge fallback.
+  * Ordered options: Open, Microphone (locked Phase 6), Speaker (locked Phase 6), Screen Sharing (locked Phase 5), Settings, Game Mode, Hide Widget, Exit.
+  * Dismisses smoothly when clicking outside (`Qt.Popup`).
+* **Game Mode**:
+  * Suspends avatar shimmer animation and hides the widget.
+  * Does not inspect game processes, inject code, or install hooks.
+* **Companion Main Window (`CompanionMainWindow`)**:
+  * Complete application window launched via `Open` or `Settings`.
+  * Silver-blue Moonlight design system (`MoonlightTheme`).
+  * 5 modular views: `ChatView` (Phase 3 disclaimer), `SystemStatusView` (genuine hardware metrics), `PrivacyView` (locked sensor indicators and zero-trust invariants), `MemoryView` (Phase 4 placeholder), `SettingsView` (appearance customization).
+  * Closing the main window hides it to the background while preserving independent widget execution.
+* **Testing Architecture**:
+  * Full offscreen Qt test execution via `QT_QPA_PLATFORM=offscreen`.
+  * Verified in `tests/test_desktop_companion.py` (24 dedicated unit tests).

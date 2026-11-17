@@ -37,8 +37,8 @@ Tsukiko is engineered from first principles for:
 | **Structured Logging** | **Implemented & Tested** | Color console + rotating `tsukiko.log` & `tsukiko.jsonl`, dynamic log re-routing, Windows file unlock. Verified in `tests/test_logging.py`. |
 | **Packaging & Distribution** | **Implemented & Tested** | Genuine wheel build, isolated venv installation, out-of-tree CLI execution, and resource isolation verified. Verified in `tests/test_packaging.py` (3 tests). |
 | **Continuous Integration (CI)** | **Implemented & Tested** | Windows 11 / Python 3.11 GitHub Actions workflow in `.github/workflows/ci.yml`. |
-| **Automated Test Suite** | **Implemented & Tested** | 71 unit, regression, packaging, and integration tests (70 passing, 1 skipped on Windows due to AF_UNIX absence) with 0 warnings and 0 errors. |
-| **Desktop Companion UI** | *Designed (Phase 2)* | Staged in `requirements/ui.txt` and `app/desktop/companion/`. Awaiting Phase 2 approval. |
+| **Automated Test Suite** | **Implemented & Tested** | 317 unit, regression, packaging, and integration tests (313 passing, 4 skipped on Windows; 315 passing, 2 skipped on Linux) with 0 failures and 0 errors. |
+| **Desktop Companion UI** | **Implemented & Tested** | PySide6-Essentials floating companion widget, procedural moonlight avatar, compact vertical left menu, main window, and 5 views. Verified in `tests/test_desktop_companion.py` (24 tests). |
 | **Local AI Brain (llama.cpp)** | *Designed (Phase 3)* | Staged in `requirements/ai.txt` and `app/core/brain/`. No model weights downloaded. |
 | **Persistent Long-Term Memory** | *Designed (Phase 4)* | Staged in `app/memory/`. SQLite schema designed; database not yet created. |
 | **Desktop Perception Pipeline** | *Designed (Phase 5)* | Staged in `requirements/perception.txt` and `app/perception/`. Screen capture OFF by default. |
@@ -61,6 +61,7 @@ git --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements/base.txt
+pip install -r requirements/ui.txt
 pip install -e ".[dev]"
 ```
 
@@ -74,11 +75,38 @@ tsukiko --check-hardware
 python -m app.main --check-hardware
 ```
 
-### 4. Execute Test Suite
-Run automated unit and integration tests (71 tests):
+### 4. Launch Desktop Companion (Phase 2 GUI)
+Launch the floating desktop companion widget and Moonlight interface:
+```powershell
+tsukiko
+```
+*(Or in headless mode without GUI)*
+```powershell
+tsukiko --headless
+```
+
+### 5. Execute Test Suite
+Run automated unit and integration tests (317 tests):
 ```powershell
 pytest -v
 ```
+
+---
+
+## Desktop Companion Interface (Phase 2)
+
+* **Floating Companion Widget**: Frameless, translucent desktop widget with a procedural vector moonlight avatar (`QPainter`). Draggable across screens, clamped to display boundaries, and supports Game Mode (suspends visual activity without game hooking).
+* **Compact Vertical Menu**: Clicking the logo opens an 8-item menu immediately to its left:
+  1. `Open` — opens the complete Tsukiko main application window.
+  2. `Microphone` — voice input control (*locked / Phase 6*).
+  3. `Speaker` — Tsukiko voice output control (*locked / Phase 6*).
+  4. `Screen Sharing` — explicit screen-sharing control (*locked / Phase 5*).
+  5. `Settings` — opens UI settings in the main window.
+  6. `Game Mode` — hides widget and suspends visual animations.
+  7. `Hide Widget` — hides floating widget without exiting Tsukiko.
+  8. `Exit` — cleanly terminates the application and orchestrator.
+* **Main Companion Window**: Sidebar navigation featuring Chat (Phase 3 disclaimer), System & Hardware Status (genuine metrics), Privacy & Security (locked sensors and zero-trust verification), Memory (Phase 4 placeholder), and Settings (UI customization).
+* **Independent Operation**: Closing the main window hides it to the background while the floating widget continues to function independently.
 
 ---
 

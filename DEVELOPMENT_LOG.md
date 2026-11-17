@@ -1,5 +1,62 @@
 # Tsukiko Development Log
 
+## Phase 2: Desktop Companion UI Implementation (2026-11-17)
+
+### Status: Complete, Hardened & Verified across Windows and Linux
+
+### Architecture & Deliverables
+Phase 2 implemented the complete Tsukiko Desktop Companion User Interface using PySide6-Essentials, establishing a persistent, elegant offline companion while preserving 100% of Phase 1 privacy invariants:
+
+1. **Procedural Vector Avatar (`app/desktop/companion/avatar.py`)**:
+   - `TsukikoAvatarWidget`: Smooth, anti-aliased lunar emblem rendered using pure `QPainter` vectors and radial/linear gradients.
+   - Zero external 3D engine, VRM, Live2D, image files, or web engine dependencies.
+   - Gentle, low-overhead oscillating moonlight shimmer (1.5s period) with passive and active states.
+   - Clean animation suspension and resumption for Game Mode.
+
+2. **Final Floating Companion Widget (`app/desktop/companion/widget.py`)**:
+   - `FloatingCompanionWidget`: Small, transparent, frameless Qt window (`Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.SubWindow`).
+   - Draggable across multi-monitor setups; position is clamped to `availableGeometry()` so the widget can never be lost offscreen.
+   - Supports initial corner placement (`bottom-right`, `bottom-left`, `top-right`, `top-left`) with configurable margins.
+   - Clicking the avatar opens the compact vertical menu immediately to its LEFT.
+   - Never forces itself over fullscreen exclusive games.
+
+3. **Compact Companion Vertical Left Menu (`app/desktop/companion/widget.py`)**:
+   - `CompactCompanionMenu`: Frameless translucent popup window (`Qt.Popup`) positioned immediately to the LEFT of the avatar widget, with intelligent screen edge fallback.
+   - Contains 8 options in exact order:
+     1. `Open` — opens the complete Tsukiko main application window (`CompanionMainWindow`).
+     2. `Microphone` — voice input control (strictly locked, Phase 6).
+     3. `Speaker` — Tsukiko voice output control (strictly locked, Phase 6).
+     4. `Screen Sharing` — explicit screen-sharing control (strictly locked, Phase 5).
+     5. `Settings` — opens the settings section of the main UI.
+     6. `Game Mode` — hides widget and suspends visual animations.
+     7. `Hide Widget` — hides floating widget without exiting Tsukiko.
+     8. `Exit` — cleanly shuts down the entire application and orchestrator.
+   - Dismisses smoothly when clicking outside.
+
+4. **Game Mode (`FloatingCompanionWidget.enable_game_mode()`)**:
+   - Hides the floating widget and halts avatar animation timers.
+   - Strictly does NOT inspect game processes, inject code, or install system hooks.
+   - Provides clean `disable_game_mode()` restoration.
+
+5. **Complete Main Application Window (`app/desktop/companion/window.py`)**:
+   - `CompanionMainWindow`: Independent moonlight window with sidebar navigation:
+     - `ChatView` (`views/chat.py`): Companion dialogue view with prominent Phase 3 banner; message submission is strictly disabled until the local inference engine is integrated.
+     - `SystemStatusView` (`views/system_status.py`): Honest cards displaying genuine CPU, RAM, GPU, VRAM, and subsystem states directly from `HardwareInspector` and `TsukikoOrchestrator` without synthetic/mock values.
+     - `PrivacyView` (`views/privacy_view.py`): Zero-trust boundary status display with visibly locked sensor controls (screen sharing, microphone, desktop automation).
+     - `MemoryView` (`views/memory_view.py`): Structural placeholder explaining persistent memory without creating any SQLite database.
+     - `SettingsView` (`views/settings_view.py`): UI appearance customization (theme, accent color, glow color, opacity slider 0.20-1.00, corner placement, margins) with strict input validation.
+   - Independent execution: closing the main window hides it to the background while the floating companion widget remains running.
+
+6. **Moonlight Theme System (`app/desktop/companion/theme.py`)**:
+   - Silver-blue moonlight design tokens (`#7FB3D5`, `#D4E6F1`, `#0D131C`, `#151F2C`, opacity `0.92`) and complete QSS stylesheet.
+
+7. **Test Suite Expansion & Verification (`tests/test_desktop_companion.py`)**:
+   - 24 dedicated UI tests running with `QT_QPA_PLATFORM=offscreen`.
+   - Complete test suite expanded from 293 to 317 tests (313 passed, 4 skipped on Windows; 315 passed, 2 skipped on Linux).
+   - Zero test failures, zero regressions across all Phase 1 privacy and firewall boundaries.
+
+---
+
 ## Phase 1: Foundation (Initial Build: 2026-11-11 | Audit & Repair: 2026-11-11 | Final Security Acceptance Pass: 2026-11-11)
 
 ### Status: Complete, Audited, Hardened & Verified for Phase 1 Acceptance Candidate

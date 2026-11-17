@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - Phase 2: Desktop Companion UI Implementation - 2026-11-17
+
+### Added
+- **Final Floating Companion Widget (`app/desktop/companion/widget.py`)**:
+  - Independent transparent frameless Qt window (`FloatingCompanionWidget`).
+  - Houses procedural vector moonlight avatar (`TsukikoAvatarWidget`) rendered via `QPainter` with zero external assets, VRM, Live2D, 3D character, or GPU engine.
+  - Draggable across multi-monitor desktops with automated boundary clamping against `availableGeometry()`.
+  - Left-clicking or right-clicking the avatar opens a compact vertical menu positioned immediately to its left.
+  - Never forces itself over fullscreen exclusive games.
+- **Compact Companion Vertical Left Menu (`app/desktop/companion/widget.py`)**:
+  - Positioned immediately to the left of the avatar with screen edge fallback.
+  - Contains 8 options in exact order:
+    1. `Open` — opens complete Tsukiko main application window.
+    2. `Microphone` — voice input control (strictly locked, Phase 6).
+    3. `Speaker` — Tsukiko voice output control (strictly locked, Phase 6).
+    4. `Screen Sharing` — explicit screen-sharing control (strictly locked, Phase 5).
+    5. `Settings` — opens settings section of main UI.
+    6. `Game Mode` — hides widget and suspends visual animations.
+    7. `Hide Widget` — hides floating widget without exiting Tsukiko.
+    8. `Exit` — shuts down entire application cleanly.
+  - Closes smoothly when clicking outside (`Qt.Popup`).
+- **Game Mode (`FloatingCompanionWidget.enable_game_mode()`)**:
+  - Suspends avatar shimmer animation and hides the widget without inspecting game processes, injecting code, or installing hooks.
+  - Provides `disable_game_mode()` for restoration.
+- **Main Companion Window (`app/desktop/companion/window.py`)**:
+  - Complete application window (`CompanionMainWindow`) with sidebar navigation:
+    - `ChatView`: Companion interaction interface with Phase 3 banner; message submission is strictly disabled until the local inference engine arrives.
+    - `SystemStatusView`: Real-time telemetry displaying genuine CPU, RAM, GPU, VRAM, and subsystem states from `HardwareInspector` and `TsukikoOrchestrator` without synthetic/mock values.
+    - `PrivacyView`: Invariant zero-trust status display with visibly locked sensor controls (screen sharing, microphone, desktop automation).
+    - `MemoryView`: Phase 4 structural placeholder explaining persistent memory without creating any SQLite database.
+    - `SettingsView`: UI customization for theme, accent color, glow color, opacity slider (0.2-1.0), corner placement, and margins with strict validation.
+  - Closing the main window hides it to the background while preserving independent floating widget execution.
+- **Moonlight Theme System (`app/desktop/companion/theme.py`)**:
+  - Comprehensive silver-blue moonlight design tokens (`#7FB3D5`, `#D4E6F1`, `#0D131C`, `#151F2C`, opacity `0.92`) and complete QSS stylesheet.
+- **Application Integration (`app/main.py`)**:
+  - Desktop companion launch wired into `launch_companion()`, while fully preserving `--headless` and `--check-hardware` modes without requiring Qt.
+- **Unit and Integration Test Suite (`tests/test_desktop_companion.py`)**:
+  - 24 tests verifying theme, avatar rendering/timer, menu ordering, locked states, left-positioning, boundary clamping, Game Mode suspension, disabled chat submission, genuine status readings, zero-database memory placeholder, and headless CLI.
+  - Total test suite expanded to 317 tests (313 passed, 4 skipped on Windows; 315 passed, 2 skipped on Linux).
+- **CI Workflow Update (`.github/workflows/ci.yml`)**:
+  - Windows: installs `requirements/ui.txt` (`PySide6-Essentials`, `qasync`) and runs pytest with `QT_QPA_PLATFORM=offscreen`.
+  - Linux: installs `libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3`, `requirements/ui.txt`, and runs pytest with `QT_QPA_PLATFORM=offscreen`.
+
+---
+
 ## [0.1.8] - Final CIM Value Validation Correction - 2026-11-17
 
 ### Fixed
