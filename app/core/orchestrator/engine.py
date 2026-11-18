@@ -23,6 +23,7 @@ class TsukikoOrchestrator:
     def __init__(self, config: Optional[TsukikoConfig] = None):
         self.config = config or get_config()
         self.brain = TsukikoBrain(config=self.config)
+        self.initiative_scheduler: Optional[Any] = None
         self.hardware_profile: Optional[HardwareProfile] = None
         self._is_running = False
         self._lock = threading.RLock()
@@ -84,11 +85,22 @@ class TsukikoOrchestrator:
             logger.info("Tsukiko Core Orchestrator is running.")
 
     def stop(self) -> None:
-        """Gracefully shuts down all active subsystems."""
+        """Gracefully shuts down all active subsystems in strict order:
+        1. Initiative Scheduler (aborts proactive background worker & stops timer)
+        2. Local Brain & Model Manager (cancels active inference, clears session, unloads weights)
+        3. Orchestrator state transition to stopped
+        """
         with self._lock:
             if not self._is_running and self._status["state"] == "stopped":
                 return
             logger.info("Stopping Tsukiko Core Orchestrator...")
+            # 1. Stop initiative scheduler first if attached
+            if self.initiative_scheduler is not None:
+                try:
+                    self.initiative_scheduler.stop()
+                except Exception as e:
+                    logger.debug(f"Exception stopping initiative scheduler during orchestrator stop: {e}")
+            # 2. Stop brain and unload model
             self.brain.shutdown()
             self._is_running = False
             self._status["screen_sharing"] = False

@@ -421,6 +421,11 @@ class CompanionMainWindow(QMainWindow):
 
     def _on_fallback_exit_clicked(self) -> None:
         logger.info("Exit requested from main window fallback controls.")
+        if hasattr(self, "initiative_scheduler") and self.initiative_scheduler:
+            try:
+                self.initiative_scheduler.stop()
+            except Exception as e:
+                logger.debug(f"Exception stopping scheduler in fallback exit: {e}")
         app = QApplication.instance()
         if app:
             app.quit()

@@ -101,6 +101,13 @@ def launch_companion(
     initiative_scheduler.start()
     widget.initiative_scheduler = initiative_scheduler  # type: ignore[attr-defined]
     main_window.initiative_scheduler = initiative_scheduler  # type: ignore[attr-defined]
+    if orchestrator is not None:
+        orchestrator.initiative_scheduler = initiative_scheduler
+
+    # Ensure initiative scheduler stops cleanly upon Qt application quit
+    qt_app = QApplication.instance()
+    if qt_app:
+        qt_app.aboutToQuit.connect(initiative_scheduler.stop)
 
     # Dismiss speech bubble when user sends a message in chat
     if hasattr(main_window, "chat_view"):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import warnings
 from typing import Any, Optional
 
 from app.core.model_manager.lifecycle import ModelLifecycleState
@@ -44,26 +45,51 @@ class ProactiveInitiativeWorker(QThread if HAS_PYSIDE6 else object):  # type: ig
             raise RuntimeError("PySide6 is required to instantiate ProactiveInitiativeWorker")
         super().__init__(parent)
         self._brain = brain
+        self._is_aborted = False
+
+    def abort(self) -> None:
+        """Signals the worker to abort and cancels active generation in the brain."""
+        self._is_aborted = True
+        if self._brain:
+            try:
+                self._brain.cancel_generation()
+            except Exception as e:
+                logger.debug(f"Exception during worker abort cancelling brain: {e}")
+
+    @property
+    def is_aborted(self) -> bool:
+        return self._is_aborted
 
     def run(self) -> None:
-        if not self._brain:
-            self.initiative_silent.emit()
+        if self._is_aborted or not self._brain:
+            if not self._is_aborted:
+                self.initiative_silent.emit()
             return
 
         try:
             # Check model loaded state inside worker
             if not self._brain.model_manager.info.is_loaded:
-                self.initiative_silent.emit()
+                if not self._is_aborted:
+                    self.initiative_silent.emit()
                 return
 
             remark = self._brain.check_conversational_initiative()
+            if self._is_aborted:
+                return
+
             if remark:
                 self.initiative_ready.emit(remark)
             else:
                 self.initiative_silent.emit()
         except Exception as e:
+            if self._is_aborted:
+                return
             logger.debug(f"Exception during background proactive initiative: {e}")
             self.error_occurred.emit(str(e))
+
+
+# Module-level registry to prevent premature garbage collection of running threads
+_LIVING_WORKERS: set[ProactiveInitiativeWorker] = set()
 
 
 class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type: ignore[misc]
@@ -88,6 +114,8 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
         self._main_window = main_window
         self._brain = brain
         self._active_worker: Optional[ProactiveInitiativeWorker] = None
+        self._retained_workers: list[ProactiveInitiativeWorker] = []
+        self._is_stopped: bool = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(check_interval_ms)
@@ -95,7 +123,19 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
 
     @property
     def is_running(self) -> bool:
-        return self._timer.isActive()
+        return self._timer.isActive() and not self._is_stopped
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._is_stopped
+
+    @property
+    def active_worker(self) -> Optional[ProactiveInitiativeWorker]:
+        return self._active_worker
+
+    @property
+    def retained_workers(self) -> list[ProactiveInitiativeWorker]:
+        return list(self._retained_workers)
 
     @property
     def check_interval_ms(self) -> int:
@@ -106,25 +146,96 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
 
     def start(self) -> None:
         """Starts periodic idle checking."""
+        self._is_stopped = False
         if not self._timer.isActive():
             self._timer.start()
             logger.debug("Companion conversational initiative scheduler started.")
 
-    def stop(self) -> None:
-        """Stops periodic idle checking and aborts any active worker."""
+    def stop(self, wait_timeout_ms: int = 2000) -> bool:
+        """Stops periodic idle checking and aborts any active worker deterministically.
+        
+        Lifecycle & Concurrency Invariants:
+        1. Idempotent: safe to invoke repeatedly from signal handlers, UI events, and orchestrator.
+        2. Halts the periodic QTimer immediately so no new checks run.
+        3. Never destroys or discards a running QThread wrapper prematurely.
+        4. Cancels active proactive generation in the brain via worker.abort().
+        5. Waits up to wait_timeout_ms for the worker thread to exit cleanly.
+        6. If the worker outlives wait_timeout_ms, the reference is safely retained until
+           worker.finished fires, completely preventing 'QThread: Destroyed while thread is still running'.
+        
+        Returns True if clean shutdown succeeded (or no worker was running); False if worker is still running.
+        """
+        self._is_stopped = True
         if self._timer.isActive():
             self._timer.stop()
-        if self._active_worker and self._active_worker.isRunning():
-            self._active_worker.wait(1000)
+
+        worker = self._active_worker
+        if worker is None:
+            logger.debug("Companion conversational initiative scheduler stopped (no active worker).")
+            return True
+
+        if worker.isRunning():
+            # 1. Safely disconnect delivery signals so no UI callbacks fire during shutdown
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                for sig, slot in (
+                    (worker.initiative_ready, self._handle_initiative_ready),
+                    (worker.initiative_silent, self._handle_initiative_silent),
+                    (worker.error_occurred, self._handle_initiative_silent),
+                    (worker.finished, self._cleanup_worker),
+                ):
+                    try:
+                        sig.disconnect(slot)
+                    except Exception:
+                        pass
+
+            # 2. Retain reference so Python never garbage-collects a running QThread
+            if worker not in self._retained_workers:
+                self._retained_workers.append(worker)
+
+            # 3. Request abort and cancel brain generation
+            worker.abort()
+
+            # 4. Attach safe deferred cleanup to release reference ONLY when thread has truly exited
+            def _on_retired_finished(w: ProactiveInitiativeWorker = worker) -> None:
+                try:
+                    if w in self._retained_workers:
+                        self._retained_workers.remove(w)
+                except (ValueError, RuntimeError):
+                    pass
+                if self._active_worker is w:
+                    self._active_worker = None
+                _LIVING_WORKERS.discard(w)
+
+            try:
+                worker.finished.connect(_on_retired_finished)
+            except (RuntimeError, TypeError):
+                pass
+
+            # 5. Wait bounded duration for clean exit
+            finished = worker.wait(wait_timeout_ms)
+            if finished:
+                _on_retired_finished(worker)
+                self._active_worker = None
+                logger.debug("Companion conversational initiative scheduler stopped cleanly.")
+                return True
+            else:
+                logger.warning(
+                    f"Active proactive worker exceeded {wait_timeout_ms}ms wait timeout; "
+                    "retaining worker reference safely until thread completion."
+                )
+                return False
+        else:
             self._active_worker = None
-        logger.debug("Companion conversational initiative scheduler stopped.")
+            logger.debug("Companion conversational initiative scheduler stopped (worker was not running).")
+            return True
 
     def check_initiative(self) -> bool:
         """Evaluates whether to initiate a conversation right now.
         
         Returns True if a background worker was launched; False otherwise.
         """
-        if not self._brain:
+        if self._is_stopped or not self._brain:
             return False
 
         # 1. Do NOT automatically load an unloaded model just to generate a proactive message
@@ -132,7 +243,7 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
             return False
 
         # 2. Concurrency Protection: never launch overlapping generation or background workers
-        if self._active_worker is not None:
+        if self._active_worker is not None and self._active_worker.isRunning():
             return False
         if self._brain.model_manager.info.state == ModelLifecycleState.GENERATING:
             return False
@@ -183,17 +294,22 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
             logger.debug(f"Initiative scheduler evaluation: {reason}")
             return False
 
-        # 8. Offload inference strictly to background QThread
-        self._active_worker = ProactiveInitiativeWorker(brain=self._brain, parent=self)
-        self._active_worker.initiative_ready.connect(self._handle_initiative_ready)
-        self._active_worker.initiative_silent.connect(self._handle_initiative_silent)
-        self._active_worker.error_occurred.connect(self._handle_initiative_silent)
-        self._active_worker.finished.connect(self._cleanup_worker)
-        self._active_worker.start()
+        # 8. Offload inference strictly to background QThread (parent=None ensures independent lifetime)
+        worker = ProactiveInitiativeWorker(brain=self._brain, parent=None)
+        self._active_worker = worker
+        _LIVING_WORKERS.add(worker)
+        worker.initiative_ready.connect(self._handle_initiative_ready)
+        worker.initiative_silent.connect(self._handle_initiative_silent)
+        worker.error_occurred.connect(self._handle_initiative_silent)
+        worker.finished.connect(self._cleanup_worker)
+        worker.start()
         return True
 
     def _handle_initiative_ready(self, remark: str) -> None:
         """Called on Qt main thread when background inference yields a proactive remark."""
+        if self._is_stopped:
+            return
+
         logger.info(f"Delivering proactive remark: {remark[:40]}...")
 
         # 1. Add to main chat conversation view
@@ -212,4 +328,6 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
         logger.debug("Proactive worker concluded with silence.")
 
     def _cleanup_worker(self) -> None:
-        self._active_worker = None
+        if self._active_worker and not self._active_worker.isRunning():
+            _LIVING_WORKERS.discard(self._active_worker)
+            self._active_worker = None

@@ -366,6 +366,11 @@ class FloatingCompanionWidget(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
     def closeEvent(self, event: Any) -> None:
+        if hasattr(self, "initiative_scheduler") and self.initiative_scheduler:
+            try:
+                self.initiative_scheduler.stop()
+            except Exception as e:
+                logger.debug(f"Exception stopping scheduler in widget closeEvent: {e}")
         self._fullscreen_timer.stop()
         self.avatar.stop_animation()
         self.hide_speech_bubble()
@@ -643,6 +648,11 @@ class FloatingCompanionWidget(QWidget):
 
     def _handle_exit(self) -> None:
         logger.info("Exit requested from companion menu.")
+        if hasattr(self, "initiative_scheduler") and self.initiative_scheduler:
+            try:
+                self.initiative_scheduler.stop()
+            except Exception as e:
+                logger.debug(f"Exception stopping scheduler in _handle_exit: {e}")
         self.exit_requested.emit()
         app = QApplication.instance()
         if app:

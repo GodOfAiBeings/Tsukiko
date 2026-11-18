@@ -1266,6 +1266,248 @@ class TestCompanionInitiativeScheduler:
 
 
 # ==============================================================================
+# 12. Scheduler Lifecycle, Deterministic Shutdown, and QThread Safety Tests
+# ==============================================================================
+
+@pytest.mark.skipif(not HAS_PYSIDE6, reason="PySide6 is required for UI tests")
+class TestCompanionSchedulerShutdownLifecycle:
+    """Verifies deterministic shutdown, cancellation, and QThread lifecycle invariants."""
+
+    def test_shutdown_when_no_worker_exists(self, qapp: QApplication) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler
+        scheduler = CompanionInitiativeScheduler(
+            widget=None,
+            main_window=None,
+            brain=None,
+            check_interval_ms=100,
+        )
+        assert scheduler.active_worker is None
+        assert scheduler.is_running is False
+        scheduler.start()
+        assert scheduler.is_running is True
+
+        res = scheduler.stop()
+        assert res is True
+        assert scheduler.is_running is False
+        assert scheduler.is_stopped is True
+        assert scheduler.active_worker is None
+
+    def test_shutdown_while_worker_running(self, qapp: QApplication, tmp_path: Path) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler, ProactiveInitiativeWorker
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        brain = TsukikoBrain(config=cfg, engine=fake_engine)
+        brain.initialize()
+        brain.model_manager.load_model()
+
+        cancel_called = []
+        orig_cancel = brain.cancel_generation
+
+        def tracking_cancel() -> None:
+            cancel_called.append(True)
+            orig_cancel()
+
+        brain.cancel_generation = tracking_cancel
+
+        scheduler = CompanionInitiativeScheduler(brain=brain, check_interval_ms=100)
+        worker = ProactiveInitiativeWorker(brain=brain, parent=None)
+        scheduler._active_worker = worker
+        worker.start()
+
+        res = scheduler.stop(wait_timeout_ms=3000)
+        assert res is True
+        assert scheduler.is_running is False
+        assert scheduler.active_worker is None
+        assert len(cancel_called) >= 1
+        assert worker.is_aborted is True
+
+    def test_worker_taking_longer_than_timeout(self, qapp: QApplication) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler, ProactiveInitiativeWorker
+        import time
+
+        class SlowWorker(ProactiveInitiativeWorker):
+            def run(self) -> None:
+                for _ in range(15):
+                    if self.is_aborted:
+                        # Continue slightly to simulate heavy work taking longer than wait timeout
+                        time.sleep(0.04)
+                    else:
+                        time.sleep(0.02)
+
+        brain = MagicMock()
+        scheduler = CompanionInitiativeScheduler(brain=brain, check_interval_ms=100)
+        slow_worker = SlowWorker(brain=brain, parent=None)
+        scheduler._active_worker = slow_worker
+        slow_worker.start()
+
+        # Stop with short timeout so worker outlives wait
+        res = scheduler.stop(wait_timeout_ms=50)
+        assert res is False
+        # Worker reference MUST be retained safely while running
+        assert scheduler.active_worker is slow_worker
+        assert slow_worker in scheduler.retained_workers
+        assert slow_worker.is_aborted is True
+
+        # Now wait for it to naturally finish
+        slow_worker.wait(3000)
+        qapp.processEvents()
+
+        # After finishing, reference is cleaned up
+        assert scheduler.active_worker is None
+        assert slow_worker not in scheduler.retained_workers
+
+    def test_timer_stopped_after_shutdown(self, qapp: QApplication) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler
+        scheduler = CompanionInitiativeScheduler(brain=None, check_interval_ms=50)
+        scheduler.start()
+        assert scheduler.is_running is True
+        assert scheduler._timer.isActive() is True
+
+        scheduler.stop()
+        assert scheduler.is_running is False
+        assert scheduler._timer.isActive() is False
+        assert scheduler.is_stopped is True
+
+        # Calling check_initiative after stop returns False immediately
+        assert scheduler.check_initiative() is False
+
+    def test_worker_reference_retained_until_safe_cleanup(self, qapp: QApplication) -> None:
+        from app.desktop.companion.scheduler import (
+            CompanionInitiativeScheduler,
+            ProactiveInitiativeWorker,
+            _LIVING_WORKERS,
+        )
+        import time
+
+        class RetainedWorker(ProactiveInitiativeWorker):
+            def run(self) -> None:
+                time.sleep(0.2)
+
+        brain = MagicMock()
+        scheduler = CompanionInitiativeScheduler(brain=brain)
+        worker = RetainedWorker(brain=brain, parent=None)
+        scheduler._active_worker = worker
+        _LIVING_WORKERS.add(worker)
+        worker.start()
+
+        # Stop with short timeout
+        scheduler.stop(wait_timeout_ms=20)
+        # Worker is still running; references must be retained
+        assert worker.isRunning() is True
+        assert scheduler.active_worker is worker
+        assert worker in scheduler.retained_workers
+        assert worker in _LIVING_WORKERS
+
+        # Wait for natural exit
+        worker.wait(2000)
+        qapp.processEvents()
+
+        # Safe cleanup should have cleared references
+        assert scheduler.active_worker is None
+        assert worker not in scheduler.retained_workers
+        assert worker not in _LIVING_WORKERS
+
+    def test_repeated_shutdown_calls(self, qapp: QApplication) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler
+        scheduler = CompanionInitiativeScheduler(brain=None, check_interval_ms=100)
+        scheduler.start()
+
+        # Call stop() multiple times consecutively
+        for _ in range(5):
+            res = scheduler.stop()
+            assert res is True
+            assert scheduler.is_running is False
+            assert scheduler.is_stopped is True
+
+    def test_qapplication_exit_with_active_proactive_worker(self, qapp: QApplication) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler, ProactiveInitiativeWorker
+        import time
+
+        class ActiveWorker(ProactiveInitiativeWorker):
+            def run(self) -> None:
+                for _ in range(30):
+                    if self.is_aborted:
+                        break
+                    time.sleep(0.01)
+
+        brain = MagicMock()
+        scheduler = CompanionInitiativeScheduler(brain=brain)
+        worker = ActiveWorker(brain=brain, parent=None)
+        scheduler._active_worker = worker
+        worker.start()
+
+        # Connect to aboutToQuit signal as in launch_companion
+        qapp.aboutToQuit.connect(scheduler.stop)
+        try:
+            qapp.aboutToQuit.emit()
+            qapp.processEvents()
+
+            assert scheduler.is_stopped is True
+            assert worker.is_aborted is True
+            worker.wait(2000)
+            assert scheduler.active_worker is None
+        finally:
+            try:
+                qapp.aboutToQuit.disconnect(scheduler.stop)
+            except Exception:
+                pass
+
+    def test_no_qthread_destroyed_while_running_condition(self, qapp: QApplication, capsys: Any) -> None:
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler, ProactiveInitiativeWorker
+        import gc
+        import time
+
+        class MonitoredWorker(ProactiveInitiativeWorker):
+            def run(self) -> None:
+                for _ in range(20):
+                    if self.is_aborted:
+                        break
+                    time.sleep(0.01)
+
+        brain = MagicMock()
+        scheduler = CompanionInitiativeScheduler(brain=brain)
+        worker = MonitoredWorker(brain=brain, parent=None)
+        scheduler._active_worker = worker
+        worker.start()
+
+        scheduler.stop(wait_timeout_ms=1000)
+        gc.collect()
+        qapp.processEvents()
+
+        captured = capsys.readouterr()
+        assert "QThread: Destroyed while thread is still running" not in captured.err
+        assert "QThread: Destroyed while thread is still running" not in captured.out
+
+    def test_coordinated_shutdown_order(self) -> None:
+        from app.core.orchestrator.engine import TsukikoOrchestrator
+        order = []
+
+        class MockScheduler:
+            def stop(self) -> bool:
+                order.append("scheduler")
+                return True
+
+        class MockBrain:
+            def shutdown(self) -> None:
+                order.append("brain")
+
+        orch = TsukikoOrchestrator()
+        orch.brain = MockBrain()  # type: ignore[assignment]
+        orch.initiative_scheduler = MockScheduler()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        orch.stop()
+        assert order == ["scheduler", "brain"]
+        assert orch.is_running is False
+        assert orch._status["state"] == "stopped"
+
+
+# ==============================================================================
 # 13. Resource Limit Enforcement & Reload Deadlock Tests
 # ==============================================================================
 

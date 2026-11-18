@@ -1,19 +1,34 @@
 -r base.txt
 # Tsukiko Phase 3: Local Neural Inference Dependencies
-# Note: Keep runtime imports lazy. Core application starts cleanly without this package.
+# Note: Keep runtime imports lazy. The core Tsukiko application starts cleanly without this package.
 #
-# Minimum version with verified Qwen3.5 architecture and hybrid-prefix reuse support:
-#   llama-cpp-python>=0.3.17
-# Upstream changelog identifies v0.3.17 with the Qwen 3.5 hybrid prefix-reuse fix.
+# 1. UPSTREAM MINIMUM VERSION & COMPATIBILITY:
+#    llama-cpp-python>=0.3.17
+#    Upstream llama.cpp changelogs confirm v0.3.17+ provides compatibility for the Qwen2.5/Qwen3.5
+#    model architecture, GGUF v3 metadata parsing, and hybrid prefix-reuse support.
 #
-# IMPORTANT (Windows 11 / Python 3.11):
-# To prevent unexpected source compilation requiring MSVC and CMake, install pre-built
-# binary wheels using the official abetlen wheel index:
+# 2. CI TEST SUITE COVERAGE (MOCK / FAKE INFERENCE):
+#    In automated continuous integration (CI) environments on both Windows and Linux,
+#    llama-cpp-python is intentionally NOT installed or required. All test suites validate
+#    the local AI brain, lifecycle state machine, resource offloading estimation, thread
+#    concurrency, and orchestrator integration using the built-in DeterministicFakeEngine.
 #
-# Option A: CPU-only inference (AVX2):
-#   pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# 3. ACTUAL LOCAL NEURAL INFERENCE RUNTIME:
+#    To perform actual on-device neural conversation with Tsukiko, the user must:
+#    a) Install a pre-built binary wheel of llama-cpp-python suitable for their system:
 #
-# Option B: CUDA 12.4 GPU acceleration (for NVIDIA RTX 3050 Laptop GPU):
-#   pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+#       Option A: CPU-only inference (AVX2):
+#         pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#
+#       Option B: CUDA 12.4 GPU acceleration:
+#         pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+#
+#    b) Provide a local GGUF model weight file (e.g. Qwen2.5-Coder or Qwen2.5-7B/3B-Instruct)
+#       and configure its file path via Settings or default_config.yaml.
+#
+# 4. PENDING PHYSICAL HARDWARE BENCHMARKS:
+#    Physical CUDA 12.4 acceleration and VRAM offload benchmarks on the target workstation
+#    (NVIDIA RTX 3050 Laptop GPU, 4 GB VRAM) require physical GPU execution and remain
+#    pending target hardware measurement.
 #
 llama-cpp-python>=0.3.17
