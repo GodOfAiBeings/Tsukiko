@@ -1767,6 +1767,222 @@ class TestCompanionSchedulerShutdownLifecycle:
         assert len(signals_received) == 0
         assert brain.is_generating is False
 
+    def test_normal_chat_generation_active_defers_orchestrator_shutdown(self, tmp_path: Path) -> None:
+        """Verifies that active normal chat generation defers orchestrator shutdown even when scheduler has no workers."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine(canned_response="A lengthy answer " * 30)
+        fake_engine.token_delay_seconds = 0.08
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class IdleScheduler:
+            def __init__(self) -> None:
+                self.has_running_workers = False
+                self.deferred_cb = None
+
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                self.deferred_cb = cb
+
+        idle_sched = IdleScheduler()
+        orch.initiative_scheduler = idle_sched
+
+        received: List[str] = []
+        gen_thread = threading.Thread(
+            target=lambda: [received.append(c) for c in orch.brain.stream_response("Tell me a story.")]
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.is_generating is True
+        assert idle_sched.has_running_workers is False
+
+        # Attempt to stop orchestrator
+        res = orch.stop(timeout_seconds=0.03)
+
+        # Must NOT mark itself stopped because brain is still generating!
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+        assert fake_engine.is_loaded() is True
+
+        gen_thread.join(timeout=3.0)
+        assert orch.brain.is_generating is False
+
+        # Now deferred shutdown completes cleanly
+        completed = orch.complete_deferred_shutdown()
+        assert completed is True
+        assert orch.get_status()["state"] == "stopped"
+        assert orch.brain.model_manager.info.is_loaded is False
+        assert fake_engine.is_loaded() is False
+
+    def test_scheduler_callback_during_chat_generation_does_not_stop_orchestrator(self, tmp_path: Path) -> None:
+        """Verifies that invoking scheduler deferred callback while chat is generating refuses to stop orchestrator."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine(canned_response="Another quiet response " * 20)
+        fake_engine.token_delay_seconds = 0.08
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class CallbackScheduler:
+            def __init__(self) -> None:
+                self.has_running_workers = False
+                self.callback = None
+
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                self.callback = cb
+                if cb:
+                    cb()
+
+        sched = CallbackScheduler()
+        orch.initiative_scheduler = sched
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Explain the night sky."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.is_generating is True
+
+        res = orch.stop(timeout_seconds=0.03)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+
+        # Explicitly invoke complete_deferred_shutdown while generation is active
+        res2 = orch.complete_deferred_shutdown()
+        assert res2 is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        gen_thread.join(timeout=3.0)
+        assert orch.brain.is_generating is False
+
+        # Once finished, complete_deferred_shutdown succeeds
+        assert orch.complete_deferred_shutdown() is True
+        assert orch.get_status()["state"] == "stopped"
+        assert orch.brain.model_manager.info.is_loaded is False
+
+    def test_immediate_brain_shutdown_refusal_enters_deferred_stopping(self) -> None:
+        """Verifies orchestrator enters deferred stopping when brain.shutdown refuses immediate unload."""
+        orch = TsukikoOrchestrator()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class StubBrainRefusingImmediate:
+            def __init__(self) -> None:
+                self.is_generating = False
+                self.shut_called = False
+                self.deferred_called = False
+
+            def cancel_generation(self) -> None:
+                pass
+
+            def shutdown(self, timeout_seconds: float = 0.0) -> bool:
+                self.shut_called = True
+                return False
+
+            def complete_deferred_shutdown(self) -> bool:
+                self.deferred_called = True
+                return True
+
+        orch.brain = StubBrainRefusingImmediate()  # type: ignore[assignment]
+
+        class StubCleanScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = StubCleanScheduler()
+
+        res = orch.stop(timeout_seconds=0.0)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.shut_called is True
+
+        assert orch.complete_deferred_shutdown() is True
+        assert orch.get_status()["state"] == "stopped"
+        assert orch.brain.deferred_called is True
+
+    def test_deferred_shutdown_retried_and_completes_after_chat_finishes(self, tmp_path: Path) -> None:
+        """Verifies orchestrator background watcher automatically completes deferred shutdown when chat finishes."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine(canned_response="Gentle rain on moss. " * 15)
+        fake_engine.token_delay_seconds = 0.05
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Describe the rain."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.is_generating is True
+
+        res = orch.stop(timeout_seconds=0.02)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        gen_thread.join(timeout=3.0)
+        assert orch.brain.is_generating is False
+
+        # Wait briefly for background watcher to complete deferred shutdown
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.05)
+
+        assert orch.get_status()["state"] == "stopped"
+        assert orch.brain.model_manager.info.is_loaded is False
+        assert fake_engine.is_loaded() is False
+
 
 # ==============================================================================
 # 13. Resource Limit Enforcement & Reload Deadlock Tests

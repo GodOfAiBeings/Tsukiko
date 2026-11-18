@@ -134,13 +134,14 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
 
     def set_deferred_shutdown_callback(self, callback: Any) -> None:
         """Registers a callback to execute once all running workers have terminated."""
+        self._on_deferred_shutdown_callback = callback
         if not self.has_running_workers:
             try:
-                callback()
+                res = callback()
+                if res is True:
+                    self._on_deferred_shutdown_callback = None
             except Exception as e:
                 logger.debug(f"Exception invoking immediate shutdown callback: {e}")
-        else:
-            self._on_deferred_shutdown_callback = callback
 
     @property
     def is_running(self) -> bool:
@@ -230,10 +231,10 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
 
                 # If all workers have completed, invoke deferred shutdown callback if registered
                 if not self.has_running_workers and self._on_deferred_shutdown_callback is not None:
-                    cb = self._on_deferred_shutdown_callback
-                    self._on_deferred_shutdown_callback = None
                     try:
-                        cb()
+                        res = self._on_deferred_shutdown_callback()
+                        if res is True:
+                            self._on_deferred_shutdown_callback = None
                     except Exception as e:
                         logger.debug(f"Exception in deferred shutdown callback: {e}")
 
