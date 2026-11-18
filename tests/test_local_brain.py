@@ -2577,27 +2577,350 @@ class TestGenerationCompletionCallbackOrdering:
     # 9. brain_generating flag prevents premature shutdown during history append
     # ------------------------------------------------------------------ #
     def test_brain_generating_flag_prevents_premature_shutdown(self, tmp_path: Path) -> None:
-        """While _brain_generating is True, shutdown must be deferred even
+        """While active_operations > 0, shutdown must be deferred even
         if the model-level generation has already finished."""
         fake = DeterministicFakeEngine(canned_response="Quick.")
         orch = self._make_orch(tmp_path, fake)
 
-        # Intercept brain's stream_response to observe the flag lifecycle
-        flag_states: List[bool] = []
+        # Intercept brain's stream_response to observe the active_operations lifecycle
+        active_counts: List[int] = []
         orig_notify = orch.brain._notify_generation_finished
 
         def spy_notify() -> None:
-            # At the moment notification fires, _brain_generating should already be False
-            flag_states.append(orch.brain._brain_generating)
+            # At the moment notification fires, active_operations should already be 0
+            active_counts.append(orch.brain.active_operations)
             orig_notify()
 
         orch.brain._notify_generation_finished = spy_notify
 
         list(orch.brain.stream_response("Flag lifecycle."))
 
-        assert len(flag_states) == 1
-        assert flag_states[0] is False, "_brain_generating must be False when notification fires"
-        assert orch.brain._brain_generating is False
+        assert len(active_counts) == 1
+        assert active_counts[0] == 0, "active_operations must be 0 when notification fires"
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+
+# ==============================================================================
+# 13b. Active Operation Concurrency and State Tracking Tests
+# ==============================================================================
+
+class TestActiveOperationConcurrencyAndStateTracking:
+    """Verifies that active operation counter and prompt-preparation exception
+    safety prevent concurrency races, state corruption, and premature shutdown."""
+
+    def _make_orch(self, tmp_path: Path, engine: DeterministicFakeEngine) -> TsukikoOrchestrator:
+        """Helper: creates a loaded, running orchestrator with an empty scheduler."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+        return orch
+
+    def test_chat_running_while_proactive_rejected_preserves_active_state(self, tmp_path: Path) -> None:
+        """Proactive request rejected due to concurrent chat must not reset Chat A's active state."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "token1 "
+            chat_hold.wait()
+            yield "token2."
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Chat A ongoing."))
+        )
+        gen_thread.start()
+
+        # Wait until Chat A is generating
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.active_operations == 1
+        assert orch.brain.is_generating is True
+
+        # Now attempt proactive initiative B while Chat A is running
+        result = orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+
+        # Proactive B must be rejected because ModelManager rejects concurrent generation
+        assert result is None
+
+        # CRITICAL: Chat A's active state must remain True and active_operations must still be 1!
+        assert orch.brain.active_operations == 1
+        assert orch.brain.is_generating is True
+        assert fake.is_loaded() is True
+
+        # Release Chat A
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+    def test_chat_history_processing_cannot_race_with_deferred_shutdown(self, tmp_path: Path) -> None:
+        """During Chat A's post-inference history processing, deferred shutdown cannot complete prematurely."""
+        fake = DeterministicFakeEngine(canned_response="A thoughtful response.")
+        orch = self._make_orch(tmp_path, fake)
+
+        history_started = threading.Event()
+        history_unblock = threading.Event()
+        orig_clean = orch.brain.personality.clean_response
+
+        def pausing_clean(raw: str) -> str:
+            history_started.set()
+            history_unblock.wait()
+            return orig_clean(raw)
+
+        orch.brain.personality.clean_response = pausing_clean
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Test history race."))
+        )
+        gen_thread.start()
+
+        # Wait until history processing begins (tokens are already done yielding)
+        assert history_started.wait(timeout=2.0)
+
+        # ModelManager token generation has finished, but brain-level operation is still active!
+        assert fake.is_generating() is False
+        assert orch.brain.active_operations == 1
+        assert orch.brain.is_generating is True
+
+        # Orchestrator stop must NOT complete shutdown or clear history yet
+        res = orch.stop(timeout_seconds=0.01)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+        assert fake.is_loaded() is True
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        # Release history processing
+        history_unblock.set()
+        gen_thread.join(timeout=3.0)
+
+        # Wait for deferred watcher to complete shutdown
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        assert fake.is_loaded() is False
+        # Conversation history was cleanly cleared by shutdown and not repopulated
+        assert orch.brain.get_history() == []
+
+    def test_prompt_history_pruning_failure_releases_operation_tracking(self, tmp_path: Path) -> None:
+        """Exception during history pruning in stream_response must release active operation count."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        def failing_prune(prompt: str, reserve_tokens_for_generation: int = 1024):
+            raise RuntimeError("Injected pruning failure")
+
+        orch.brain._prune_history_to_fit_context = failing_prune
+
+        assert orch.brain.active_operations == 0
+        with pytest.raises(RuntimeError, match="Injected pruning failure"):
+            list(orch.brain.stream_response("Pruning test."))
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+    def test_message_formatting_failure_releases_operation_tracking(self, tmp_path: Path) -> None:
+        """Exception during message formatting in stream_response must release active operation count."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        def failing_format(history, user_text):
+            raise RuntimeError("Injected format failure")
+
+        orch.brain.personality.format_messages = failing_format
+
+        assert orch.brain.active_operations == 0
+        with pytest.raises(RuntimeError, match="Injected format failure"):
+            list(orch.brain.stream_response("Format test."))
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+    def test_proactive_prompt_construction_failure_releases_operation_tracking(self, tmp_path: Path) -> None:
+        """Exception during initiative prompt construction must release active operation count."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        def failing_build_prompt(**kwargs):
+            raise RuntimeError("Injected proactive prompt failure")
+
+        orch.brain.personality.initiative_engine.build_initiative_prompt = failing_build_prompt
+
+        assert orch.brain.active_operations == 0
+        result = orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+        assert result is None
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+    def test_multiple_rejected_requests_do_not_corrupt_active_operation_count(self, tmp_path: Path) -> None:
+        """Multiple rejected concurrent requests must not decrement or corrupt active operation count."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "holding "
+            chat_hold.wait()
+            yield "done."
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Primary chat."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.active_operations == 1
+
+        # Fire 5 rejected proactive calls
+        for _ in range(5):
+            res = orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+            assert res is None
+            assert orch.brain.active_operations == 1
+
+        # Fire 5 rejected chat calls
+        def rejected_chat():
+            try:
+                list(orch.brain.stream_response("Concurrent attempt."))
+            except RuntimeError:
+                pass
+
+        threads = [threading.Thread(target=rejected_chat) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Primary chat must still be unharmed with active_operations == 1
+        assert orch.brain.active_operations == 1
+        assert orch.brain.is_generating is True
+
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+    def test_completion_listeners_called_only_after_all_operations_finish(self, tmp_path: Path) -> None:
+        """Completion callbacks must not fire when a concurrent operation is rejected while another is active."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        callback_counts = {"n": 0}
+        def count_callback():
+            callback_counts["n"] += 1
+
+        orch.brain.register_generation_finished_callback(count_callback)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "token "
+            chat_hold.wait()
+            yield "end."
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Chat with listener."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert callback_counts["n"] == 0
+
+        # Run proactive call that gets rejected
+        res = orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+        assert res is None
+
+        # Rejection must NOT trigger completion notification because Chat is still active!
+        assert callback_counts["n"] == 0
+
+        # Now finish Chat
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        # Now exactly one notification must have fired
+        assert callback_counts["n"] == 1
+
+    def test_model_weights_remain_loaded_while_any_operation_is_active(self, tmp_path: Path) -> None:
+        """Model weights cannot be unloaded via unload_model or stop while brain operation is active."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "tok "
+            chat_hold.wait()
+            yield "fin."
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Weight safety test."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        # Explicit unload_model must refuse
+        unload_result = orch.brain.unload_model()
+        assert unload_result is False
+        assert fake.is_loaded() is True
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        # Orchestrator stop must defer
+        stop_result = orch.stop(timeout_seconds=0.01)
+        assert stop_result is False
+        assert orch.get_status()["state"] == "stopping"
+        assert fake.is_loaded() is True
+
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        assert fake.is_loaded() is False
 
 
 # ==============================================================================

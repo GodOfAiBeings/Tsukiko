@@ -41,7 +41,7 @@ class TsukikoBrain:
         self._history: List[Dict[str, str]] = []
         self._lock = threading.RLock()
         self._is_initialized = False
-        self._brain_generating = False
+        self._active_operations: int = 0
         self._generation_finished_callbacks: List[Any] = []
 
         # NOTE: The brain does NOT register with model_manager's generation callbacks.
@@ -160,6 +160,12 @@ class TsukikoBrain:
             tokens.append(chunk)
         return "".join(tokens)
 
+    @property
+    def active_operations(self) -> int:
+        """Returns the number of currently active brain-level generation operations."""
+        with self._lock:
+            return self._active_operations
+
     def stream_response(
         self,
         user_message: str,
@@ -170,67 +176,77 @@ class TsukikoBrain:
     ) -> Iterator[str]:
         """Streams response tokens incrementally, updating active session history upon completion.
 
-        The brain-level ``_brain_generating`` flag stays True until all history
-        processing completes.  External observers (e.g. the orchestrator's
-        deferred-shutdown path) therefore cannot clear conversation history
-        while the brain is still appending to it.
+        Thread-safe: Increments active operations counter across prompt preparation,
+        inference, and history processing. The entire operation is enclosed in a try/finally
+        so any exception during pruning or formatting guarantees counter decrement, and
+        listeners are notified only when all active operations reach zero.
         """
         clean_user = user_message.strip()
         if not clean_user:
             return
 
-        self.personality.initiative_engine.record_user_activity()
-
         with self._lock:
-            self._brain_generating = True
-            pruned_history = self._prune_history_to_fit_context(
-                clean_user,
-                reserve_tokens_for_generation=max_tokens,
-            )
-            messages = self.personality.format_messages(pruned_history, clean_user)
+            self._active_operations += 1
 
-        accumulated_chunks: List[str] = []
-
+        should_notify = False
         try:
-            for chunk in self.model_manager.stream(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                repeat_penalty=repeat_penalty,
-            ):
-                accumulated_chunks.append(chunk)
-                yield chunk
-        finally:
-            full_response = "".join(accumulated_chunks).strip()
-            if full_response:
-                # Clean response (strip any internal reasoning tokens)
-                clean_response = self.personality.clean_response(full_response)
-                with self._lock:
-                    self._history.append({"role": "user", "content": clean_user})
-                    self._history.append({"role": "assistant", "content": clean_response})
-                    self.personality.disclosure_tracker.register_interaction(clean_user, clean_response)
-                    self.personality.initiative_engine.record_assistant_response()
-                    logger.debug(
-                        f"Turn appended to session history. Current turns: {len(self._history)}"
-                    )
-            # Clear brain-level flag AFTER history processing, then notify exactly once
+            self.personality.initiative_engine.record_user_activity()
+
             with self._lock:
-                self._brain_generating = False
-            self._notify_generation_finished()
+                pruned_history = self._prune_history_to_fit_context(
+                    clean_user,
+                    reserve_tokens_for_generation=max_tokens,
+                )
+                messages = self.personality.format_messages(pruned_history, clean_user)
+
+            accumulated_chunks: List[str] = []
+
+            try:
+                for chunk in self.model_manager.stream(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                ):
+                    accumulated_chunks.append(chunk)
+                    yield chunk
+            finally:
+                full_response = "".join(accumulated_chunks).strip()
+                if full_response:
+                    # Clean response (strip any internal reasoning tokens)
+                    clean_response = self.personality.clean_response(full_response)
+                    with self._lock:
+                        if not self._is_initialized:
+                            logger.debug("Brain was shut down during generation; discarding turn.")
+                        else:
+                            self._history.append({"role": "user", "content": clean_user})
+                            self._history.append({"role": "assistant", "content": clean_response})
+                            self.personality.disclosure_tracker.register_interaction(clean_user, clean_response)
+                            self.personality.initiative_engine.record_assistant_response()
+                            logger.debug(
+                                f"Turn appended to session history. Current turns: {len(self._history)}"
+                            )
+        finally:
+            with self._lock:
+                self._active_operations = max(0, self._active_operations - 1)
+                should_notify = (self._active_operations == 0)
+            if should_notify:
+                self._notify_generation_finished()
 
     @property
     def is_generating(self) -> bool:
         """Returns True if any brain-level generation operation is active.
 
-        This includes model-level token generation AND brain-level post-generation
-        processing (history append, cleanup).  The brain-level flag prevents the
-        orchestrator from completing shutdown while history processing is still
-        in progress.
+        This includes prompt preparation, model-level token generation,
+        and post-generation processing (history append, cleanup).  The counter
+        prevents the orchestrator from completing shutdown while any operation is active.
         """
+        with self._lock:
+            if self._active_operations > 0:
+                return True
         return (
-            self._brain_generating
-            or self.model_manager.info.state == ModelLifecycleState.GENERATING
+            self.model_manager.info.state == ModelLifecycleState.GENERATING
             or self.model_manager.engine.is_generating()
         )
 
@@ -246,9 +262,8 @@ class TsukikoBrain:
         Strictly respects Game Mode, hidden/minimized UI states, cooldown timers,
         anti-spam backoff, and silence by choice.
 
-        The brain-level ``_brain_generating`` flag is held until all history
-        processing finishes, so the orchestrator cannot clear conversation
-        history while this operation is still running.
+        Thread-safe: Increments active operations counter across prompt preparation,
+        inference, and remark processing in a robust try/finally.
         """
         with self._lock:
             if not self._is_initialized:
@@ -268,27 +283,23 @@ class TsukikoBrain:
                 logger.debug("Conversational initiative skipped: model is not currently loaded in memory.")
                 return None
 
-            # Mark brain-level generation active BEFORE releasing the lock
-            self._brain_generating = True
+            # Increment active operations counter BEFORE prompt preparation
+            self._active_operations += 1
 
-            prompt_messages = self.personality.initiative_engine.build_initiative_prompt(
-                session_history=self._history,
-                stage=self.personality.disclosure_tracker.stage,
-                biography=self.personality.biography,
-                personality_directive=self.personality.biography.get_stage_personality_directive(
-                    self.personality.disclosure_tracker.stage
-                ),
-            )
-
-        # CRITICAL CONCURRENCY INVARIANT:
-        # LLM generation is performed strictly OUTSIDE self._lock so brain.shutdown() and
-        # brain.cancel_generation() never block on this lock.
-        #
-        # The entire generation + history append is wrapped in a single try/finally so
-        # the completion notification fires only AFTER all history processing finishes.
+        should_notify = False
         clean_remark: Optional[str] = None
         try:
             try:
+                with self._lock:
+                    prompt_messages = self.personality.initiative_engine.build_initiative_prompt(
+                        session_history=self._history,
+                        stage=self.personality.disclosure_tracker.stage,
+                        biography=self.personality.biography,
+                        personality_directive=self.personality.biography.get_stage_personality_directive(
+                            self.personality.disclosure_tracker.stage
+                        ),
+                    )
+
                 raw_response = self.model_manager.generate(
                     messages=prompt_messages,
                     max_tokens=150,
@@ -317,10 +328,11 @@ class TsukikoBrain:
                 logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
                 return clean_remark
         finally:
-            # Clear brain-level flag AFTER all history processing, then notify exactly once
             with self._lock:
-                self._brain_generating = False
-            self._notify_generation_finished()
+                self._active_operations = max(0, self._active_operations - 1)
+                should_notify = (self._active_operations == 0)
+            if should_notify:
+                self._notify_generation_finished()
 
     def cancel_generation(self) -> None:
         """Cancels any running generation."""
@@ -333,7 +345,8 @@ class TsukikoBrain:
             return {
                 "state": info.state.value,
                 "is_loaded": info.is_loaded,
-                "is_generating": info.state == ModelLifecycleState.GENERATING,
+                "is_generating": self.is_generating,
+                "active_operations": self._active_operations,
                 "model_name": info.model_name,
                 "model_path": str(info.path) if info.path else None,
                 "architecture": info.architecture,
