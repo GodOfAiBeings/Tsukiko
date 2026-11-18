@@ -251,7 +251,12 @@ class LlamaCppInferenceEngine(BaseInferenceEngine):
 
             for chunk in response:
                 if self._cancelled:
-                    logger.info("Generation cancelled by user.")
+                    logger.info("Generation cancelled by user/system.")
+                    if hasattr(response, "close"):
+                        try:
+                            response.close()
+                        except Exception:
+                            pass
                     break
 
                 choices = chunk.get("choices", [])
@@ -391,7 +396,14 @@ class DeterministicFakeEngine(BaseInferenceEngine):
                     logger.info("Fake generation cancelled by test request.")
                     break
                 if self.token_delay_seconds > 0:
-                    time.sleep(self.token_delay_seconds)
+                    deadline = time.time() + self.token_delay_seconds
+                    while time.time() < deadline:
+                        if self._cancelled:
+                            break
+                        time.sleep(min(0.01, max(0.0, deadline - time.time())))
+                if self._cancelled:
+                    logger.info("Fake generation cancelled by test request.")
+                    break
                 yield chunk
         finally:
             self._is_generating = False

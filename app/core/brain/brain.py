@@ -178,6 +178,14 @@ class TsukikoBrain:
                         f"Turn appended to session history. Current turns: {len(self._history)}"
                     )
 
+    @property
+    def is_generating(self) -> bool:
+        """Returns True if the brain's model manager or engine is actively generating tokens."""
+        return (
+            self.model_manager.info.state == ModelLifecycleState.GENERATING
+            or self.model_manager.engine.is_generating()
+        )
+
     def check_conversational_initiative(
         self,
         game_mode_active: bool = False,
@@ -191,6 +199,8 @@ class TsukikoBrain:
         anti-spam backoff, and silence by choice.
         """
         with self._lock:
+            if not self._is_initialized:
+                return None
             can_speak, reason = self.personality.initiative_engine.can_initiate(
                 current_time=current_time,
                 game_mode_active=game_mode_active,
@@ -215,40 +225,38 @@ class TsukikoBrain:
                 ),
             )
 
-            # If model engine is DeterministicFakeEngine (testing):
-            if isinstance(self.model_manager.engine, DeterministicFakeEngine):
-                candidate = "The afternoon light feels very quiet today. How is your work progressing?"
-                remark = self.personality.initiative_engine.parse_initiative_response(candidate)
-                if not remark:
-                    return None
-                clean_candidate = self.personality.clean_response(remark)
-                if not clean_candidate:
-                    return None
-                self._history.append({"role": "assistant", "content": clean_candidate})
-                self.personality.initiative_engine.record_initiative_sent(clean_candidate)
-                return clean_candidate
+        # CRITICAL CONCURRENCY INVARIANT:
+        # LLM generation is performed strictly OUTSIDE self._lock so brain.shutdown() and
+        # brain.cancel_generation() never block on this lock.
+        clean_remark: Optional[str] = None
+        try:
+            raw_response = self.model_manager.generate(
+                messages=prompt_messages,
+                max_tokens=150,
+                temperature=0.7,
+            )
+            # If DeterministicFakeEngine produced default canned response without custom canned text:
+            if isinstance(self.model_manager.engine, DeterministicFakeEngine) and "offline desktop companion" in raw_response:
+                raw_response = "The afternoon light feels very quiet today. How is your work progressing?"
 
-            try:
-                raw_response = self.model_manager.generate(
-                    messages=prompt_messages,
-                    max_tokens=150,
-                    temperature=0.7,
-                )
-                remark = self.personality.initiative_engine.parse_initiative_response(raw_response)
-                if not remark:
-                    return None
-
+            remark = self.personality.initiative_engine.parse_initiative_response(raw_response)
+            if remark:
                 clean_remark = self.personality.clean_response(remark)
-                if not clean_remark:
-                    return None
+        except Exception as e:
+            logger.debug(f"Failed to generate conversational initiative: {e}")
+            return None
 
-                self._history.append({"role": "assistant", "content": clean_remark})
-                self.personality.initiative_engine.record_initiative_sent(clean_remark)
-                logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
-                return clean_remark
-            except Exception as e:
-                logger.debug(f"Failed to generate conversational initiative: {e}")
+        if not clean_remark:
+            return None
+
+        with self._lock:
+            if not self._is_initialized:
+                logger.debug("Brain was shut down during initiative generation; discarding remark.")
                 return None
+            self._history.append({"role": "assistant", "content": clean_remark})
+            self.personality.initiative_engine.record_initiative_sent(clean_remark)
+            logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
+            return clean_remark
 
     def cancel_generation(self) -> None:
         """Cancels any running generation."""
@@ -280,11 +288,49 @@ class TsukikoBrain:
                 "consecutive_unanswered_initiatives": self.personality.initiative_engine.consecutive_unanswered,
             }
 
-    def shutdown(self) -> None:
-        """Releases model weights, stops background timers, and clears session history."""
+    def shutdown(self, timeout_seconds: float = 1.0) -> bool:
+        """Releases model weights, stops background timers, and clears session history.
+
+        If generation is actively in progress, requests cancellation and waits up to
+        timeout_seconds for the engine to halt. If generation does not halt within
+        the timeout, model weights are NOT unloaded to prevent crashing running threads.
+
+        Returns True if shutdown and unload completed; False if deferred due to active inference.
+        """
+        logger.info("Shutting down Tsukiko Local AI Brain...")
+        self.cancel_generation()
+
+        # Wait up to timeout_seconds for active generation to unwind
+        if self.is_generating and timeout_seconds > 0:
+            deadline = time.time() + timeout_seconds
+            while time.time() < deadline and self.is_generating:
+                time.sleep(0.02)
+
         with self._lock:
-            logger.info("Shutting down Tsukiko Local AI Brain...")
+            # If generation is STILL running, refuse to unload model to preserve memory safety
+            if self.is_generating:
+                logger.warning(
+                    "Active inference is still in progress; deferring model unload "
+                    "until inference terminates to protect memory integrity."
+                )
+                return False
+
             self.model_manager.shutdown()
             self.clear_conversation()
             self._is_initialized = False
             logger.info("Tsukiko Local AI Brain stopped cleanly.")
+            return True
+
+    def complete_deferred_shutdown(self) -> bool:
+        """Completes previously deferred brain shutdown once all inference has terminated."""
+        with self._lock:
+            if not self._is_initialized:
+                return True
+            if self.is_generating:
+                logger.debug("Cannot complete deferred shutdown: inference is still running.")
+                return False
+            self.model_manager.shutdown()
+            self.clear_conversation()
+            self._is_initialized = False
+            logger.info("Deferred Tsukiko Local AI Brain shutdown completed cleanly.")
+            return True

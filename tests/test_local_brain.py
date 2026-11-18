@@ -1487,13 +1487,23 @@ class TestCompanionSchedulerShutdownLifecycle:
         order = []
 
         class MockScheduler:
-            def stop(self) -> bool:
+            def __init__(self) -> None:
+                self.has_running_workers = False
+
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
                 order.append("scheduler")
                 return True
 
         class MockBrain:
-            def shutdown(self) -> None:
+            def __init__(self) -> None:
+                self.is_generating = False
+
+            def shutdown(self, timeout_seconds: float = 1.0) -> bool:
                 order.append("brain")
+                return True
+
+            def complete_deferred_shutdown(self) -> bool:
+                return True
 
         orch = TsukikoOrchestrator()
         orch.brain = MockBrain()  # type: ignore[assignment]
@@ -1505,6 +1515,257 @@ class TestCompanionSchedulerShutdownLifecycle:
         assert order == ["scheduler", "brain"]
         assert orch.is_running is False
         assert orch._status["state"] == "stopped"
+
+    def test_cancellation_during_simulated_slow_inference(self, tmp_path: Path) -> None:
+        """Verifies cancellation responsiveness during slow streaming token generation."""
+        import re
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine(canned_response="A very long story " * 30)
+        fake_engine.token_delay_seconds = 0.08
+        brain = TsukikoBrain(config=cfg, engine=fake_engine)
+        brain.initialize()
+        brain.model_manager.load_model()
+
+        received_chunks: List[str] = []
+
+        def consume() -> None:
+            for chunk in brain.stream_response("Tell me a story."):
+                received_chunks.append(chunk)
+
+        gen_thread = threading.Thread(target=consume)
+        gen_thread.start()
+
+        # Wait until generation has started and emitted at least one chunk
+        deadline = time.time() + 2.0
+        while time.time() < deadline and len(received_chunks) == 0:
+            time.sleep(0.01)
+
+        assert len(received_chunks) >= 1
+        assert brain.is_generating is True
+
+        # Cancel generation
+        brain.cancel_generation()
+        gen_thread.join(timeout=2.0)
+        assert not gen_thread.is_alive()
+        assert brain.is_generating is False
+
+        # Verify generation halted without producing full canned response
+        full_chunks = re.findall(r"\S+\s*|\s+", fake_engine._canned_response)
+        assert len(received_chunks) < len(full_chunks)
+
+    def test_orchestrator_behavior_when_scheduler_stop_returns_false(self, tmp_path: Path) -> None:
+        """Verifies orchestrator enters deferred stopping state rather than destroying models over active inference."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class StubSlowScheduler:
+            def __init__(self) -> None:
+                self.has_running_workers = True
+                self.deferred_cb = None
+
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return False
+
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                self.deferred_cb = cb
+
+        slow_sched = StubSlowScheduler()
+        orch.initiative_scheduler = slow_sched
+
+        # Stop orchestrator with bounded timeout
+        res = orch.stop(timeout_seconds=0.05)
+        # Must return False because scheduler was not clean
+        assert res is False
+        # State transitions to "stopping" (deferred)
+        assert orch.get_status()["state"] == "stopping"
+        # Model remains loaded and protected while worker is executing
+        assert orch.brain.model_manager.info.is_loaded is True
+        assert fake_engine.is_loaded() is True
+        assert slow_sched.deferred_cb is not None
+
+    def test_brain_shutdown_never_races_active_inference(self, tmp_path: Path) -> None:
+        """Verifies that brain.shutdown() refuses immediate model unload while inference is actively executing."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        fake_engine.token_delay_seconds = 0.05
+        brain = TsukikoBrain(config=cfg, engine=fake_engine)
+        brain.initialize()
+        brain.model_manager.load_model()
+
+        # Start background generation that will continue for ~1 second unless cancelled
+        gen_thread = threading.Thread(
+            target=lambda: list(brain.stream_response("Please explain moonlight."))
+        )
+        gen_thread.start()
+
+        # Wait until generation is actively in flight
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not brain.is_generating:
+            time.sleep(0.01)
+
+        assert brain.is_generating is True
+
+        # Attempt immediate shutdown with 0 timeout while inference is in flight
+        res = brain.shutdown(timeout_seconds=0.0)
+        # Must refuse immediate model unload while inference is running
+        assert res is False
+        assert brain.model_manager.info.is_loaded is True
+        assert fake_engine.is_loaded() is True
+
+        # Await thread cleanup (shutdown requested cancellation)
+        gen_thread.join(timeout=2.0)
+        assert brain.is_generating is False
+
+        # Deferred completion now unloads safely
+        assert brain.complete_deferred_shutdown() is True
+        assert brain.model_manager.info.is_loaded is False
+        assert fake_engine.is_loaded() is False
+
+    def test_deferred_shutdown_completion_after_worker_exit(self, qapp: QApplication, tmp_path: Path) -> None:
+        """Verifies deferred shutdown automatically completes once delayed workers finish."""
+        from app.desktop.companion.scheduler import CompanionInitiativeScheduler, ProactiveInitiativeWorker
+        import time
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        scheduler = CompanionInitiativeScheduler(brain=orch.brain, check_interval_ms=100)
+        orch.initiative_scheduler = scheduler
+
+        class DelayedWorker(ProactiveInitiativeWorker):
+            def run(self) -> None:
+                time.sleep(0.2)
+
+        worker = DelayedWorker(brain=orch.brain, parent=None)
+        scheduler._active_worker = worker
+        worker.start()
+
+        # Stop with short 30ms timeout: worker will outlive it
+        res = orch.stop(timeout_seconds=0.03)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        # Now wait for worker thread to naturally complete
+        worker.wait(2000)
+        qapp.processEvents()
+
+        # Deferred shutdown hook will have executed cleanly
+        assert orch.get_status()["state"] == "stopped"
+        assert orch.brain.model_manager.info.is_loaded is False
+        assert fake_engine.is_loaded() is False
+        assert scheduler.active_worker is None
+
+    def test_repeated_shutdown_requests_during_deferred_shutdown(self, tmp_path: Path) -> None:
+        """Verifies that calling stop() repeatedly during deferred shutdown is idempotent and safe."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.initialize()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class DummyScheduler:
+            def __init__(self) -> None:
+                self.has_running_workers = True
+                self.calls = 0
+
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                self.calls += 1
+                return False
+
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = DummyScheduler()
+
+        # Call stop 5 times in a row while worker is running
+        for _ in range(5):
+            res = orch.stop(timeout_seconds=0.01)
+            assert res is False
+            assert orch.get_status()["state"] == "stopping"
+
+        # Now worker completes
+        orch.initiative_scheduler.has_running_workers = False
+        res = orch.stop(timeout_seconds=0.01)
+        assert res is True
+        assert orch.get_status()["state"] == "stopped"
+
+        # Calling again when already stopped returns True idempotently
+        assert orch.stop() is True
+        assert orch.get_status()["state"] == "stopped"
+
+    def test_deterministic_delayed_cancellation_path(self, qapp: QApplication, tmp_path: Path) -> None:
+        """Verifies that cancellation arriving mid-inference aborts worker cleanly without signal emissions."""
+        from app.desktop.companion.scheduler import ProactiveInitiativeWorker
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine(canned_response="Quiet afternoon remark with slow generation " * 10)
+        fake_engine.token_delay_seconds = 0.08
+        brain = TsukikoBrain(config=cfg, engine=fake_engine)
+        brain.initialize()
+        brain.model_manager.load_model()
+        # Set idle time so conversational initiative is permitted
+        brain.personality.initiative_engine._last_interaction_time = time.time() - 100.0
+        brain.personality.initiative_engine._last_initiative_time = 0.0
+
+        worker = ProactiveInitiativeWorker(brain=brain, parent=None)
+        signals_received: List[Any] = []
+        worker.initiative_ready.connect(lambda s: signals_received.append(("ready", s)))
+        worker.initiative_silent.connect(lambda: signals_received.append(("silent",)))
+        worker.error_occurred.connect(lambda e: signals_received.append(("error", e)))
+
+        worker.start()
+
+        # Wait briefly for worker to enter generation
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not brain.is_generating:
+            time.sleep(0.01)
+
+        assert worker.isRunning() is True
+        assert brain.is_generating is True
+
+        # Cancel worker mid-generation
+        worker.abort()
+        assert worker.is_aborted is True
+
+        # Wait for worker thread to finish
+        worker.wait(3000)
+        qapp.processEvents()
+
+        assert worker.isFinished() is True
+        # Signals must be suppressed when aborted
+        assert len(signals_received) == 0
+        assert brain.is_generating is False
 
 
 # ==============================================================================

@@ -23,8 +23,9 @@
 #       Option B: CUDA 12.4 GPU acceleration:
 #         pip install "llama-cpp-python>=0.3.17" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 #
-#    b) Provide a local GGUF model weight file (e.g. Qwen2.5-Coder or Qwen2.5-7B/3B-Instruct)
-#       and configure its file path via Settings or default_config.yaml.
+#    b) Provide a local GGUF model weight file — specifically the recommended Qwen3.5-2B Q4_K_M
+#       (e.g., Qwen3.5-2B-Instruct-Q4_K_M.gguf) — and configure its file path via Settings or
+#       config/default_config.yaml.
 #
 # 4. PENDING PHYSICAL HARDWARE BENCHMARKS:
 #    Physical CUDA 12.4 acceleration and VRAM offload benchmarks on the target workstation

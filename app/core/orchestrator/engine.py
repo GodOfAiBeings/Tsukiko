@@ -84,30 +84,98 @@ class TsukikoOrchestrator:
             self._status["state"] = "running"
             logger.info("Tsukiko Core Orchestrator is running.")
 
-    def stop(self) -> None:
+    def stop(self, timeout_seconds: float = 1.0) -> bool:
         """Gracefully shuts down all active subsystems in strict order:
         1. Initiative Scheduler (aborts proactive background worker & stops timer)
         2. Local Brain & Model Manager (cancels active inference, clears session, unloads weights)
         3. Orchestrator state transition to stopped
+
+        Safety & Responsiveness Invariants:
+        1. Does not ignore a failed or timed-out scheduler shutdown.
+        2. If proactive workers or brain generation outlive timeout_seconds, orchestrator
+           initiates safe DEFERRED shutdown rather than prematurely destroying models
+           or indefinitely blocking the Qt GUI thread.
+        3. Brain and model weights are kept alive until the background worker has cleanly halted.
+
+        Returns True if shutdown completed immediately; False if shutdown is deferred.
         """
         with self._lock:
-            if not self._is_running and self._status["state"] == "stopped":
-                return
+            if self._status["state"] == "stopped":
+                return True
+            if self._status["state"] == "stopping":
+                has_running_workers = (
+                    hasattr(self.initiative_scheduler, "has_running_workers")
+                    and self.initiative_scheduler.has_running_workers
+                )
+                if not has_running_workers and not getattr(self.brain, "is_generating", False):
+                    self.complete_deferred_shutdown()
+                    return True
+                return False
+
             logger.info("Stopping Tsukiko Core Orchestrator...")
+
             # 1. Stop initiative scheduler first if attached
+            scheduler_clean = True
             if self.initiative_scheduler is not None:
                 try:
-                    self.initiative_scheduler.stop()
+                    scheduler_clean = self.initiative_scheduler.stop(wait_timeout_ms=int(timeout_seconds * 1000))
                 except Exception as e:
                     logger.debug(f"Exception stopping initiative scheduler during orchestrator stop: {e}")
-            # 2. Stop brain and unload model
-            self.brain.shutdown()
+                    scheduler_clean = False
+
+            # Check if workers or brain generation are still active
+            has_running_workers = (
+                not scheduler_clean
+                or (hasattr(self.initiative_scheduler, "has_running_workers") and self.initiative_scheduler.has_running_workers)
+            )
+            brain_generating = getattr(self.brain, "is_generating", False)
+
+            if has_running_workers or brain_generating:
+                logger.warning(
+                    "Scheduler worker or local brain inference did not halt within bounded timeout. "
+                    "Initiating deferred shutdown to prevent racing active inference."
+                )
+                self._status["state"] = "stopping"
+                self._is_running = False
+
+                # Hook deferred shutdown to scheduler completion or watcher thread
+                if self.initiative_scheduler is not None and hasattr(self.initiative_scheduler, "set_deferred_shutdown_callback"):
+                    self.initiative_scheduler.set_deferred_shutdown_callback(self.complete_deferred_shutdown)
+                else:
+                    def _deferred_watcher() -> None:
+                        deadline = time.time() + 10.0
+                        while time.time() < deadline:
+                            if not self.brain.is_generating:
+                                break
+                            time.sleep(0.05)
+                        self.complete_deferred_shutdown()
+
+                    watcher = threading.Thread(target=_deferred_watcher, daemon=True, name="deferred-shutdown-watcher")
+                    watcher.start()
+
+                return False
+
+            # 2. Both scheduler and brain are clean; complete immediate shutdown
+            self.brain.shutdown(timeout_seconds=0.0)
             self._is_running = False
             self._status["screen_sharing"] = False
             self._status["brain"] = "stopped"
             self._status["state"] = "stopped"
-            # Note: The in-process offline privacy guard remains active for the process lifetime.
             logger.info("Tsukiko Core Orchestrator stopped cleanly.")
+            return True
+
+    def complete_deferred_shutdown(self) -> None:
+        """Completes previously deferred shutdown once active workers/inference have terminated."""
+        with self._lock:
+            if self._status["state"] == "stopped":
+                return
+            logger.info("Completing deferred Tsukiko Core Orchestrator shutdown...")
+            self.brain.complete_deferred_shutdown()
+            self._is_running = False
+            self._status["screen_sharing"] = False
+            self._status["brain"] = "stopped"
+            self._status["state"] = "stopped"
+            logger.info("Deferred Tsukiko Core Orchestrator shutdown finished cleanly.")
 
     @property
     def is_running(self) -> bool:

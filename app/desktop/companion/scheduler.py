@@ -116,10 +116,31 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
         self._active_worker: Optional[ProactiveInitiativeWorker] = None
         self._retained_workers: list[ProactiveInitiativeWorker] = []
         self._is_stopped: bool = False
+        self._on_deferred_shutdown_callback: Optional[Any] = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(check_interval_ms)
         self._timer.timeout.connect(self.check_initiative)
+
+    @property
+    def has_running_workers(self) -> bool:
+        """Returns True if the active worker or any retained worker is actively executing."""
+        if self._active_worker and self._active_worker.isRunning():
+            return True
+        for w in self._retained_workers:
+            if w.isRunning():
+                return True
+        return False
+
+    def set_deferred_shutdown_callback(self, callback: Any) -> None:
+        """Registers a callback to execute once all running workers have terminated."""
+        if not self.has_running_workers:
+            try:
+                callback()
+            except Exception as e:
+                logger.debug(f"Exception invoking immediate shutdown callback: {e}")
+        else:
+            self._on_deferred_shutdown_callback = callback
 
     @property
     def is_running(self) -> bool:
@@ -206,6 +227,15 @@ class CompanionInitiativeScheduler(QObject if HAS_PYSIDE6 else object):  # type:
                 if self._active_worker is w:
                     self._active_worker = None
                 _LIVING_WORKERS.discard(w)
+
+                # If all workers have completed, invoke deferred shutdown callback if registered
+                if not self.has_running_workers and self._on_deferred_shutdown_callback is not None:
+                    cb = self._on_deferred_shutdown_callback
+                    self._on_deferred_shutdown_callback = None
+                    try:
+                        cb()
+                    except Exception as e:
+                        logger.debug(f"Exception in deferred shutdown callback: {e}")
 
             try:
                 worker.finished.connect(_on_retired_finished)
