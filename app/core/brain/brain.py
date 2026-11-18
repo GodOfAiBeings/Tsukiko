@@ -41,10 +41,14 @@ class TsukikoBrain:
         self._history: List[Dict[str, str]] = []
         self._lock = threading.RLock()
         self._is_initialized = False
+        self._brain_generating = False
         self._generation_finished_callbacks: List[Any] = []
 
-        if hasattr(self.model_manager, "register_generation_finished_callback"):
-            self.model_manager.register_generation_finished_callback(self._notify_generation_finished)
+        # NOTE: The brain does NOT register with model_manager's generation callbacks.
+        # The brain is the authoritative owner of generation-completion notifications.
+        # Notifications fire only after the complete brain-level operation finishes,
+        # including all history updates and cleanup — never from the model manager's
+        # earlier stream-level finally block.
 
     def register_generation_finished_callback(self, callback: Any) -> None:
         """Registers a callback to execute whenever generation completes."""
@@ -164,7 +168,13 @@ class TsukikoBrain:
         top_p: Optional[float] = None,
         repeat_penalty: Optional[float] = None,
     ) -> Iterator[str]:
-        """Streams response tokens incrementally, updating active session history upon completion."""
+        """Streams response tokens incrementally, updating active session history upon completion.
+
+        The brain-level ``_brain_generating`` flag stays True until all history
+        processing completes.  External observers (e.g. the orchestrator's
+        deferred-shutdown path) therefore cannot clear conversation history
+        while the brain is still appending to it.
+        """
         clean_user = user_message.strip()
         if not clean_user:
             return
@@ -172,6 +182,7 @@ class TsukikoBrain:
         self.personality.initiative_engine.record_user_activity()
 
         with self._lock:
+            self._brain_generating = True
             pruned_history = self._prune_history_to_fit_context(
                 clean_user,
                 reserve_tokens_for_generation=max_tokens,
@@ -203,13 +214,23 @@ class TsukikoBrain:
                     logger.debug(
                         f"Turn appended to session history. Current turns: {len(self._history)}"
                     )
+            # Clear brain-level flag AFTER history processing, then notify exactly once
+            with self._lock:
+                self._brain_generating = False
             self._notify_generation_finished()
 
     @property
     def is_generating(self) -> bool:
-        """Returns True if the brain's model manager or engine is actively generating tokens."""
+        """Returns True if any brain-level generation operation is active.
+
+        This includes model-level token generation AND brain-level post-generation
+        processing (history append, cleanup).  The brain-level flag prevents the
+        orchestrator from completing shutdown while history processing is still
+        in progress.
+        """
         return (
-            self.model_manager.info.state == ModelLifecycleState.GENERATING
+            self._brain_generating
+            or self.model_manager.info.state == ModelLifecycleState.GENERATING
             or self.model_manager.engine.is_generating()
         )
 
@@ -224,6 +245,10 @@ class TsukikoBrain:
 
         Strictly respects Game Mode, hidden/minimized UI states, cooldown timers,
         anti-spam backoff, and silence by choice.
+
+        The brain-level ``_brain_generating`` flag is held until all history
+        processing finishes, so the orchestrator cannot clear conversation
+        history while this operation is still running.
         """
         with self._lock:
             if not self._is_initialized:
@@ -243,6 +268,9 @@ class TsukikoBrain:
                 logger.debug("Conversational initiative skipped: model is not currently loaded in memory.")
                 return None
 
+            # Mark brain-level generation active BEFORE releasing the lock
+            self._brain_generating = True
+
             prompt_messages = self.personality.initiative_engine.build_initiative_prompt(
                 session_history=self._history,
                 stage=self.personality.disclosure_tracker.stage,
@@ -255,37 +283,44 @@ class TsukikoBrain:
         # CRITICAL CONCURRENCY INVARIANT:
         # LLM generation is performed strictly OUTSIDE self._lock so brain.shutdown() and
         # brain.cancel_generation() never block on this lock.
+        #
+        # The entire generation + history append is wrapped in a single try/finally so
+        # the completion notification fires only AFTER all history processing finishes.
         clean_remark: Optional[str] = None
         try:
-            raw_response = self.model_manager.generate(
-                messages=prompt_messages,
-                max_tokens=150,
-                temperature=0.7,
-            )
-            # If DeterministicFakeEngine produced default canned response without custom canned text:
-            if isinstance(self.model_manager.engine, DeterministicFakeEngine) and "offline desktop companion" in raw_response:
-                raw_response = "The afternoon light feels very quiet today. How is your work progressing?"
+            try:
+                raw_response = self.model_manager.generate(
+                    messages=prompt_messages,
+                    max_tokens=150,
+                    temperature=0.7,
+                )
+                # If DeterministicFakeEngine produced default canned response without custom canned text:
+                if isinstance(self.model_manager.engine, DeterministicFakeEngine) and "offline desktop companion" in raw_response:
+                    raw_response = "The afternoon light feels very quiet today. How is your work progressing?"
 
-            remark = self.personality.initiative_engine.parse_initiative_response(raw_response)
-            if remark:
-                clean_remark = self.personality.clean_response(remark)
-        except Exception as e:
-            logger.debug(f"Failed to generate conversational initiative: {e}")
-            return None
-        finally:
-            self._notify_generation_finished()
-
-        if not clean_remark:
-            return None
-
-        with self._lock:
-            if not self._is_initialized:
-                logger.debug("Brain was shut down during initiative generation; discarding remark.")
+                remark = self.personality.initiative_engine.parse_initiative_response(raw_response)
+                if remark:
+                    clean_remark = self.personality.clean_response(remark)
+            except Exception as e:
+                logger.debug(f"Failed to generate conversational initiative: {e}")
                 return None
-            self._history.append({"role": "assistant", "content": clean_remark})
-            self.personality.initiative_engine.record_initiative_sent(clean_remark)
-            logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
-            return clean_remark
+
+            if not clean_remark:
+                return None
+
+            with self._lock:
+                if not self._is_initialized:
+                    logger.debug("Brain was shut down during initiative generation; discarding remark.")
+                    return None
+                self._history.append({"role": "assistant", "content": clean_remark})
+                self.personality.initiative_engine.record_initiative_sent(clean_remark)
+                logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
+                return clean_remark
+        finally:
+            # Clear brain-level flag AFTER all history processing, then notify exactly once
+            with self._lock:
+                self._brain_generating = False
+            self._notify_generation_finished()
 
     def cancel_generation(self) -> None:
         """Cancels any running generation."""

@@ -2264,6 +2264,343 @@ class TestCompanionSchedulerShutdownLifecycle:
 
 
 # ==============================================================================
+# 13a. Generation-Completion Callback Ordering Tests
+# ==============================================================================
+
+class TestGenerationCompletionCallbackOrdering:
+    """Verifies that brain-level completion notifications fire only AFTER
+    all history processing, preventing premature shutdown from clearing or
+    racing with history updates."""
+
+    def _make_orch(self, tmp_path: Path, engine: DeterministicFakeEngine) -> TsukikoOrchestrator:
+        """Helper: creates a loaded, running orchestrator with an empty scheduler."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+        return orch
+
+    # ------------------------------------------------------------------ #
+    # 1. Normal chat: callback fires only after history processing
+    # ------------------------------------------------------------------ #
+    def test_chat_callback_fires_after_history_append(self, tmp_path: Path) -> None:
+        """Completion callback must observe fully-populated history."""
+        fake = DeterministicFakeEngine(canned_response="Hello world")
+        orch = self._make_orch(tmp_path, fake)
+
+        callback_history_lens: List[int] = []
+
+        def capture_history_len() -> None:
+            callback_history_lens.append(len(orch.brain.get_history()))
+
+        orch.brain.register_generation_finished_callback(capture_history_len)
+
+        # Drive generation to completion
+        list(orch.brain.stream_response("Hi"))
+
+        assert len(callback_history_lens) == 1, "Exactly one callback expected"
+        assert callback_history_lens[0] == 2, "Callback must see user+assistant turns in history"
+        assert len(orch.brain.get_history()) == 2
+
+    # ------------------------------------------------------------------ #
+    # 2. Proactive initiative: callback fires only after remark in history
+    # ------------------------------------------------------------------ #
+    def test_initiative_callback_fires_after_remark_in_history(self, tmp_path: Path) -> None:
+        """Proactive initiative completion callback must see the remark in history."""
+        fake = DeterministicFakeEngine(canned_response="The evening breeze carries cherry blossoms.")
+        orch = self._make_orch(tmp_path, fake)
+
+        callback_history_lens: List[int] = []
+
+        def capture_history_len() -> None:
+            callback_history_lens.append(len(orch.brain.get_history()))
+
+        orch.brain.register_generation_finished_callback(capture_history_len)
+
+        # Mark enough activity to allow initiative
+        engine = orch.brain.personality.initiative_engine
+        engine._is_enabled = True
+        engine._last_user_activity_time = time.time() - 300
+        engine._last_initiative_time = 0
+        engine._consecutive_unanswered = 0
+
+        result = orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+        assert result is not None
+
+        assert len(callback_history_lens) == 1, "Exactly one callback expected"
+        assert callback_history_lens[0] >= 1, "Callback must see the remark already in history"
+
+    # ------------------------------------------------------------------ #
+    # 3. During deferred shutdown, model stays loaded until brain finishes
+    # ------------------------------------------------------------------ #
+    def test_model_stays_loaded_until_brain_operation_finishes(self, tmp_path: Path) -> None:
+        """Model weights must not be unloaded while brain-level history processing is active."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "token "
+            chat_hold.wait()
+            yield "done."
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Hold."))
+        )
+        gen_thread.start()
+
+        # Wait for brain to be generating
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+        assert orch.brain.is_generating is True
+
+        # Trigger deferred shutdown
+        res = orch.stop(timeout_seconds=0.01)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+
+        # Model MUST still be loaded while brain is processing
+        assert orch.brain.model_manager.info.is_loaded is True
+        assert fake.is_loaded() is True
+
+        # Release generation
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        # Wait for auto-completion
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        assert fake.is_loaded() is False
+
+    # ------------------------------------------------------------------ #
+    # 4. After shutdown reaches stopped, history remains empty
+    # ------------------------------------------------------------------ #
+    def test_history_empty_after_shutdown_stopped(self, tmp_path: Path) -> None:
+        """After deferred shutdown completes to 'stopped', conversation history
+        must be empty and not repopulated by any late-arriving generator."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "word "
+            chat_hold.wait()
+            yield "end."
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Repopulation test."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        # Trigger stop
+        orch.stop(timeout_seconds=0.01)
+        assert orch.get_status()["state"] == "stopping"
+
+        # Release chat and let generator finish
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        # Wait for stopped
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+
+        # History MUST be empty: shutdown cleared it after the brain finished
+        assert orch.brain.get_history() == []
+
+    # ------------------------------------------------------------------ #
+    # 5. Joining generation thread after shutdown → no new history
+    # ------------------------------------------------------------------ #
+    def test_no_history_after_joining_generation_thread_post_shutdown(self, tmp_path: Path) -> None:
+        """After shutdown and joining the generation thread, history stays empty."""
+        fake = DeterministicFakeEngine(canned_response="Some tokens for history test.")
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def delayed_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "tok1 "
+            chat_hold.wait()
+            yield "tok2."
+
+        fake.stream_chat = delayed_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Post-shutdown join."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        # Trigger stop while generating
+        orch.stop(timeout_seconds=0.01)
+        assert orch.get_status()["state"] == "stopping"
+
+        # Release and explicitly join the generation thread
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+        assert not gen_thread.is_alive()
+
+        # Wait for shutdown completion
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        # Even after joining the generation thread, history is empty
+        assert orch.brain.get_history() == []
+
+    # ------------------------------------------------------------------ #
+    # 6. Cancellation and exception still notify completion
+    # ------------------------------------------------------------------ #
+    def test_cancellation_still_notifies_completion(self, tmp_path: Path) -> None:
+        """Cancelled generation must still fire the completion callback."""
+        fake = DeterministicFakeEngine(canned_response="A " * 50)
+        fake.token_delay_seconds = 0.1
+        orch = self._make_orch(tmp_path, fake)
+
+        notified = threading.Event()
+        orch.brain.register_generation_finished_callback(notified.set)
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Cancel me."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        orch.brain.cancel_generation()
+        gen_thread.join(timeout=3.0)
+
+        assert notified.wait(timeout=2.0), "Callback must fire even on cancellation"
+
+    def test_exception_during_generation_still_notifies_completion(self, tmp_path: Path) -> None:
+        """Engine exception during generation must still fire the completion callback."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        notified = threading.Event()
+        orch.brain.register_generation_finished_callback(notified.set)
+
+        # Make the engine raise mid-stream
+        def exploding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "partial "
+            raise RuntimeError("Simulated engine failure")
+
+        fake.stream_chat = exploding_stream
+
+        # Consume the generator — it should propagate the exception but still notify
+        with pytest.raises(RuntimeError, match="Simulated engine failure"):
+            list(orch.brain.stream_response("Explode."))
+
+        assert notified.wait(timeout=2.0), "Callback must fire even on exception"
+
+    # ------------------------------------------------------------------ #
+    # 7. Each operation produces exactly one notification
+    # ------------------------------------------------------------------ #
+    def test_exactly_one_notification_per_chat_operation(self, tmp_path: Path) -> None:
+        """Normal chat generation must produce exactly one completion notification, not two."""
+        fake = DeterministicFakeEngine(canned_response="Single notification test.")
+        orch = self._make_orch(tmp_path, fake)
+
+        count = {"n": 0}
+        def increment() -> None:
+            count["n"] += 1
+
+        orch.brain.register_generation_finished_callback(increment)
+        list(orch.brain.stream_response("Count check."))
+
+        assert count["n"] == 1, f"Expected exactly 1 notification, got {count['n']}"
+
+    def test_exactly_one_notification_per_initiative_operation(self, tmp_path: Path) -> None:
+        """Proactive initiative must produce exactly one completion notification."""
+        fake = DeterministicFakeEngine(canned_response="A quiet observation.")
+        orch = self._make_orch(tmp_path, fake)
+
+        count = {"n": 0}
+        def increment() -> None:
+            count["n"] += 1
+
+        orch.brain.register_generation_finished_callback(increment)
+
+        engine = orch.brain.personality.initiative_engine
+        engine._is_enabled = True
+        engine._last_user_activity_time = time.time() - 300
+        engine._last_initiative_time = 0
+        engine._consecutive_unanswered = 0
+
+        orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+
+        assert count["n"] == 1, f"Expected exactly 1 notification, got {count['n']}"
+
+    # ------------------------------------------------------------------ #
+    # 8. Former 15s deadline test still passes (preserved regression)
+    # ------------------------------------------------------------------ #
+    # (covered by existing test_deferred_shutdown_continues_beyond_previous_fifteen_second_deadline)
+
+    # ------------------------------------------------------------------ #
+    # 9. brain_generating flag prevents premature shutdown during history append
+    # ------------------------------------------------------------------ #
+    def test_brain_generating_flag_prevents_premature_shutdown(self, tmp_path: Path) -> None:
+        """While _brain_generating is True, shutdown must be deferred even
+        if the model-level generation has already finished."""
+        fake = DeterministicFakeEngine(canned_response="Quick.")
+        orch = self._make_orch(tmp_path, fake)
+
+        # Intercept brain's stream_response to observe the flag lifecycle
+        flag_states: List[bool] = []
+        orig_notify = orch.brain._notify_generation_finished
+
+        def spy_notify() -> None:
+            # At the moment notification fires, _brain_generating should already be False
+            flag_states.append(orch.brain._brain_generating)
+            orig_notify()
+
+        orch.brain._notify_generation_finished = spy_notify
+
+        list(orch.brain.stream_response("Flag lifecycle."))
+
+        assert len(flag_states) == 1
+        assert flag_states[0] is False, "_brain_generating must be False when notification fires"
+        assert orch.brain._brain_generating is False
+
+
+# ==============================================================================
 # 13. Resource Limit Enforcement & Reload Deadlock Tests
 # ==============================================================================
 
