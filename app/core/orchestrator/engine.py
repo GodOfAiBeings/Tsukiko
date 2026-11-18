@@ -26,6 +26,7 @@ class TsukikoOrchestrator:
         self.initiative_scheduler: Optional[Any] = None
         self.hardware_profile: Optional[HardwareProfile] = None
         self._deferred_watcher_thread: Optional[threading.Thread] = None
+        self._shutdown_event = threading.Event()
         self._is_running = False
         self._lock = threading.RLock()
         self._status: Dict[str, Any] = {
@@ -36,6 +37,17 @@ class TsukikoOrchestrator:
             "voice": "disabled",
             "screen_sharing": False,
         }
+
+        # Hook brain generation completion notification if supported
+        if hasattr(self.brain, "register_generation_finished_callback"):
+            self.brain.register_generation_finished_callback(self._on_generation_finished)
+
+    def _on_generation_finished(self) -> None:
+        """Invoked when brain generation finishes, to immediately complete deferred shutdown if stopping."""
+        with self._lock:
+            if self._status["state"] == "stopping":
+                logger.debug("Brain generation finished while in stopping state; completing deferred shutdown.")
+                self.complete_deferred_shutdown()
 
     def initialize(self, force: bool = False) -> None:
         """Inspects hardware, validates configurations, and initializes subsystem state."""
@@ -65,6 +77,11 @@ class TsukikoOrchestrator:
             # Initialize Local AI Brain
             self.brain.initialize()
             self._status["brain"] = self.brain.model_manager.state.value
+
+            # Ensure brain generation callback is active
+            if hasattr(self.brain, "register_generation_finished_callback"):
+                self.brain.register_generation_finished_callback(self._on_generation_finished)
+            self._shutdown_event.clear()
 
             # Ensure screen sharing starts OFF
             self.config.perception.screen_sharing_enabled = False
@@ -145,6 +162,10 @@ class TsukikoOrchestrator:
                 if self.initiative_scheduler is not None and hasattr(self.initiative_scheduler, "set_deferred_shutdown_callback"):
                     self.initiative_scheduler.set_deferred_shutdown_callback(self.complete_deferred_shutdown)
 
+                # Ensure brain generation-finished callback is active
+                if hasattr(self.brain, "register_generation_finished_callback"):
+                    self.brain.register_generation_finished_callback(self._on_generation_finished)
+
                 # Always start deferred watcher thread to poll and retry safely until all inference halts
                 self._start_deferred_shutdown_watcher()
                 return False
@@ -157,6 +178,10 @@ class TsukikoOrchestrator:
                 )
                 self._status["state"] = "stopping"
                 self._is_running = False
+                if self.initiative_scheduler is not None and hasattr(self.initiative_scheduler, "set_deferred_shutdown_callback"):
+                    self.initiative_scheduler.set_deferred_shutdown_callback(self.complete_deferred_shutdown)
+                if hasattr(self.brain, "register_generation_finished_callback"):
+                    self.brain.register_generation_finished_callback(self._on_generation_finished)
                 self._start_deferred_shutdown_watcher()
                 return False
 
@@ -165,30 +190,36 @@ class TsukikoOrchestrator:
             self._status["screen_sharing"] = False
             self._status["brain"] = "stopped"
             self._status["state"] = "stopped"
+            self._shutdown_event.set()
+            if hasattr(self.brain, "unregister_generation_finished_callback"):
+                self.brain.unregister_generation_finished_callback(self._on_generation_finished)
             logger.info("Tsukiko Core Orchestrator stopped cleanly.")
             return True
 
     def _start_deferred_shutdown_watcher(self) -> None:
-        """Starts a background daemon thread that monitors and retries deferred shutdown."""
-        if self._deferred_watcher_thread is not None and self._deferred_watcher_thread.is_alive():
-            return
+        """Starts a background daemon thread that monitors and retries deferred shutdown until all inference halts."""
+        with self._lock:
+            if self._deferred_watcher_thread is not None and self._deferred_watcher_thread.is_alive():
+                return
+            if self._status["state"] != "stopping":
+                return
 
-        def _watcher() -> None:
-            deadline = time.time() + 15.0  # Bounded maximum retry window
-            while time.time() < deadline:
-                time.sleep(0.02)
-                with self._lock:
-                    if self._status["state"] == "stopped":
-                        return
-                    if self.complete_deferred_shutdown():
-                        return
+            self._shutdown_event.clear()
 
-        self._deferred_watcher_thread = threading.Thread(
-            target=_watcher,
-            daemon=True,
-            name="deferred-shutdown-watcher",
-        )
-        self._deferred_watcher_thread.start()
+            def _watcher() -> None:
+                while not self._shutdown_event.wait(0.02):
+                    with self._lock:
+                        if self._status["state"] != "stopping":
+                            return
+                        if self.complete_deferred_shutdown():
+                            return
+
+            self._deferred_watcher_thread = threading.Thread(
+                target=_watcher,
+                daemon=True,
+                name="deferred-shutdown-watcher",
+            )
+            self._deferred_watcher_thread.start()
 
     def complete_deferred_shutdown(self) -> bool:
         """Completes previously deferred shutdown once active workers/inference have terminated.
@@ -225,6 +256,9 @@ class TsukikoOrchestrator:
             self._status["screen_sharing"] = False
             self._status["brain"] = "stopped"
             self._status["state"] = "stopped"
+            self._shutdown_event.set()
+            if hasattr(self.brain, "unregister_generation_finished_callback"):
+                self.brain.unregister_generation_finished_callback(self._on_generation_finished)
             logger.info("Deferred Tsukiko Core Orchestrator shutdown finished cleanly.")
             return True
 

@@ -1983,6 +1983,285 @@ class TestCompanionSchedulerShutdownLifecycle:
         assert orch.brain.model_manager.info.is_loaded is False
         assert fake_engine.is_loaded() is False
 
+    def test_deferred_shutdown_continues_beyond_previous_fifteen_second_deadline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verifies deferred shutdown is monitored indefinitely without a 15-second deadline abandoning it."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+
+        chat_unblock = threading.Event()
+
+        def controlled_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "Starting token "
+            chat_unblock.wait()
+            yield "Closing token."
+
+        fake_engine.stream_chat = controlled_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("A very long conversation."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.is_generating is True
+
+        # Stop orchestrator with short timeout
+        res = orch.stop(timeout_seconds=0.02)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+        assert fake_engine.is_loaded() is True
+        assert orch._deferred_watcher_thread is not None
+        assert orch._deferred_watcher_thread.is_alive() is True
+
+        # Advance simulated time by 30 seconds (far beyond the previous 15.0s watcher deadline)
+        real_time = time.time
+        simulated_time = real_time() + 30.0
+        monkeypatch.setattr(time, "time", lambda: simulated_time)
+
+        # Allow watcher thread several cycles under the advanced time
+        time.sleep(0.1)
+
+        # In the old code, watcher would have exited after 15s. In the new code, watcher MUST still be alive!
+        assert orch._deferred_watcher_thread.is_alive() is True
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+        assert fake_engine.is_loaded() is True
+
+        # Now allow chat inference to finish
+        chat_unblock.set()
+        gen_thread.join(timeout=3.0)
+        assert orch.brain.is_generating is False
+
+        # Wait briefly for deferred shutdown completion
+        wait_deadline = real_time() + 3.0
+        while real_time() < wait_deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        # Orchestrator automatically reaches stopped
+        assert orch.get_status()["state"] == "stopped"
+        # Model weights are cleanly unloaded
+        assert orch.brain.model_manager.info.is_loaded is False
+        assert fake_engine.is_loaded() is False
+        # Watcher thread cleanly terminates
+        orch._deferred_watcher_thread.join(timeout=1.0)
+        assert orch._deferred_watcher_thread.is_alive() is False
+
+    def test_brain_shutdown_failure_does_not_produce_false_stopped_state(self, tmp_path: Path) -> None:
+        """Verifies brain shutdown failure keeps orchestrator in stopping state and never marks stopped."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+
+        # Brain whose complete_deferred_shutdown initially fails
+        should_succeed = False
+        orig_complete = orch.brain.complete_deferred_shutdown
+
+        def failing_complete() -> bool:
+            if not should_succeed:
+                return False
+            return orig_complete()
+
+        orch.brain.complete_deferred_shutdown = failing_complete
+        orch.brain.shutdown = lambda timeout_seconds=0.0: False
+
+        # Start stop path: immediate shutdown fails, transitions to stopping, watcher starts
+        res = orch.stop(timeout_seconds=0.02)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+
+        # Calling complete_deferred_shutdown must fail
+        assert orch.complete_deferred_shutdown() is False
+        assert orch.get_status()["state"] == "stopping"
+        assert orch.brain.model_manager.info.is_loaded is True
+        assert fake_engine.is_loaded() is True
+        assert orch._deferred_watcher_thread.is_alive() is True
+
+        # Now allow brain shutdown to succeed
+        should_succeed = True
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        assert orch.brain.model_manager.info.is_loaded is False
+        assert fake_engine.is_loaded() is False
+        orch._deferred_watcher_thread.join(timeout=1.0)
+        assert orch._deferred_watcher_thread.is_alive() is False
+
+    def test_repeated_shutdown_calls_do_not_create_duplicate_watchers(self, tmp_path: Path) -> None:
+        """Verifies calling stop() repeatedly during deferred shutdown reuses the single watcher thread."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "holding "
+            chat_hold.wait()
+            yield "done."
+
+        fake_engine.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Long chat."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        # Trigger stop -> enters stopping, starts watcher
+        res = orch.stop(timeout_seconds=0.01)
+        assert res is False
+        assert orch.get_status()["state"] == "stopping"
+
+        watcher_thread = orch._deferred_watcher_thread
+        assert watcher_thread is not None
+        assert watcher_thread.is_alive() is True
+
+        # Call stop() 5 times while still generating
+        for _ in range(5):
+            res_repeat = orch.stop(timeout_seconds=0.01)
+            assert res_repeat is False
+            assert orch.get_status()["state"] == "stopping"
+            assert orch._deferred_watcher_thread is watcher_thread
+
+        # Call _start_deferred_shutdown_watcher directly
+        orch._start_deferred_shutdown_watcher()
+        assert orch._deferred_watcher_thread is watcher_thread
+
+        # Release chat
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        # Wait for watcher to finish
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        watcher_thread.join(timeout=1.0)
+        assert watcher_thread.is_alive() is False
+
+    def test_successful_shutdown_terminates_watcher(self, tmp_path: Path) -> None:
+        """Verifies the watcher thread cleanly halts upon successful deferred shutdown."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        fake_engine = DeterministicFakeEngine()
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake_engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb: Any) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+
+        chat_hold = threading.Event()
+
+        def quick_hold_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            yield "token "
+            chat_hold.wait()
+            yield "end."
+
+        fake_engine.stream_chat = quick_hold_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Quick hold."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        orch.stop(timeout_seconds=0.01)
+        assert orch.get_status()["state"] == "stopping"
+        watcher = orch._deferred_watcher_thread
+        assert watcher is not None
+        assert watcher.is_alive() is True
+
+        # Release chat and let completion happen
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch.get_status()["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch.get_status()["state"] == "stopped"
+        watcher.join(timeout=1.0)
+        assert watcher.is_alive() is False
+
 
 # ==============================================================================
 # 13. Resource Limit Enforcement & Reload Deadlock Tests

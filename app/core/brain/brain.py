@@ -41,6 +41,32 @@ class TsukikoBrain:
         self._history: List[Dict[str, str]] = []
         self._lock = threading.RLock()
         self._is_initialized = False
+        self._generation_finished_callbacks: List[Any] = []
+
+        if hasattr(self.model_manager, "register_generation_finished_callback"):
+            self.model_manager.register_generation_finished_callback(self._notify_generation_finished)
+
+    def register_generation_finished_callback(self, callback: Any) -> None:
+        """Registers a callback to execute whenever generation completes."""
+        with self._lock:
+            if callback not in self._generation_finished_callbacks:
+                self._generation_finished_callbacks.append(callback)
+
+    def unregister_generation_finished_callback(self, callback: Any) -> None:
+        """Unregisters a generation finished callback."""
+        with self._lock:
+            if callback in self._generation_finished_callbacks:
+                self._generation_finished_callbacks.remove(callback)
+
+    def _notify_generation_finished(self) -> None:
+        """Invokes registered callbacks when generation finishes."""
+        with self._lock:
+            callbacks = list(self._generation_finished_callbacks)
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logger.debug(f"Exception in brain generation finished callback: {e}")
 
     def initialize(self) -> None:
         """Initializes brain state and inspects configured model."""
@@ -177,6 +203,7 @@ class TsukikoBrain:
                     logger.debug(
                         f"Turn appended to session history. Current turns: {len(self._history)}"
                     )
+            self._notify_generation_finished()
 
     @property
     def is_generating(self) -> bool:
@@ -245,6 +272,8 @@ class TsukikoBrain:
         except Exception as e:
             logger.debug(f"Failed to generate conversational initiative: {e}")
             return None
+        finally:
+            self._notify_generation_finished()
 
         if not clean_remark:
             return None

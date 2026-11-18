@@ -60,6 +60,7 @@ class ModelManager:
             state=ModelLifecycleState.NOT_CONFIGURED,
             context_window=self._ai_config.context_window,
         )
+        self._generation_finished_callbacks: List[Any] = []
 
         # Initial inspection of configured model path
         self.inspect_configured_model()
@@ -391,6 +392,29 @@ class ModelManager:
                 if self._info.state == ModelLifecycleState.GENERATING:
                     self._info.state = ModelLifecycleState.LOADED
                 self._schedule_inactivity_timer()
+            self._notify_generation_finished()
+
+    def register_generation_finished_callback(self, callback: Any) -> None:
+        """Registers a callback to execute whenever generation terminates."""
+        with self._lock:
+            if callback not in self._generation_finished_callbacks:
+                self._generation_finished_callbacks.append(callback)
+
+    def unregister_generation_finished_callback(self, callback: Any) -> None:
+        """Unregisters a generation finished callback."""
+        with self._lock:
+            if callback in self._generation_finished_callbacks:
+                self._generation_finished_callbacks.remove(callback)
+
+    def _notify_generation_finished(self) -> None:
+        """Invokes registered callbacks when generation finishes."""
+        with self._lock:
+            callbacks = list(self._generation_finished_callbacks)
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logger.debug(f"Exception in manager generation finished callback: {e}")
 
     def cancel_generation(self) -> None:
         """Cancels any actively running generation."""
