@@ -2640,9 +2640,13 @@ class TestActiveOperationConcurrencyAndStateTracking:
         chat_hold = threading.Event()
 
         def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
-            yield "token1 "
-            chat_hold.wait()
-            yield "token2."
+            fake._is_generating = True
+            try:
+                yield "token1 "
+                chat_hold.wait()
+                yield "token2."
+            finally:
+                fake._is_generating = False
 
         fake.stream_chat = holding_stream
 
@@ -2921,6 +2925,310 @@ class TestActiveOperationConcurrencyAndStateTracking:
 
         assert orch.get_status()["state"] == "stopped"
         assert fake.is_loaded() is False
+
+
+# ==============================================================================
+# 13c. Protected Model Unload During Active Brain Operations Tests
+# ==============================================================================
+
+class TestProtectedModelUnloadDuringActiveBrainOperations:
+    """Verifies that TsukikoBrain.unload_model() strictly refuses unloading
+    whenever any brain-level operation is active (prompt preparation, inference,
+    history processing) and that brain locking prevents races."""
+
+    def _make_orch(self, tmp_path: Path, engine: DeterministicFakeEngine) -> TsukikoOrchestrator:
+        """Helper: creates a loaded, running orchestrator with an empty scheduler."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        cfg.ai.lazy_load = False
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+        return orch
+
+    def test_unload_model_refused_during_active_token_generation(self, tmp_path: Path) -> None:
+        """Attempting brain.unload_model() during active streaming must refuse and keep weights loaded."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            fake._is_generating = True
+            try:
+                yield "token1 "
+                chat_hold.wait()
+                yield "token2."
+            finally:
+                fake._is_generating = False
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Hold generation."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert fake.is_generating() is True
+        assert orch.brain.active_operations == 1
+
+        # Attempt unload: MUST refuse
+        ok = orch.brain.unload_model()
+        assert ok is False
+        assert fake.is_loaded() is True
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        # Release generation
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+
+        # Now unload must succeed
+        ok_after = orch.brain.unload_model()
+        assert ok_after is True
+        assert fake.is_loaded() is False
+
+    def test_unload_model_refused_during_post_inference_clean_response(self, tmp_path: Path) -> None:
+        """Attempting unload_model() during post-inference clean_response must refuse even though engine has stopped."""
+        fake = DeterministicFakeEngine(canned_response="Clean me gently.")
+        orch = self._make_orch(tmp_path, fake)
+
+        clean_started = threading.Event()
+        clean_unblock = threading.Event()
+        orig_clean = orch.brain.personality.clean_response
+
+        def pausing_clean(raw: str) -> str:
+            clean_started.set()
+            clean_unblock.wait()
+            return orig_clean(raw)
+
+        orch.brain.personality.clean_response = pausing_clean
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Clean test."))
+        )
+        gen_thread.start()
+
+        assert clean_started.wait(timeout=2.0)
+
+        # Tokens are finished yielding, ModelManager is in state LOADED, but brain operation is active
+        assert fake.is_generating() is False
+        assert orch.brain.active_operations == 1
+
+        # Attempt unload: MUST refuse
+        ok = orch.brain.unload_model()
+        assert ok is False
+        assert fake.is_loaded() is True
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        # Release clean_response
+        clean_unblock.set()
+        gen_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+
+        # Now unload succeeds
+        assert orch.brain.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_unload_model_refused_during_proactive_history_processing(self, tmp_path: Path) -> None:
+        """Attempting unload_model() during proactive remark history recording must refuse."""
+        fake = DeterministicFakeEngine(canned_response="Proactive remark.")
+        orch = self._make_orch(tmp_path, fake)
+
+        record_started = threading.Event()
+        record_unblock = threading.Event()
+        orig_record = orch.brain.personality.initiative_engine.record_initiative_sent
+
+        def pausing_record(text: str) -> None:
+            record_started.set()
+            record_unblock.wait()
+            orig_record(text)
+
+        orch.brain.personality.initiative_engine.record_initiative_sent = pausing_record
+
+        init_thread = threading.Thread(
+            target=lambda: orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+        )
+        init_thread.start()
+
+        assert record_started.wait(timeout=2.0)
+
+        # Generation is done, but remark history recording is active
+        assert fake.is_generating() is False
+        assert orch.brain.active_operations == 1
+
+        # Attempt unload: MUST refuse
+        ok = orch.brain.unload_model()
+        assert ok is False
+        assert fake.is_loaded() is True
+
+        # Release recording
+        record_unblock.set()
+        init_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+
+        # Now unload succeeds
+        assert orch.brain.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_unload_model_refused_during_chat_prompt_preparation(self, tmp_path: Path) -> None:
+        """Attempting unload_model() during history pruning in stream_response must refuse."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        prune_started = threading.Event()
+        prune_unblock = threading.Event()
+        orig_prune = orch.brain._prune_history_to_fit_context
+
+        def pausing_prune(prompt: str, reserve_tokens_for_generation: int = 1024):
+            prune_started.set()
+            prune_unblock.wait()
+            return orig_prune(prompt, reserve_tokens_for_generation)
+
+        orch.brain._prune_history_to_fit_context = pausing_prune
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Pruning pause test."))
+        )
+        gen_thread.start()
+
+        assert prune_started.wait(timeout=2.0)
+
+        # Inside prompt preparation, active_operations is 1
+        assert orch.brain.active_operations == 1
+
+        # Attempt unload: MUST refuse
+        ok = orch.brain.unload_model()
+        assert ok is False
+        assert fake.is_loaded() is True
+
+        # Release pruning
+        prune_unblock.set()
+        gen_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_unload_model_refused_during_proactive_prompt_preparation(self, tmp_path: Path) -> None:
+        """Attempting unload_model() during proactive prompt construction must refuse."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        build_started = threading.Event()
+        build_unblock = threading.Event()
+        orig_build = orch.brain.personality.initiative_engine.build_initiative_prompt
+
+        def pausing_build(**kwargs):
+            build_started.set()
+            build_unblock.wait()
+            return orig_build(**kwargs)
+
+        orch.brain.personality.initiative_engine.build_initiative_prompt = pausing_build
+
+        init_thread = threading.Thread(
+            target=lambda: orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+        )
+        init_thread.start()
+
+        assert build_started.wait(timeout=2.0)
+
+        # Inside proactive prompt preparation
+        assert orch.brain.active_operations == 1
+
+        # Attempt unload: MUST refuse
+        ok = orch.brain.unload_model()
+        assert ok is False
+        assert fake.is_loaded() is True
+
+        # Release build
+        build_unblock.set()
+        init_thread.join(timeout=3.0)
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_new_generation_cannot_race_between_unload_check_and_actual_unload(self, tmp_path: Path) -> None:
+        """A new generation cannot start while unload_model is executing under brain lock."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        unload_in_progress = threading.Event()
+        unload_unblock = threading.Event()
+        orig_unload = fake.unload
+
+        def pausing_unload():
+            unload_in_progress.set()
+            unload_unblock.wait()
+            orig_unload()
+
+        fake.unload = pausing_unload
+
+        # Thread 1 starts unload_model()
+        t1 = threading.Thread(target=orch.brain.unload_model)
+        t1.start()
+
+        # Wait until T1 is actively executing unload while holding brain._lock
+        assert unload_in_progress.wait(timeout=2.0)
+
+        # Thread 2 attempts to start generation
+        t2_started = threading.Event()
+        t2_error: List[Exception] = []
+
+        def racing_generation():
+            t2_started.set()
+            try:
+                list(orch.brain.stream_response("Racing generation attempt."))
+            except Exception as e:
+                t2_error.append(e)
+
+        t2 = threading.Thread(target=racing_generation)
+        t2.start()
+
+        assert t2_started.wait(timeout=2.0)
+        # Give T2 a moment to hit the lock
+        time.sleep(0.05)
+
+        # T2 cannot have incremented active_operations because T1 holds brain._lock!
+        # Access internal counter directly here because calling the locked active_operations property
+        # from the test thread would block on brain._lock while T1 is deliberately holding it.
+        assert orch.brain._active_operations == 0
+        assert t2.is_alive() is True
+
+        # Allow T1 to complete unload
+        unload_unblock.set()
+        t1.join(timeout=3.0)
+        assert fake.is_loaded() is False
+
+        # T2 now acquires lock, finds model unloaded, and fails cleanly (lazy_load=False)
+        t2.join(timeout=3.0)
+        assert not t2.is_alive()
+        assert len(t2_error) == 1
+        assert "Model is not loaded" in str(t2_error[0])
+        assert orch.brain.active_operations == 0
 
 
 # ==============================================================================

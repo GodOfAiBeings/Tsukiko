@@ -86,11 +86,27 @@ class TsukikoBrain:
 
     def load_model(self, force: bool = False) -> bool:
         """Explicitly loads the configured model into memory/VRAM."""
-        return self.model_manager.load_model(force=force)
+        with self._lock:
+            return self.model_manager.load_model(force=force)
 
     def unload_model(self) -> bool:
-        """Explicitly unloads the model from memory/VRAM."""
-        return self.model_manager.unload_model()
+        """Explicitly unloads the model from memory/VRAM.
+
+        Refuses unloading whenever any brain-level operation is active
+        (_active_operations > 0 or model_manager is generating).
+        Acquires brain-level lock throughout the safety check and unload execution
+        so a new operation cannot start between the check and unload.
+        """
+        with self._lock:
+            if self._active_operations > 0:
+                logger.warning(
+                    f"Cannot unload model: {self._active_operations} active brain operation(s) in progress."
+                )
+                return False
+            if self.is_generating:
+                logger.warning("Cannot unload model: model inference is currently active.")
+                return False
+            return self.model_manager.unload_model()
 
     def get_history(self) -> List[Dict[str, str]]:
         """Returns a snapshot of current session in-memory conversation history."""
@@ -130,7 +146,10 @@ class TsukikoBrain:
         pruned_reversed: List[Dict[str, str]] = []
         current_tokens = 0
 
-        for msg in reversed(self._history):
+        with self._lock:
+            history_snapshot = list(self._history)
+
+        for msg in reversed(history_snapshot):
             t = estimate_tokens(msg.get("content", ""))
             if current_tokens + t > remaining_budget:
                 break
@@ -192,12 +211,11 @@ class TsukikoBrain:
         try:
             self.personality.initiative_engine.record_user_activity()
 
-            with self._lock:
-                pruned_history = self._prune_history_to_fit_context(
-                    clean_user,
-                    reserve_tokens_for_generation=max_tokens,
-                )
-                messages = self.personality.format_messages(pruned_history, clean_user)
+            pruned_history = self._prune_history_to_fit_context(
+                clean_user,
+                reserve_tokens_for_generation=max_tokens,
+            )
+            messages = self.personality.format_messages(pruned_history, clean_user)
 
             accumulated_chunks: List[str] = []
 
@@ -285,20 +303,21 @@ class TsukikoBrain:
 
             # Increment active operations counter BEFORE prompt preparation
             self._active_operations += 1
+            history_snapshot = list(self._history)
+            stage = self.personality.disclosure_tracker.stage
+            biography = self.personality.biography
+            personality_directive = biography.get_stage_personality_directive(stage)
 
         should_notify = False
         clean_remark: Optional[str] = None
         try:
             try:
-                with self._lock:
-                    prompt_messages = self.personality.initiative_engine.build_initiative_prompt(
-                        session_history=self._history,
-                        stage=self.personality.disclosure_tracker.stage,
-                        biography=self.personality.biography,
-                        personality_directive=self.personality.biography.get_stage_personality_directive(
-                            self.personality.disclosure_tracker.stage
-                        ),
-                    )
+                prompt_messages = self.personality.initiative_engine.build_initiative_prompt(
+                    session_history=history_snapshot,
+                    stage=stage,
+                    biography=biography,
+                    personality_directive=personality_directive,
+                )
 
                 raw_response = self.model_manager.generate(
                     messages=prompt_messages,
@@ -324,9 +343,10 @@ class TsukikoBrain:
                     logger.debug("Brain was shut down during initiative generation; discarding remark.")
                     return None
                 self._history.append({"role": "assistant", "content": clean_remark})
-                self.personality.initiative_engine.record_initiative_sent(clean_remark)
-                logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
-                return clean_remark
+
+            self.personality.initiative_engine.record_initiative_sent(clean_remark)
+            logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
+            return clean_remark
         finally:
             with self._lock:
                 self._active_operations = max(0, self._active_operations - 1)
