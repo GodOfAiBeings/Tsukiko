@@ -37,6 +37,7 @@ class TsukikoBrain:
     ) -> None:
         self.config = config or get_config()
         self.model_manager = model_manager or ModelManager(config=self.config, engine=engine)
+        self.model_manager.set_can_unload_predicate(lambda: self._active_operations == 0)
         self.personality = PersonalityEngine(custom_system_prompt=self.config.ai.system_prompt)
         self._history: List[Dict[str, str]] = []
         self._lock = threading.RLock()
@@ -85,8 +86,14 @@ class TsukikoBrain:
             )
 
     def load_model(self, force: bool = False) -> bool:
-        """Explicitly loads the configured model into memory/VRAM."""
+        """Explicitly loads the configured model into memory/VRAM.
+
+        Refuses forced reloads whenever active brain operations are running.
+        """
         with self._lock:
+            if force and (self._active_operations > 0 or self.is_generating):
+                logger.warning("Cannot reload model: active brain operations are currently in progress.")
+                return False
             return self.model_manager.load_model(force=force)
 
     def unload_model(self) -> bool:

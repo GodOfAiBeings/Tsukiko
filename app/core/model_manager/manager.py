@@ -61,9 +61,15 @@ class ModelManager:
             context_window=self._ai_config.context_window,
         )
         self._generation_finished_callbacks: List[Any] = []
+        self._can_unload_predicate: Optional[Any] = None
 
         # Initial inspection of configured model path
         self.inspect_configured_model()
+
+    def set_can_unload_predicate(self, predicate: Optional[Any]) -> None:
+        """Registers a predicate to verify whether external systems permit model unloading."""
+        with self._lock:
+            self._can_unload_predicate = predicate
 
     @property
     def info(self) -> ModelInfo:
@@ -248,6 +254,10 @@ class ModelManager:
                 logger.debug("Model is already loaded.")
                 return True
 
+            if self._info.state == ModelLifecycleState.GENERATING:
+                logger.warning("Cannot load or reload model while generation is active.")
+                return False
+
             if self._info.state in (ModelLifecycleState.NOT_CONFIGURED, ModelLifecycleState.NOT_INSTALLED):
                 logger.warning(f"Cannot load model: state is {self._info.state}")
                 return False
@@ -301,15 +311,24 @@ class ModelManager:
                 logger.error(f"Failed to load model {self._info.model_name}: {e}")
                 return False
 
-    def unload_model(self) -> bool:
+    def unload_model(self, force: bool = False) -> bool:
         """Unloads model weights from memory/VRAM cleanly."""
         with self._lock:
             if not self._info.is_loaded:
                 return True
 
-            if self._info.state == ModelLifecycleState.GENERATING:
-                logger.warning("Cannot unload model while generation is active.")
-                return False
+            if not force:
+                if self._info.state == ModelLifecycleState.GENERATING:
+                    logger.warning("Cannot unload model while generation is active.")
+                    return False
+
+                if self._can_unload_predicate is not None:
+                    try:
+                        if not self._can_unload_predicate():
+                            logger.warning("Cannot unload model: external operations are still active.")
+                            return False
+                    except Exception as e:
+                        logger.debug(f"Exception in can_unload_predicate: {e}")
 
             self._info.state = ModelLifecycleState.UNLOADING
             self._cancel_inactivity_timer()
@@ -426,7 +445,7 @@ class ModelManager:
         with self._lock:
             self._cancel_inactivity_timer()
             self.cancel_generation()
-            self.unload_model()
+            self.unload_model(force=True)
 
     def _touch_activity(self) -> None:
         self._last_activity = time.time()
@@ -445,7 +464,10 @@ class ModelManager:
                 elapsed = time.time() - self._last_activity
                 if elapsed >= timeout:
                     logger.info(f"Model inactive for {int(elapsed)}s (timeout={timeout}s). Auto-unloading...")
-                    self.unload_model()
+                    unloaded = self.unload_model()
+                    if not unloaded:
+                        # Reschedule if unload was refused (e.g. brain operation in progress)
+                        self._schedule_inactivity_timer()
                 else:
                     # Reschedule for remaining time
                     self._schedule_inactivity_timer()

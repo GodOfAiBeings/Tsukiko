@@ -3230,6 +3230,121 @@ class TestProtectedModelUnloadDuringActiveBrainOperations:
         assert "Model is not loaded" in str(t2_error[0])
         assert orch.brain.active_operations == 0
 
+    def test_inactivity_timer_refuses_unload_during_active_brain_postprocessing(self, tmp_path: Path) -> None:
+        """Inactivity timer must NOT unload model while brain post-processing is active."""
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        cfg.ai.lazy_load = False
+        cfg.ai.unload_timeout_seconds = 1  # 1s timeout
+
+        fake = DeterministicFakeEngine(canned_response="Postprocessing hold.")
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(fake)
+        orch.initialize()
+        orch.brain.load_model()
+
+        clean_started = threading.Event()
+        clean_unblock = threading.Event()
+        orig_clean = orch.brain.personality.clean_response
+
+        def pausing_clean(raw: str) -> str:
+            clean_started.set()
+            clean_unblock.wait()
+            return orig_clean(raw)
+
+        orch.brain.personality.clean_response = pausing_clean
+
+        gen_thread = threading.Thread(target=lambda: list(orch.brain.stream_response("Hello timer.")))
+        gen_thread.start()
+
+        assert clean_started.wait(timeout=2.0)
+        assert orch.brain.active_operations == 1
+        assert fake.is_loaded() is True
+
+        # Wait for the 1s inactivity timer to fire while clean_response is paused
+        time.sleep(1.3)
+
+        # Inactivity timer must have checked predicate and refused unloading!
+        assert fake.is_loaded() is True
+        assert orch.brain.model_manager.info.is_loaded is True
+
+        # Release clean_response
+        clean_unblock.set()
+        gen_thread.join(timeout=3.0)
+        assert orch.brain.active_operations == 0
+
+        # Now wait for the rescheduled timer to auto-unload idle model
+        time.sleep(1.3)
+        assert fake.is_loaded() is False
+
+    def test_force_reload_refused_during_active_generation(self, tmp_path: Path) -> None:
+        """Calling brain.load_model(force=True) during active streaming must refuse to reload."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        chat_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            fake._is_generating = True
+            try:
+                yield "tok1 "
+                chat_hold.wait()
+                yield "tok2"
+            finally:
+                fake._is_generating = False
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(target=lambda: list(orch.brain.stream_response("Hold for reload.")))
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not orch.brain.is_generating:
+            time.sleep(0.01)
+
+        assert orch.brain.is_generating is True
+        initial_load_count = fake.load_call_count
+
+        # Attempt force reload on brain: MUST refuse
+        ok = orch.brain.load_model(force=True)
+        assert ok is False
+        assert fake.load_call_count == initial_load_count
+
+        # Attempt force reload on model_manager directly: MUST also refuse
+        ok_mgr = orch.brain.model_manager.load_model(force=True)
+        assert ok_mgr is False
+        assert fake.load_call_count == initial_load_count
+
+        chat_hold.set()
+        gen_thread.join(timeout=3.0)
+        assert orch.brain.active_operations == 0
+
+        # Now that generation is finished, force reload succeeds
+        assert orch.brain.load_model(force=True) is True
+        assert fake.load_call_count == initial_load_count + 1
+
+    def test_generator_early_close_decrements_active_operations(self, tmp_path: Path) -> None:
+        """Closing a response stream early (GeneratorExit) guarantees active operations are decremented."""
+        fake = DeterministicFakeEngine(canned_response="One two three four five.")
+        orch = self._make_orch(tmp_path, fake)
+
+        gen = orch.brain.stream_response("Early close message")
+        assert orch.brain.active_operations == 0
+
+        first_tok = next(gen)
+        assert len(first_tok) > 0
+        assert orch.brain.active_operations == 1
+
+        # Abandon stream early
+        gen.close()
+
+        assert orch.brain.active_operations == 0
+        assert orch.brain.is_generating is False
+        assert orch.brain.unload_model() is True
+        assert fake.is_loaded() is False
+
 
 # ==============================================================================
 # 13. Resource Limit Enforcement & Reload Deadlock Tests
