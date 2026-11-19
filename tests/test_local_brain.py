@@ -3463,3 +3463,504 @@ class TestResourceLimitEnforcementAndDeadlock:
             assert fake_engine.is_loaded() is True
 
         assert fake_engine.load_call_count == 6
+
+
+class TestModelLifecycleConcurrencyHardening:
+    """Comprehensive test suite for Model Lifecycle Concurrency Hardening.
+
+    Verifies the atomic admission protocol, forced reload protection,
+    forced unload shutdown coordination, early closure, exception safety,
+    multi-operation accounting, and absence of deadlocks.
+    """
+
+    def _make_orch(self, tmp_path: Path, engine: BaseInferenceEngine, lazy_load: bool = False) -> TsukikoOrchestrator:
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(create_synthetic_gguf_binary())
+        cfg = TsukikoConfig()
+        cfg.ai.model_path = str(model_file)
+        cfg.ai.lazy_load = lazy_load
+        orch = TsukikoOrchestrator(config=cfg)
+        orch.brain.model_manager.set_engine(engine)
+        orch.initialize()
+        orch.brain.model_manager.load_model()
+        orch._is_running = True
+        orch._status["state"] = "running"
+
+        class EmptyScheduler:
+            has_running_workers = False
+            def stop(self, wait_timeout_ms: int = 1000) -> bool:
+                return True
+            def set_deferred_shutdown_callback(self, cb) -> None:
+                pass
+
+        orch.initiative_scheduler = EmptyScheduler()
+        return orch
+
+    def test_inactivity_unload_racing_with_chat_operation(self, tmp_path: Path) -> None:
+        """Inactivity auto-unload and new chat admission cannot race to unload under an active operation."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        chat_admitted = threading.Event()
+        chat_unblock = threading.Event()
+        orig_prune = orch.brain._prune_history_to_fit_context
+
+        def pausing_prune(prompt: str, reserve_tokens_for_generation: int = 1024):
+            chat_admitted.set()
+            chat_unblock.wait()
+            return orig_prune(prompt, reserve_tokens_for_generation)
+
+        orch.brain._prune_history_to_fit_context = pausing_prune
+
+        chat_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Racing inactivity."))
+        )
+        chat_thread.start()
+
+        assert chat_admitted.wait(timeout=2.0)
+        assert mgr.active_operations == 1
+
+        # Inactivity unload attempted while chat has acquired operation: must refuse
+        unloaded = mgr.unload_model()
+        assert unloaded is False
+        assert fake.is_loaded() is True
+
+        # Complete chat
+        chat_unblock.set()
+        chat_thread.join(timeout=3.0)
+        assert mgr.active_operations == 0
+
+        # Now unload succeeds
+        assert mgr.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_inactivity_unload_racing_with_proactive_generation(self, tmp_path: Path) -> None:
+        """Inactivity auto-unload attempted during proactive initiative generation must refuse."""
+        fake = DeterministicFakeEngine(canned_response="A gentle remark.")
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        init_started = threading.Event()
+        init_unblock = threading.Event()
+        orig_build = orch.brain.personality.initiative_engine.build_initiative_prompt
+
+        def pausing_build(**kwargs):
+            init_started.set()
+            init_unblock.wait()
+            return orig_build(**kwargs)
+
+        orch.brain.personality.initiative_engine.build_initiative_prompt = pausing_build
+
+        init_thread = threading.Thread(
+            target=lambda: orch.brain.check_conversational_initiative(current_time=time.time() + 500.0)
+        )
+        init_thread.start()
+
+        assert init_started.wait(timeout=2.0)
+        assert mgr.active_operations == 1
+
+        # Inactivity unload attempted: must refuse
+        assert mgr.unload_model() is False
+        assert fake.is_loaded() is True
+
+        # Unblock and finish
+        init_unblock.set()
+        init_thread.join(timeout=3.0)
+        assert mgr.active_operations == 0
+        assert mgr.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_forced_reload_during_prompt_preparation(self, tmp_path: Path) -> None:
+        """Direct ModelManager.load_model(force=True) during prompt prep must refuse."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        prep_started = threading.Event()
+        prep_unblock = threading.Event()
+        orig_prune = orch.brain._prune_history_to_fit_context
+
+        def pausing_prune(prompt: str, reserve_tokens_for_generation: int = 1024):
+            prep_started.set()
+            prep_unblock.wait()
+            return orig_prune(prompt, reserve_tokens_for_generation)
+
+        orch.brain._prune_history_to_fit_context = pausing_prune
+
+        chat_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Prompt prep reload test."))
+        )
+        chat_thread.start()
+
+        assert prep_started.wait(timeout=2.0)
+        assert mgr.active_operations == 1
+
+        # Direct reload call on manager must be refused!
+        ok = mgr.load_model(force=True)
+        assert ok is False
+        assert fake.load_call_count == 1  # Not reloaded
+
+        prep_unblock.set()
+        chat_thread.join(timeout=3.0)
+        assert mgr.active_operations == 0
+
+    def test_forced_reload_during_response_post_processing(self, tmp_path: Path) -> None:
+        """Direct ModelManager.load_model(force=True) during clean_response/history processing must refuse."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        clean_started = threading.Event()
+        clean_unblock = threading.Event()
+        orig_clean = orch.brain.personality.clean_response
+
+        def pausing_clean(raw: str) -> str:
+            clean_started.set()
+            clean_unblock.wait()
+            return orig_clean(raw)
+
+        orch.brain.personality.clean_response = pausing_clean
+
+        chat_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Post-processing reload test."))
+        )
+        chat_thread.start()
+
+        assert clean_started.wait(timeout=2.0)
+        # Token streaming has completed, but post-processing is active
+        assert fake.is_generating() is False
+        assert mgr.active_operations == 1
+
+        # Direct reload must be refused!
+        ok = mgr.load_model(force=True)
+        assert ok is False
+        assert fake.load_call_count == 1
+
+        clean_unblock.set()
+        chat_thread.join(timeout=3.0)
+        assert mgr.active_operations == 0
+
+    def test_forced_unload_during_active_generation(self, tmp_path: Path) -> None:
+        """ModelManager.unload_model(force=True) during token generation must refuse."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        stream_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            fake._is_generating = True
+            try:
+                yield "first token "
+                stream_hold.wait()
+                yield "last token."
+            finally:
+                fake._is_generating = False
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Forced unload test."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not fake.is_generating():
+            time.sleep(0.01)
+
+        assert fake.is_generating() is True
+
+        # Forced unload MUST be refused while generation is active!
+        ok = mgr.unload_model(force=True)
+        assert ok is False
+        assert fake.is_loaded() is True
+
+        stream_hold.set()
+        gen_thread.join(timeout=3.0)
+        assert mgr.active_operations == 0
+
+        # After generation, forced unload succeeds
+        assert mgr.unload_model(force=True) is True
+        assert fake.is_loaded() is False
+
+    def test_shutdown_during_active_generation(self, tmp_path: Path) -> None:
+        """Orchestrator shutdown during active generation must refuse immediate unload and enter deferred stopping."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        stream_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            fake._is_generating = True
+            try:
+                yield "tok1 "
+                stream_hold.wait()
+                yield "tok2."
+            finally:
+                fake._is_generating = False
+
+        fake.stream_chat = holding_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Shutdown active gen test."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not fake.is_generating():
+            time.sleep(0.01)
+
+        assert fake.is_generating() is True
+
+        # stop() with short timeout must defer
+        stopped = orch.stop(timeout_seconds=0.05)
+        assert stopped is False
+        assert orch._status["state"] == "stopping"
+        assert fake.is_loaded() is True
+
+        # Release stream
+        stream_hold.set()
+        gen_thread.join(timeout=3.0)
+
+        # Deferred watcher completes shutdown cleanly
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch._status["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch._status["state"] == "stopped"
+        assert fake.is_loaded() is False
+
+    def test_shutdown_during_response_post_processing(self, tmp_path: Path) -> None:
+        """Orchestrator shutdown during clean_response must defer unload until post-processing finishes."""
+        fake = DeterministicFakeEngine(canned_response="Post proc shutdown.")
+        orch = self._make_orch(tmp_path, fake)
+
+        clean_started = threading.Event()
+        clean_unblock = threading.Event()
+        orig_clean = orch.brain.personality.clean_response
+
+        def pausing_clean(raw: str) -> str:
+            clean_started.set()
+            clean_unblock.wait()
+            return orig_clean(raw)
+
+        orch.brain.personality.clean_response = pausing_clean
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Post proc shutdown test."))
+        )
+        gen_thread.start()
+
+        assert clean_started.wait(timeout=2.0)
+        assert fake.is_generating() is False
+        assert orch.brain.active_operations == 1
+
+        # Attempt stop: must defer because brain.is_generating is True (active_operations == 1)
+        stopped = orch.stop(timeout_seconds=0.05)
+        assert stopped is False
+        assert orch._status["state"] == "stopping"
+        assert fake.is_loaded() is True
+
+        # Unblock post-processing
+        clean_unblock.set()
+        gen_thread.join(timeout=3.0)
+
+        # Deferred shutdown completes
+        deadline = time.time() + 3.0
+        while time.time() < deadline and orch._status["state"] != "stopped":
+            time.sleep(0.02)
+
+        assert orch._status["state"] == "stopped"
+        assert fake.is_loaded() is False
+
+    def test_cancellation_while_unloading_is_waiting(self, tmp_path: Path) -> None:
+        """Calling cancel_generation() stops running stream and permits unload to complete."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        cancelled = threading.Event()
+
+        def cancellable_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            fake._is_generating = True
+            try:
+                yield "first "
+                while not fake._cancelled:
+                    time.sleep(0.01)
+                cancelled.set()
+            finally:
+                fake._is_generating = False
+
+        fake.stream_chat = cancellable_stream
+
+        gen_thread = threading.Thread(
+            target=lambda: list(orch.brain.stream_response("Cancellation test."))
+        )
+        gen_thread.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not fake.is_generating():
+            time.sleep(0.01)
+
+        assert fake.is_generating() is True
+
+        # Cancel generation
+        orch.brain.cancel_generation()
+        assert cancelled.wait(timeout=2.0)
+        gen_thread.join(timeout=3.0)
+
+        assert mgr.active_operations == 0
+        assert mgr.unload_model() is True
+        assert fake.is_loaded() is False
+
+    def test_generator_early_close_accounting(self, tmp_path: Path) -> None:
+        """Closing a stream generator early (gen.close()) decrements active operations and restores LOADED state."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        gen = orch.brain.stream_response("Early close test.")
+        tok = next(gen)
+        assert len(tok) > 0
+        assert mgr.active_operations == 1
+
+        # Close generator early
+        gen.close()
+
+        assert mgr.active_operations == 0
+        assert mgr.state == ModelLifecycleState.LOADED
+
+        # Subsequent generation operates normally
+        resp = orch.brain.generate_response("Subsequent request.")
+        assert len(resp) > 0
+        assert mgr.active_operations == 0
+
+    def test_exceptions_during_operation_admission_and_cleanup(self, tmp_path: Path) -> None:
+        """Exceptions during prompt preparation or stream release active operation reservation safely."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        # Case 1: Exception during message formatting
+        with patch.object(orch.brain.personality, "format_messages", side_effect=ValueError("Boom format")):
+            with pytest.raises(ValueError, match="Boom format"):
+                list(orch.brain.stream_response("Format exception test."))
+
+        assert mgr.active_operations == 0
+
+        # Case 2: Exception during pruning
+        with patch.object(orch.brain, "_prune_history_to_fit_context", side_effect=RuntimeError("Boom prune")):
+            with pytest.raises(RuntimeError, match="Boom prune"):
+                list(orch.brain.stream_response("Prune exception test."))
+
+        assert mgr.active_operations == 0
+
+        # Case 3: Operation admission refused when model is UNLOADING
+        mgr._info.state = ModelLifecycleState.UNLOADING
+        with pytest.raises(RuntimeError, match="currently unloading"):
+            mgr.acquire_operation(allow_lazy_load=False, raise_on_failure=True)
+
+        assert mgr.active_operations == 0
+        mgr._info.state = ModelLifecycleState.LOADED
+
+    def test_multiple_concurrent_operations_accounting(self, tmp_path: Path) -> None:
+        """Concurrent operation rejection safely decrements operation count without notifying prematurely."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+        mgr = orch.brain.model_manager
+
+        notifications: List[int] = []
+        orch.brain.register_generation_finished_callback(lambda: notifications.append(mgr.active_operations))
+
+        stream_hold = threading.Event()
+
+        def holding_stream(messages, max_tokens=1024, temperature=0.7, top_p=0.9, repeat_penalty=1.1):
+            fake._is_generating = True
+            try:
+                yield "op1 token "
+                stream_hold.wait()
+                yield "done."
+            finally:
+                fake._is_generating = False
+
+        fake.stream_chat = holding_stream
+
+        # Op 1 starts and enters token generation
+        t1 = threading.Thread(target=lambda: list(orch.brain.stream_response("Op 1")))
+        t1.start()
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not fake.is_generating():
+            time.sleep(0.01)
+
+        assert fake.is_generating() is True
+        assert mgr.active_operations == 1
+
+        # Op 2 attempts while Op 1 is generating: must be rejected with RuntimeError
+        t2_error: List[Exception] = []
+
+        def run_op2():
+            try:
+                list(orch.brain.stream_response("Op 2"))
+            except Exception as e:
+                t2_error.append(e)
+
+        t2 = threading.Thread(target=run_op2)
+        t2.start()
+        t2.join(timeout=2.0)
+
+        assert len(t2_error) == 1
+        assert "Concurrent generation" in str(t2_error[0])
+
+        # Op 2 rejection MUST NOT have fired completion notifications!
+        assert len(notifications) == 0
+        # Op 1 is still running
+        assert mgr.active_operations == 1
+
+        # Unblock Op 1
+        stream_hold.set()
+        t1.join(timeout=3.0)
+
+        assert mgr.active_operations == 0
+        # Notification fired exactly once when Op 1 finished and active operations became 0
+        assert len(notifications) == 1
+        assert notifications[0] == 0
+
+    def test_no_deadlock_under_repeated_load_unload_generation_cycles(self, tmp_path: Path) -> None:
+        """Concurrently calling load, unload, and generation over repeated cycles never deadlocks."""
+        fake = DeterministicFakeEngine()
+        orch = self._make_orch(tmp_path, fake)
+
+        errors: List[Exception] = []
+
+        def worker(iteration: int) -> None:
+            try:
+                if iteration % 3 == 0:
+                    orch.brain.load_model(force=False)
+                elif iteration % 3 == 1:
+                    list(orch.brain.stream_response(f"Stress test {iteration}"))
+                else:
+                    orch.brain.unload_model()
+            except Exception as e:
+                # RuntimeErrors such as 'Model is not loaded' or 'Concurrent generation' are valid
+                if "Model is not loaded" not in str(e) and "Concurrent generation" not in str(e) and "currently unloading" not in str(e):
+                    errors.append(e)
+
+        # Run 15 stress iterations across threads
+        threads: List[threading.Thread] = []
+        for i in range(15):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+
+        # All threads must join cleanly within timeout (no deadlocks)
+        for t in threads:
+            t.join(timeout=3.0)
+            assert not t.is_alive(), "Thread deadlocked during stress cycle!"
+
+        assert len(errors) == 0
+        # Clean up
+        orch.brain.load_model(force=False)
+        orch.brain.unload_model()
+        assert fake.is_loaded() is False

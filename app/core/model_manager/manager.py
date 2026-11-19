@@ -6,6 +6,7 @@ safe GPU offloading, lazy loading, inactivity timeouts, and lifecycle states.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from pathlib import Path
 import threading
@@ -62,6 +63,7 @@ class ModelManager:
         )
         self._generation_finished_callbacks: List[Any] = []
         self._can_unload_predicate: Optional[Any] = None
+        self._active_operations: int = 0
 
         # Initial inspection of configured model path
         self.inspect_configured_model()
@@ -70,6 +72,84 @@ class ModelManager:
         """Registers a predicate to verify whether external systems permit model unloading."""
         with self._lock:
             self._can_unload_predicate = predicate
+
+    @property
+    def active_operations(self) -> int:
+        """Returns the number of active operations currently holding a lease on the model."""
+        return self._active_operations
+
+    def acquire_operation(
+        self,
+        allow_lazy_load: bool = True,
+        raise_on_failure: bool = True,
+    ) -> bool:
+        """Atomically reserves model access across prompt prep, inference, and post-processing.
+
+        Guarantees that while an operation holds this reservation:
+        1. Model cannot be auto-unloaded by inactivity timers.
+        2. Unload requests (forced or normal) are rejected while inference or active operations run.
+        3. Model cannot be reloaded (force=True) while active operations run.
+        4. Model cannot be unloaded while unloading transition is active.
+        """
+        with self._lock:
+            if self._info.state == ModelLifecycleState.UNLOADING:
+                if raise_on_failure:
+                    raise RuntimeError("Cannot start operation: model is currently unloading.")
+                return False
+
+            if self._info.state in (
+                ModelLifecycleState.NOT_CONFIGURED,
+                ModelLifecycleState.NOT_INSTALLED,
+                ModelLifecycleState.ERROR,
+            ):
+                if raise_on_failure:
+                    raise RuntimeError(f"Cannot start operation: model state is {self._info.state.value}.")
+                return False
+
+            if not self._info.is_loaded:
+                if allow_lazy_load and self._ai_config.lazy_load and self._info.is_ready_or_loaded:
+                    loaded = self.load_model()
+                    if not loaded:
+                        if raise_on_failure:
+                            raise RuntimeError(f"Lazy model load failed: {self._info.error_message}")
+                        return False
+                else:
+                    if raise_on_failure:
+                        raise RuntimeError("Model is not loaded. Call load_model() first.")
+                    return False
+
+            self._active_operations += 1
+            self._touch_activity()
+            self._cancel_inactivity_timer()
+            return True
+
+    def release_operation(self) -> None:
+        """Releases an operation reservation on the model."""
+        should_notify = False
+        with self._lock:
+            self._active_operations = max(0, self._active_operations - 1)
+            if self._active_operations == 0 and self._info.state != ModelLifecycleState.GENERATING:
+                self._schedule_inactivity_timer()
+                should_notify = True
+        if should_notify:
+            self._notify_generation_finished()
+
+    @contextmanager
+    def reserve_operation(
+        self,
+        allow_lazy_load: bool = True,
+        raise_on_failure: bool = True,
+    ) -> Iterator[bool]:
+        """Context manager for atomically reserving model access across an operation."""
+        admitted = self.acquire_operation(
+            allow_lazy_load=allow_lazy_load,
+            raise_on_failure=raise_on_failure,
+        )
+        try:
+            yield admitted
+        finally:
+            if admitted:
+                self.release_operation()
 
     @property
     def info(self) -> ModelInfo:
@@ -254,8 +334,18 @@ class ModelManager:
                 logger.debug("Model is already loaded.")
                 return True
 
-            if self._info.state == ModelLifecycleState.GENERATING:
+            if self._info.state == ModelLifecycleState.GENERATING or self._engine.is_generating():
                 logger.warning("Cannot load or reload model while generation is active.")
+                return False
+
+            if force and self._active_operations > 0:
+                logger.warning(
+                    f"Cannot reload model: {self._active_operations} active operation(s) currently in progress."
+                )
+                return False
+
+            if self._info.state == ModelLifecycleState.UNLOADING:
+                logger.warning("Cannot load model while model is currently unloading.")
                 return False
 
             if self._info.state in (ModelLifecycleState.NOT_CONFIGURED, ModelLifecycleState.NOT_INSTALLED):
@@ -317,9 +407,15 @@ class ModelManager:
             if not self._info.is_loaded:
                 return True
 
+            if self._info.state == ModelLifecycleState.GENERATING or self._engine.is_generating():
+                logger.warning("Cannot unload model while generation is active.")
+                return False
+
             if not force:
-                if self._info.state == ModelLifecycleState.GENERATING:
-                    logger.warning("Cannot unload model while generation is active.")
+                if self._active_operations > 0:
+                    logger.warning(
+                        f"Cannot unload model: {self._active_operations} active operation(s) in progress."
+                    )
                     return False
 
                 if self._can_unload_predicate is not None:
@@ -376,6 +472,7 @@ class ModelManager:
         repeat_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         """Streams response tokens with lazy-loading and concurrency protection."""
+        own_lease = False
         with self._lock:
             if not self._info.is_loaded:
                 if self._ai_config.lazy_load and self._info.is_ready_or_loaded:
@@ -389,6 +486,9 @@ class ModelManager:
                 raise RuntimeError("Concurrent generation requests are prohibited.")
 
             self._info.state = ModelLifecycleState.GENERATING
+            if self._active_operations == 0:
+                self._active_operations += 1
+                own_lease = True
             self._touch_activity()
             self._cancel_inactivity_timer()
 
@@ -407,11 +507,17 @@ class ModelManager:
                 self._touch_activity()
                 yield chunk
         finally:
+            should_notify = False
             with self._lock:
                 if self._info.state == ModelLifecycleState.GENERATING:
                     self._info.state = ModelLifecycleState.LOADED
-                self._schedule_inactivity_timer()
-            self._notify_generation_finished()
+                if own_lease:
+                    self._active_operations = max(0, self._active_operations - 1)
+                if self._active_operations == 0:
+                    self._schedule_inactivity_timer()
+                    should_notify = True
+            if should_notify:
+                self._notify_generation_finished()
 
     def register_generation_finished_callback(self, callback: Any) -> None:
         """Registers a callback to execute whenever generation terminates."""
@@ -440,12 +546,32 @@ class ModelManager:
         logger.info("Cancelling active model generation...")
         self._engine.cancel()
 
-    def shutdown(self) -> None:
-        """Releases all resources, halts timers, and shuts down."""
+    def shutdown(self, timeout_seconds: float = 0.0) -> bool:
+        """Releases all resources, halts timers, and shuts down cleanly.
+
+        Refuses to unload model weights while active generation is in progress,
+        or while active operations still hold a reservation, to prevent memory corruption.
+        Returns True if shutdown and unload completed; False if deferred.
+        """
+        logger.info("Shutting down ModelManager...")
+        self.cancel_generation()
+
+        if (self.state == ModelLifecycleState.GENERATING or self._engine.is_generating()) and timeout_seconds > 0:
+            deadline = time.time() + timeout_seconds
+            while time.time() < deadline and (self.state == ModelLifecycleState.GENERATING or self._engine.is_generating()):
+                time.sleep(0.02)
+
         with self._lock:
             self._cancel_inactivity_timer()
-            self.cancel_generation()
-            self.unload_model(force=True)
+            if self.state == ModelLifecycleState.GENERATING or self._engine.is_generating():
+                logger.warning("Active generation still running; cannot unload model weights during shutdown.")
+                return False
+            if self._active_operations > 0:
+                logger.warning(
+                    f"Active operations ({self._active_operations}) still running; cannot unload model weights during shutdown."
+                )
+                return False
+            return self.unload_model(force=True)
 
     def _touch_activity(self) -> None:
         self._last_activity = time.time()
@@ -459,7 +585,11 @@ class ModelManager:
 
         def _on_timeout() -> None:
             with self._lock:
-                if not self._info.is_loaded or self._info.state == ModelLifecycleState.GENERATING:
+                if (
+                    not self._info.is_loaded
+                    or self._info.state == ModelLifecycleState.GENERATING
+                    or self._active_operations > 0
+                ):
                     return
                 elapsed = time.time() - self._last_activity
                 if elapsed >= timeout:

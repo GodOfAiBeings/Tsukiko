@@ -37,12 +37,11 @@ class TsukikoBrain:
     ) -> None:
         self.config = config or get_config()
         self.model_manager = model_manager or ModelManager(config=self.config, engine=engine)
-        self.model_manager.set_can_unload_predicate(lambda: self._active_operations == 0)
+        self.model_manager.set_can_unload_predicate(lambda: self.active_operations == 0)
         self.personality = PersonalityEngine(custom_system_prompt=self.config.ai.system_prompt)
         self._history: List[Dict[str, str]] = []
         self._lock = threading.RLock()
         self._is_initialized = False
-        self._active_operations: int = 0
         self._generation_finished_callbacks: List[Any] = []
 
         # NOTE: The brain does NOT register with model_manager's generation callbacks.
@@ -189,8 +188,16 @@ class TsukikoBrain:
     @property
     def active_operations(self) -> int:
         """Returns the number of currently active brain-level generation operations."""
-        with self._lock:
-            return self._active_operations
+        return self.model_manager.active_operations
+
+    @property
+    def _active_operations(self) -> int:
+        """Backward-compatible access to model manager active operations."""
+        return self.model_manager.active_operations
+
+    @_active_operations.setter
+    def _active_operations(self, value: int) -> None:
+        self.model_manager._active_operations = value
 
     def stream_response(
         self,
@@ -202,17 +209,17 @@ class TsukikoBrain:
     ) -> Iterator[str]:
         """Streams response tokens incrementally, updating active session history upon completion.
 
-        Thread-safe: Increments active operations counter across prompt preparation,
+        Thread-safe: Atomically reserves an operation lease via ModelManager across prompt preparation,
         inference, and history processing. The entire operation is enclosed in a try/finally
-        so any exception during pruning or formatting guarantees counter decrement, and
+        so any exception during pruning or formatting guarantees lease release, and
         listeners are notified only when all active operations reach zero.
         """
         clean_user = user_message.strip()
         if not clean_user:
             return
 
-        with self._lock:
-            self._active_operations += 1
+        if not self.model_manager.acquire_operation(allow_lazy_load=True, raise_on_failure=True):
+            raise RuntimeError("Cannot admit operation: model is currently unavailable or unloading.")
 
         should_notify = False
         try:
@@ -253,9 +260,8 @@ class TsukikoBrain:
                                 f"Turn appended to session history. Current turns: {len(self._history)}"
                             )
         finally:
-            with self._lock:
-                self._active_operations = max(0, self._active_operations - 1)
-                should_notify = (self._active_operations == 0)
+            self.model_manager.release_operation()
+            should_notify = (self.model_manager.active_operations == 0)
             if should_notify:
                 self._notify_generation_finished()
 
@@ -267,9 +273,8 @@ class TsukikoBrain:
         and post-generation processing (history append, cleanup).  The counter
         prevents the orchestrator from completing shutdown while any operation is active.
         """
-        with self._lock:
-            if self._active_operations > 0:
-                return True
+        if self.model_manager.active_operations > 0:
+            return True
         return (
             self.model_manager.info.state == ModelLifecycleState.GENERATING
             or self.model_manager.engine.is_generating()
@@ -308,8 +313,12 @@ class TsukikoBrain:
                 logger.debug("Conversational initiative skipped: model is not currently loaded in memory.")
                 return None
 
-            # Increment active operations counter BEFORE prompt preparation
-            self._active_operations += 1
+        # Atomically reserve model operation lease without auto-lazy-loading
+        if not self.model_manager.acquire_operation(allow_lazy_load=False, raise_on_failure=False):
+            logger.debug("Conversational initiative skipped: model manager refused operation admission.")
+            return None
+
+        with self._lock:
             history_snapshot = list(self._history)
             stage = self.personality.disclosure_tracker.stage
             biography = self.personality.biography
@@ -355,9 +364,8 @@ class TsukikoBrain:
             logger.info(f"Tsukiko initiated proactive remark: {clean_remark[:40]}...")
             return clean_remark
         finally:
-            with self._lock:
-                self._active_operations = max(0, self._active_operations - 1)
-                should_notify = (self._active_operations == 0)
+            self.model_manager.release_operation()
+            should_notify = (self.model_manager.active_operations == 0)
             if should_notify:
                 self._notify_generation_finished()
 
@@ -373,7 +381,7 @@ class TsukikoBrain:
                 "state": info.state.value,
                 "is_loaded": info.is_loaded,
                 "is_generating": self.is_generating,
-                "active_operations": self._active_operations,
+                "active_operations": self.active_operations,
                 "model_name": info.model_name,
                 "model_path": str(info.path) if info.path else None,
                 "architecture": info.architecture,
